@@ -1,0 +1,86 @@
+# Musopia 全自动流水线。
+#
+# 一个常驻容器（musopia）跑 daemon.py，按各自周期串行调度五个阶段：
+#   scan -> publish -> sync -> covers -> edit
+# 其余 service 都带 profiles，平时不启动，只用于手动跑一次性命令。
+#
+# 为什么是单容器而不是五个：
+#   五个阶段共用一个 SQLite，多容器各自定时会撞上并发写（database is locked），
+#   而且"发布还没跑完就开始编辑"这种交叉执行会读到半成品数据。
+#   daemon.py 串行调度天然规避了这两个问题。
+
+x-common: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: musopia-script:latest
+  env_file: .env
+  environment: &common-env
+    # 状态目录统一指向 /data（下面 bind mount 过来的宿主机目录）
+    - DATA_DIR=/data
+    # network_mode: host 下没有 host.docker.internal 这条特殊 DNS 记录，
+    # 容器直接共享宿主机网络栈，所以用宿主机自己访问 qB 的真实地址。
+    - QB_HOST=${QB_HOST:-http://127.0.0.1:3020}
+  volumes: &common-volumes
+    # 状态（data.db / output_torrents / daemon_state.json）放在脚本目录，
+    # 而不是匿名命名卷：SMB 上直接看得到、能备份，出问题也能直接查库。
+    # 那份已经回填好 254 个站点 ID 的 data.db 就在这里，不需要任何迁移。
+    - ${STATE_DIR:-.}:/data
+    # 抽元数据、找封面要读音乐文件，只读挂载
+    - ${MUSIC_DIR:-/volume1/video/music}:/downloads:ro
+    - ${INCOMPLETE_DIR:-/volume2/qb_temp/temp_docker_opencd}:/downloads/incomplete:ro
+  # 共享宿主机网络：既能到 127.0.0.1 的 qB，也能正常出网访问站点和图床
+  network_mode: "host"
+
+services:
+  # ==================== 常驻编排器（唯一需要长期运行的） ====================
+  musopia:
+    <<: *common
+    container_name: musopia
+    command: ["python", "daemon.py"]
+    restart: unless-stopped
+
+    # 收到 SIGTERM 后 daemon 会等当前阶段收尾再退出。默认 10s 往往不够
+    # （一次编辑请求 + 校验回读可能十几秒），硬杀会留下改了一半的页面。
+    stop_grace_period: 5m
+
+    healthcheck:
+      test: ["CMD", "python", "healthcheck.py"]
+      interval: 60s
+      timeout: 15s
+      start_period: 60s
+      retries: 3
+
+    # 日志别无限涨，NAS 上很容易被慢慢填满
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # ==================== 以下都是手动一次性任务 ====================
+  # 加了 profiles 就不会被 docker compose up 带起来，只能显式 run。
+  # 用法示例：
+  #   docker compose run --rm tools python check_db.py
+  #   docker compose run --rm tools python sync_site.py --apply
+  #   docker compose run --rm tools python update_metadata.py 14611 --apply --verify
+  tools:
+    <<: *common
+    profiles: ["tools"]
+    container_name: musopia_tools
+    command: ["python", "check_db.py"]
+    restart: "no"
+
+  # 只跑一轮全部阶段就退出（首次部署时验证配置对不对，比直接常驻更容易看结果）
+  once:
+    <<: *common
+    profiles: ["tools"]
+    container_name: musopia_once
+    command: ["python", "daemon.py"]
+    restart: "no"
+    environment:
+      - DATA_DIR=/data
+      - QB_HOST=${QB_HOST:-http://127.0.0.1:3020}
+      # 全阶段跑一轮后就不再有到期任务；配合 DRY_RUN=true 可做无副作用演练
+      - RUN_ON_START=true
+      - DRY_RUN=${DRY_RUN:-true}

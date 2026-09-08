@@ -1,0 +1,36 @@
+# ==================== 密钥与敏感配置 ====================
+# .env 含站点 Cookie、qB 密码、图床 API Key，绝不能进仓库
+.env
+.env.*
+!.env.example
+
+# ==================== 运行时状态与产物 ====================
+# SQLite 库（含 254 条种子记录、发布状态、站点 ID）
+data.db
+data.db-journal
+data.db-wal
+data.db-shm
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# daemon 调度状态与心跳
+daemon_state.json
+daemon_heartbeat
+
+# 生成的种子文件
+output_torrents/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

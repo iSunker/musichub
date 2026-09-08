@@ -1,0 +1,15 @@
+# 统一换行符：仓库内一律 LF。
+# 这个项目在三个环境间流转——NAS(Linux) 上被 Docker 构建、
+# Windows 上通过 SMB 编辑——不统一的话 CRLF 会混进镜像构建上下文
+# （Dockerfile 带 CRLF 的 RUN 指令会报 /bin/sh^M 找不到）。
+* text=auto eol=lf
+
+# Windows 专属脚本保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件不做任何转换
+*.png binary
+*.jpg binary
+*.db binary
+*.torrent binary
