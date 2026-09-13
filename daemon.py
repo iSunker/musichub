@@ -69,6 +69,7 @@ def build_stages():
     按执行优先级从上到下排列。同一轮里多个阶段同时到期时，就按这个顺序串行跑，
     保证"扫描 -> 发布 -> 回填 ID -> 补封面 -> 编辑页面"的依赖不被打乱。
     """
+    import db   # 只为一件事：给 edit 阶段提供"待办数"探针（见下面的 pending）
     dry_run = env_bool("DRY_RUN", False)
 
     def apply_flag(*flags):
@@ -127,7 +128,9 @@ def build_stages():
     #    没有它每轮都要把 250+ 个页面全拉一遍 edit.php 做对比，纯空转。
     if env_bool("ENABLE_EDIT", True):
         cmd = ["python", "update_metadata.py", "--stale-only"] + apply_flag("--apply", "--yes")
-        n = env_int("EDIT_MAX_PER_CYCLE", 20)
+        # 兜底默认值必须与 .env / README 承诺的一致（都是 100）。若这里写成别的数，
+        # .env 一旦丢掉这行键就会**静默**按兜底值跑，慢几倍且不报错。
+        n = env_int("EDIT_MAX_PER_CYCLE", 100)
         if n:
             cmd += ["--limit", str(n)]
         if env_bool("EDIT_VERIFY", True):
@@ -141,6 +144,13 @@ def build_stages():
             "name": "edit",
             "cmd": cmd,
             "interval": env_int("EDIT_INTERVAL", 21600),
+            # ★ 探针式调度：edit 原先只看 EDIT_INTERVAL 这个钟（默认 6h），
+            # 于是 recheck 刚标脏的记录最多要等 6 小时才被推上站点 ——
+            # "想立刻生效"就只能手动开一次性容器，而那正是数据风险的来源。
+            # 现在改成看**有没有活**：有待办就按 cooldown 重跑，清零才回长周期。
+            # 探测口径见 db.count_stale()（与 --stale-only 共用同一份 WHERE）。
+            "pending": db.count_stale,
+            "cooldown": env_int("EDIT_COOLDOWN", 60),
         })
 
 
@@ -275,6 +285,24 @@ def run_stage(stage, timeout):
     return False
 
 
+def _wait_seconds(stage, st, n_fail, max_backoff, pending_now):
+    """
+    这个阶段下次到期前要等多少秒。抽成纯函数是为了能单独测 ——
+    这里的优先级搞反的话，表现不是报错，而是"站点被悄悄敲得更勤"或"该干的没干"。
+
+    优先级：
+      1. 连续失败退避 —— 失败时一定拉长，且**压过**下面的短冷却。
+         不能因为"还有待办"就在失败后继续 60s 一次地试。
+      2. 有活 + 上轮推进过 → 短冷却。
+      3. 其余（没探针 / 没活 / 上轮没推进）→ 常规周期。
+    """
+    if n_fail:
+        return min(stage["interval"] * (2 ** min(n_fail, 6)), max_backoff)
+    if pending_now and not st.get("no_progress"):
+        return max(1, stage.get("cooldown", 60))
+    return stage["interval"]
+
+
 def sleep_interruptible(seconds):
     """按秒切片睡，好让 SIGTERM 能及时生效，而不是睡满一个周期才响应。"""
     deadline = time.time() + seconds
@@ -282,6 +310,26 @@ def sleep_interruptible(seconds):
         if _shutdown:
             return
         time.sleep(min(1.0, max(0.0, deadline - time.time())))
+
+
+def _pending(stage):
+    """
+    该阶段当前的待办数。**没有探针的阶段返回 None**，调用方据此区分
+    "这个阶段不看活"和"看了，结果是 0"。
+
+    ★ 探针出错绝不能带走调度器。主循环每 SCHED_TICK（默认 30s）就会问一次，
+    一次 `database is locked` 或者别的 OperationalError 就让整个 daemon 退出，
+    代价远大于收益。出错一律按 0（"没活"）处理 —— 这是唯一安全的降级方向：
+    退回到常规长周期，最坏情况不过是回到改动前的行为。
+    """
+    fn = stage.get("pending")
+    if not fn:
+        return None
+    try:
+        return fn()
+    except Exception as e:
+        log(f"⚠️  [{stage['name']}] 待办探针出错，本轮按『没活』处理: {e}")
+        return 0
 
 
 def main():
@@ -305,7 +353,8 @@ def main():
         log("❌ 所有阶段都被禁用了（ENABLE_* 全为 false），没有任何事可做，退出。")
         sys.exit(1)
     for s in stages:
-        log(f"   · {s['name']:<8} 每 {s['interval']:>6}s   {' '.join(s['cmd'])}")
+        extra = f"   有活时 {s['cooldown']}s 重跑" if s.get("cooldown") else ""
+        log(f"   · {s['name']:<8} 每 {s['interval']:>6}s   {' '.join(s['cmd'])}{extra}")
     log("=" * 60)
 
     # 建表放在这里做一次，后面各阶段的 init_db() 都是幂等的补刀
@@ -339,18 +388,33 @@ def main():
 
             # 连续失败退避：1x, 2x, 4x... 上限 MAX_BACKOFF
             n_fail = fails.get(name, 0)
-            wait = stage["interval"]
-            if n_fail:
-                wait = min(stage["interval"] * (2 ** min(n_fail, 6)), max_backoff)
+            pending_now = _pending(stage)      # None = 这个阶段不看活
+            wait = _wait_seconds(stage, st, n_fail, max_backoff, pending_now)
 
             if now - last < wait:
                 continue
 
+            before = pending_now
             ok = run_stage(stage, stage_timeout)
+            after = _pending(stage) if before is not None else None
 
             st["last_run"] = time.time()
             st["last_ok"] = ok
             st["last_finish"] = datetime.now().isoformat(timespec="seconds")
+            if before is not None:
+                # ★ 防呆：这一轮"跑完了"不等于"推进了"。
+                # 像 14749 那种永远失败（找不到 takeedit 表单）的记录会一直挂在待办里，
+                # 若判据只是"还有活就短冷却"，就会变成每 60s 敲一次站点 —— 比改动前更糟。
+                # 真正的判据是"待办数有没有下降"：没降就退回常规周期，不再快跑。
+                #
+                # `before > 0` 这个前置不能省：本轮本来就没活的话，`0 >= 0` 会被误判成
+                # "没推进"，刷出一条毫无意义的日志，还把 no_progress 白白置 True ——
+                # 而那个标志是用来标记"卡住了"的。
+                # 该标志随状态文件持久化，跑出一次进展就会自动清掉。
+                st["no_progress"] = before > 0 and after >= before
+                if st["no_progress"] and ok:
+                    log(f"⏸️  [{name}] 本轮未推进（待办 {before} → {after}），"
+                        f"退回常规周期 {stage['interval']}s")
             if ok:
                 fails[name] = 0
             else:

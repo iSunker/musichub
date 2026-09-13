@@ -98,15 +98,23 @@ def get_pending_publish():
     return rows
 
 
-def get_published(only_missing_id=False, torrent_id=None, only_with_cover=False,
-                  only_stale=False):
-    """
-    已在站点上存在的任务。
+# ── 「本地比站点新」的判据 ────────────────────────────────────────────────
+# get_published(only_stale=True) 的**筛选**和 count_stale() 的**计数**必须
+# 用同一个字符串。★ 别在两处各写一份：
+#
+# daemon 的 edit 调度探针就是拿 count_stale() 判断"还有没有活"。一旦它和
+# 实际筛选漂移（比如 get_published 这边加了条件、count_stale 那边没跟），
+# 就会变成「探针说有活 → 60s 后重跑 → update_metadata 一条都选不出来 →
+# 探针还说有活」的高频空转，而且**不会报任何错**，只表现为站点被反复敲。
+STALE_CONDITION = "(site_synced_at IS NULL OR updated_at > site_synced_at)"
 
-    only_stale=True 时只返回"本地内容比站点新"的记录：从没同步过
-    （site_synced_at IS NULL），或同步之后本地又变过（updated_at > site_synced_at）。
-    定时任务必须用这个，否则每轮都要把 250+ 个页面全部拉一遍 edit.php 做对比，
-    纯属拿站点带宽换空转。
+
+def _published_where(torrent_id=None, only_missing_id=False,
+                     only_with_cover=False, only_stale=False):
+    """
+    get_published() 与 count_stale() 共用的 WHERE 构造，返回 (where, params)。
+
+    这两个函数**必须选出同一个集合** —— 抽到这里就是为了让它们没法跑偏。
     """
     where = ["site_status = 'EXISTS'"]
     params = []
@@ -123,8 +131,25 @@ def get_published(only_missing_id=False, torrent_id=None, only_with_cover=False,
         where.append("cover_url IS NOT NULL AND cover_url != ''")
 
     if only_stale:
-        where.append("(site_synced_at IS NULL OR updated_at > site_synced_at)")
+        where.append(STALE_CONDITION)
 
+    return where, params
+
+
+def get_published(only_missing_id=False, torrent_id=None, only_with_cover=False,
+                  only_stale=False):
+    """
+    已在站点上存在的任务。
+
+    only_stale=True 时只返回"本地内容比站点新"的记录：从没同步过
+    （site_synced_at IS NULL），或同步之后本地又变过（updated_at > site_synced_at）。
+    定时任务必须用这个，否则每轮都要把 250+ 个页面全部拉一遍 edit.php 做对比，
+    纯属拿站点带宽换空转。
+    """
+    where, params = _published_where(torrent_id=torrent_id,
+                                     only_missing_id=only_missing_id,
+                                     only_with_cover=only_with_cover,
+                                     only_stale=only_stale)
 
     conn = connect()
     cur = conn.cursor()
@@ -135,6 +160,27 @@ def get_published(only_missing_id=False, torrent_id=None, only_with_cover=False,
     rows = _rows_to_dicts(cur)
     conn.close()
     return rows
+
+
+def count_stale():
+    """
+    现在有多少条会被 `--stale-only` 选中。给 daemon 的 edit 调度探针用。
+
+    只数不取：待办里的记录带 log_content / logs_json 这些大文本，而调度 tick
+    每 30s 就要问一次，把 13 列全拉一遍纯属浪费 —— 这里只回一个整数。
+
+    口径与 get_published(only_stale=True) 严格一致（共用 _published_where）。
+    daemon 的 edit 命令不带 --only-cover、也不指定 torrent_id，所以这里用
+    默认参数选出的就是同一个集合。
+    """
+    where, params = _published_where(only_stale=True)
+
+    conn = connect()
+    n = conn.execute(
+        f"SELECT count(*) FROM tasks WHERE {' AND '.join(where)}", params
+    ).fetchone()[0]
+    conn.close()
+    return n
 
 
 def get_missing_cover(published_only=True):

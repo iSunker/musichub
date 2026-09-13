@@ -41,7 +41,7 @@ qBittorrent(:3020, 分类 opencd)
 | 搞清调度为什么是单容器 | **为什么是单容器 + 自研调度** |
 | **下一步该做什么** | **当前状态与下一步** |
 | 想看完整决策理由和踩过的坑 | **SUMMARY.md** |
-| 想看踩过哪些坑、根因是什么 | **SUMMARY §6 坑与归因总表**（23 项） |
+| 想看踩过哪些坑、根因是什么 | **SUMMARY §6 坑与归因总表**（24 项） |
 
 > **两份文档怎么分工**：
 > **README = INFO 层**（操作手册：命令、步骤、症状→解法）；
@@ -60,16 +60,16 @@ musopia_script2/                    # NAS 部署目录（compose 就放这里，
 ├─ .env                             # 站点 Cookie / qB 密码 / 图床 Key（唯一密钥来源，绝不进仓库）
 ├─ .env.example                     # 占位符模板（全是 changeme）
 ├─ config.py                 60 行  # 统一配置；密钥缺失直接终止，不留"看起来能跑"的默认值
-├─ db.py                    254 行  # ★唯一 schema 来源 + 自动迁移 + 所有查询
+├─ db.py                    300 行  # ★唯一 schema 来源 + 自动迁移 + 所有查询
 ├─ descr.py                 255 行  # ★副标题 / BBCode 简介 / 站点下拉项推断（发布与编辑共用）
-├─ assets.py                434 行  # 封面查找、图床上传、日志与 CUE 解析
+├─ assets.py                433 行  # 封面查找、图床上传、日志与 CUE 解析
 ├─ musopia.py               370 行  # 站点客户端（登录检查、上传列表、读改写式编辑）
 ├─ run.py                   233 行  # 扫描 qB → 提元数据 → 生成种子 → 入库
 ├─ publish.py               176 行  # 发布新种子 + 回加 qB 做种
-├─ update_metadata.py       263 行  # ★批量编辑已发布页面
+├─ update_metadata.py       264 行  # ★批量编辑已发布页面
 ├─ sync_site.py             119 行  # 回填 site_torrent_id（编辑的前置条件）
 ├─ backfill_covers.py       144 行  # 补历史缺失的封面
-├─ daemon.py                371 行  # ★单容器串行调度五个阶段
+├─ daemon.py                434 行  # ★单容器串行调度五个阶段
 ├─ check_db.py               53 行  # 状态速览，排查问题先跑这个
 ├─ healthcheck.py            55 行  # 容器健康检查（读写心跳文件）
 ├─ deploy.sh                        # ★本地→NAS 白名单同步（开发工具，不上 NAS）
@@ -342,7 +342,8 @@ docker compose up -d --build --remove-orphans
 | `DRY_RUN` | `false` | `true` = 全阶段只预览，自动摘掉 `--apply` |
 | `ENABLE_<阶段>` | `true` | 单独关某个阶段，如 `ENABLE_PUBLISH=false` |
 | `<阶段>_INTERVAL` | 见 `.env` | 周期秒数。`sync` 一天一次够了 |
-| `EDIT_MAX_PER_CYCLE` | `100` | 每轮最多改几个页面 |
+| `EDIT_MAX_PER_CYCLE` | `100` | 每轮最多改几个页面。★ 代码里的兜底值也是 `100`，两处必须一致 —— 否则 `.env` 一旦缺这行键，会**静默**按兜底值慢跑还不报错 |
+| `EDIT_COOLDOWN` | `60` | **有变更待推时**的重跑间隔（秒）；待办清零才回到 `EDIT_INTERVAL`。见下 |
 | `EDIT_RATE_PER_MIN` | `10` | **每分钟处理几个种子**，见下 |
 | `EDIT_REQUEST_INTERVAL` | `1` | 两次 HTTP 请求最小间隔 |
 | `RUN_ON_START` | `false` | 启动就跑一轮，不等第一个周期。现设为 `false`：重启/重建容器不会马上敲站点，按 state 文件里记录的各阶段周期到期再动 |
@@ -364,11 +365,24 @@ docker compose --profile tools run --rm tools \
 限速用的是**绝对时间基准**（第 N 条在 `起点 + (N-1)×6秒` 才开始），不是每轮 `sleep(6)`。
 后者在站点响应慢的时候会把延迟累加上去，实际速率越跑越低。
 
-默认配置下 `EDIT_INTERVAL=21600` + `EDIT_MAX_PER_CYCLE=100` + `EDIT_RATE_PER_MIN=10`：
-每 6 小时一轮，一轮最多 100 个但受限速约束实际跑 10 分钟左右。
-250 条积压大约 3 轮清完，之后每轮只处理真正有变化的少数几条。
+默认配置下 `EDIT_MAX_PER_CYCLE=100` + `EDIT_RATE_PER_MIN=10`：一轮最多 100 个，
+受限速约束实际跑 10 分钟左右。
 
-### 三个必须知道的保护机制
+### 有变更就连续跑，没变更才按 6 小时
+
+`EDIT_INTERVAL=21600` 现在只是**没活时**的兜底周期。daemon 每跑完一轮 edit 都会问一次
+`db.count_stale()`：还有待办就隔 `EDIT_COOLDOWN`（默认 60s）接着跑，**待办清零才回到长周期**。
+
+于是 250 条积压不再是「3 轮 × 6h ≈ 18 小时」，而是连着跑 ≈ **半小时**清空。
+你只要让 `run.py --recheck` 把记录标脏，daemon 自己会在一分钟内跟上 ——
+**不必再手动开一次性容器**（那正是上一轮数据风险的入口）。
+
+> ★ **判据不是「还有没有待办」，是「待办有没有减少」。** 14749 那种永远失败
+> （`找不到 takeedit 表单`）的记录会一直挂在待办里；只看「还有活」就变成每 60s 敲一次站点，
+> **比改动前更糟**。所以每轮比较跑前/跑后的待办数，没减少就退回长周期，
+> 日志留下 `⏸️ [edit] 本轮未推进（待办 N → N）`。详见 **SUMMARY §3.16**。
+
+### 四个必须知道的保护机制
 
 **1. 空库拒绝启动。** 如果 `/data` 挂错或被重建，库就是空的，`run.py` 会把 qB 里
 所有种子当成新任务，`publish.py` 紧接着把已经发过的资源**重复发一遍**，站点上出现
@@ -385,6 +399,10 @@ docker compose --profile tools run --rm tools \
 
 用 `IS NOT` 而不是 `!=`：SQLite 里 `NULL != 'x'` 结果是 `NULL`（被当假），
 会漏掉「字段从空补成有值」这类最常见的变化 —— 比如 `log_content` 首次被填上。
+
+**4. 编辑的调度看「待办有没有减少」，不看「还有没有待办」。** 见「有变更就连续跑」——
+没有这条防呆，**一条永远失败的记录就能把 daemon 变成每 60 秒敲一次站点**，
+比定时轮询还糟。
 
 ---
 
@@ -502,7 +520,7 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 | --- | --- |
 | `Cookie 已失效` | 更新 `.env` 里的 `MUSOPIA_COOKIE`。各阶段会指数退避，不会疯狂重试 |
 | 启动即报「缺少必需的环境变量 X」 | `config.py` 的设计：密钥不留默认值。补 `.env` |
-| 容器起来就退出，日志写「拒绝启动」 | 空库保护触发了，先确认 `/data` 挂对；详见「三个必须知道的保护机制」 |
+| 容器起来就退出，日志写「拒绝启动」 | 空库保护触发了，先确认 `/data` 挂对；详见「四个必须知道的保护机制」 |
 | 某条记录「被跳过」 | 缺 `site_torrent_id`，跑 `sync_site.py --apply` |
 | 编辑后页面没有图 | 本地 `cover_url` 为空时 edit 阶段会自动从站点简介回收封面；站点也没有的，跑 `backfill_covers.py --apply` 补齐后 `set_cover` 会刷新 `updated_at`，记录重新变 stale，下轮自动把封面写进简介 |
 | 日志出现「从站点简介回收」 | 历史数据修复：本地 `cover_url` 曾被旧版 bug 抹空，现已从站点页面找回并回写库 |
@@ -510,6 +528,7 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 | `找不到 takeedit 表单` | 种子已被删除，或当前账号无编辑权限 |
 | 提示「无需修改」 | 站点内容已和本地一致，属正常（脚本可安全重复运行） |
 | 改了本地数据但 edit 阶段说没任务 | `--stale-only` 看 `updated_at`。注意 `save_task()` 只在**值真的变了**时才刷新它；手改库请自己带上 `updated_at=CURRENT_TIMESTAMP` |
+| **改了记录但页面迟迟不更新** | 有变更时 edit 应在 60s 内跟上。若长时间不动，看日志有没有 `⏸️ [edit] 本轮未推进`（卡在某条永远失败的记录上，如缺 takeedit 表单）；否则查 `docker compose logs musopia` 里 edit 阶段是否在报错（Cookie 失效会走指数退避） |
 | 容器 unhealthy | 心跳停了。`docker compose logs musopia` 看卡在哪个阶段 |
 | 想立刻重跑某阶段 | 删掉 `daemon_state.json` 里对应的 `last_run`，或整个文件删掉重启 |
 | 改了代码但行为没变 | `restart` 不重新构建镜像。用 `docker compose up -d --build` |
@@ -537,9 +556,11 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 254 条记录、站点 ID 已回填。本机在 `D:\Projects\musopia\zhuanzhong` 有一份完整开发副本。
 本文档与 `SUMMARY.md` 由本轮补齐（原 `走过的弯路.md` 已并入 `SUMMARY.md` §6）。
 
-**✅ 本轮已了结**：
+**✅ 已了结**：
 
-- **工作区行尾已统一为 LF** —— 被跟踪的 22 个文件现在全部是 LF。
+- **commit 已推 `origin/main`；`deploy.sh` 已真实跑通**（字节级核验一致；`data.db` / `.env` 未动，
+  部署前自动备份在 NAS 的 `.deploy-backup/<时间戳>/`）。
+- **全树文本规范：被跟踪文件全部 LF，且全都有结尾换行。**
   ★ **修法有坑**：`git checkout-index -a -f` **无效** —— 它跳过「索引与工作区一致」的文件，
   而 `git status` 干净恰恰就是这种情况，所以它一个文件都不重写（实测跑完 CR 数纹丝不动）。
   必须**先删再从索引恢复**：
@@ -547,16 +568,15 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
   git ls-files -z | xargs -0 rm -f && git checkout -- .
   ```
   索引里本来就是 LF，所以这一步**不产生 commit**。未跟踪的 `.env` / `data.db` 不受影响。
-- **副作用：本地与 NAS 的字节不再相同** —— 本地是 LF、NAS 仍是 CRLF，
-  于是 `bash deploy.sh` 现在会报 **11 个文件有差异**（10 个纯行尾差异 + `README.md` 内容重写）。
-  这不是错误，是一次**待同步**；同步后 NAS 也会统一成 LF。
 
-**🔴 下一步（按优先级）**：
+**🔴 下一步**：
 
-1. **推送本地 commit 到 `origin/main`** —— `1a8b1fe` / `ebbffcc` / `fec1182` 目前只在本地。
-   推之前先核实 `.env` 没被跟踪（本机这份是**从 NAS 拷来的真凭据**）。
-2. **让 deploy.sh 走一遍真实流程** —— 目前只在沙箱里测过，没真正部署过。
-   顺带把上面那 11 个文件同步上去（含行尾统一），之后记得在 NAS 上
-   `docker compose up -d --build`。不执行也不影响运行 —— NAS 现状本来就是能跑的。
+1. **把本轮调度改动送上生产** —— `db.py` / `daemon.py` / `.env.example` / 两份文档
+   （见「有变更就连续跑」与 **SUMMARY §3.16**）。
+   ⚠️ `.env` **不在 deploy.sh 白名单里**，NAS 上要**手动**加 `EDIT_COOLDOWN=60`
+   （不加也能跑 —— 代码兜底值就是 60）。
+2. **NAS 上 `sudo docker compose up -d --build`**（**不是** `restart`，代码是 COPY 进镜像的）。
+   ⚠️ 这条会让五个阶段**全部跑一遍**（`DRY_RUN=false` 且 `last_run` 全过期）——
+   发布/编辑会真的敲站点，动手前先确认时机。
 
 详见 **SUMMARY.md**。
