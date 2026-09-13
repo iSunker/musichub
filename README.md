@@ -514,18 +514,26 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 254 条记录、站点 ID 已回填。本机在 `D:\Projects\musopia\zhuanzhong` 有一份完整开发副本。
 本文档与 `SUMMARY.md` / `走过的弯路.md` 由本轮补齐。
 
+**✅ 本轮已了结**：
+
+- **工作区行尾已统一为 LF** —— 被跟踪的 22 个文件现在全部是 LF。
+  ★ **修法有坑**：`git checkout-index -a -f` **无效** —— 它跳过「索引与工作区一致」的文件，
+  而 `git status` 干净恰恰就是这种情况，所以它一个文件都不重写（实测跑完 CR 数纹丝不动）。
+  必须**先删再从索引恢复**：
+  ```bash
+  git ls-files -z | xargs -0 rm -f && git checkout -- .
+  ```
+  索引里本来就是 LF，所以这一步**不产生 commit**。未跟踪的 `.env` / `data.db` 不受影响。
+- **副作用：本地与 NAS 的字节不再相同** —— 本地是 LF、NAS 仍是 CRLF，
+  于是 `bash deploy.sh` 现在会报 **11 个文件有差异**（10 个纯行尾差异 + `README.md` 内容重写）。
+  这不是错误，是一次**待同步**；同步后 NAS 也会统一成 LF。
+
 **🔴 下一步（按优先级）**：
 
-1. **推送本地 2 个 commit 到 `origin/main`** —— `1a8b1fe`、`ebbffcc` 目前只在本地。
+1. **推送本地 commit 到 `origin/main`** —— `1a8b1fe` / `ebbffcc` / `fec1182` 目前只在本地。
    推之前先核实 `.env` 没被跟踪（本机这份是**从 NAS 拷来的真凭据**）。
-2. **统一工作区行尾为 LF** —— 实测**被跟踪的 20 个文件里 12 个是 CRLF、8 个已是 LF**
-   （完整清单见 SUMMARY §7 第 1 条）。`.gitattributes` 声明 `* text=auto eol=lf`，
-   注释里写明「Dockerfile 带 CRLF 的 RUN 指令会报 `/bin/sh^M 找不到`」。
-   注意**索引里已经是 LF**（所以 `git status` 干净），要修的是**工作区**：
-   ```bash
-   git checkout-index -a -f     # 重写全部被跟踪文件；★ 执行前先提交所有改动
-   ```
-3. **deploy.sh 尚未实际部署过一次** —— 本机与 NAS 目前内容一致（就是从 NAS 拷来的），
-   要等下次改完代码才真正走一遍。
+2. **让 deploy.sh 走一遍真实流程** —— 目前只在沙箱里测过，没真正部署过。
+   顺带把上面那 11 个文件同步上去（含行尾统一），之后记得在 NAS 上
+   `docker compose up -d --build`。不执行也不影响运行 —— NAS 现状本来就是能跑的。
 
 详见 **SUMMARY.md**。
