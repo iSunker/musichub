@@ -19,6 +19,95 @@
 | `backfill_covers.py` | 补历史缺失的封面 |
 | `check_db.py` | 状态速览，排查问题先跑这个 |
 
+## 页面内容渲染（descr.py）
+
+站点简介结构固定，**发布(takeupload)与编辑(takeedit)共用** `build_form_fields()` 一处渲染，
+改一处对新种子和已发布的 250+ 个页面同时生效：
+
+```
+封面图（[center][img]…）
+  ↓
+曲目列表（[quote][b]曲目列表：[/b] …）
+  ↓
+抓轨日志（折叠代码，见下）
+```
+
+**抓轨日志用折叠代码，不再塞进 `[quote]`。** 旧版把整段 EAC/XLD 日志放进 `[quote]`，
+页面被撑得很长。现在渲染成 NexusPHP 折叠块：
+
+- 单 CD：`[spoiler=LOG][code] …日志原文… [/code][/spoiler]`
+- 多 CD：每碟一块 —— `[spoiler=CD1 LOG][code]…[/code][/spoiler]` `[spoiler=CD2 LOG][code]…[/code][/spoiler]`
+  （碟号从 CD 子目录名 / 日志文件名正则识别，识别不出就按路径顺序编号）
+
+**副标题不再和主标题重复。** 主标题已是 `歌手 - 专辑 年份 - 格式 整轨 - OpenCD`，
+副标题改为客观的曲目/碟数信息，并在**渲染时重算**（不是只在扫描时算好存库），
+因此已发布页面重新编辑也会更新：
+
+- 单碟：`全 N 曲`
+- 多碟：`DCD · 全 N 曲`（如 `2CD · 全 24 曲`）
+- 数不出曲目时回落到库里旧值/种子名，不硬造残缺文本
+
+**曲目列表兜底。** 有 CUE 就聚合所有 CUE 的 `TITLE`（多 CUE 加 `【CD1】/【CD2】` 分段）；
+分轨专辑无 CUE 时用音频文件名（去扩展名）兜底，避免「曲目为空」。
+
+> 简介不再写「专辑名称/副标题/原始名称」这类与页面顶部表格重复的信息，
+> 也不再追加「由自动化发布程序生成。」署名。
+
+数据库新增列 `logs_json`（`db.py` schema，`init_db()` 自动给旧库补列）：
+多碟日志序列化存此；`log_content`/`log_filename` 仍保留首个日志供兼容显示/预览。
+
+## 改完代码怎么测（Docker）
+
+代码是 `COPY` 进镜像的，**改完必须先重建镜像**，`docker compose restart` 跑的还是旧代码：
+
+```bash
+docker compose build
+```
+
+下面用 `tools` profile 的一次性容器，跑完即删（`--rm`），不影响常驻的 `musopia`：
+
+```bash
+# ① 渲染/副标题单测（不连站点、不连 qB，最快）
+docker compose --profile tools run --rm -T tools python - <<'PY'
+import descr
+tl = """a
+b
+c"""
+print(descr.derive_small_descr(tl, 1))            # 期望: 全 3 曲
+tl2 = """【CD1】
+a
+b
+【CD2】
+c"""
+print(descr.derive_small_descr(tl2, 2))           # 期望: 2CD · 全 3 曲
+print(descr.build_descr(log_content="EAC LOG ..."))   # 含 [spoiler=LOG][code]…[/code][/spoiler]
+print(descr.build_descr(logs=[{"label":"CD1 LOG","content":"A"},
+                              {"label":"CD2 LOG","content":"B"}]))
+PY
+
+# ② 重扫回填 logs_json + 曲目（连 qB、写本地库、不碰站点）
+docker compose --profile tools run --rm tools python run.py --recheck --no-upload-cover --limit 3
+
+# ③ 发布预览（dry-run，看日志是折叠块）
+docker compose --profile tools run --rm tools python publish.py --dry-run --limit 3
+
+# ④ 编辑预览（默认 dry-run，看副标题/简介 diff）
+docker compose --profile tools run --rm tools python update_metadata.py --limit 3
+
+# ⑤ 单条试水并回读校验（换成真实的 site_torrent_id）
+docker compose --profile tools run --rm tools python update_metadata.py 14611 --apply --verify
+```
+
+> 已发布的**分轨**旧记录曲目为空、**多 CD** 旧记录 `logs_json` 为空（会被当 1 碟）。
+> 要让它们副标题正确显示，需先全量重扫回填、再批量编辑：
+>
+> ```bash
+> docker compose --profile tools run --rm tools python run.py --recheck --no-upload-cover
+> docker compose --profile tools run --rm tools python update_metadata.py --stale-only --apply --yes --rate 10
+> ```
+
+确认无误后让常驻容器生效：`docker compose up -d --build`（不是 `restart`）。
+
 ## 首次使用顺序
 
 ```bash

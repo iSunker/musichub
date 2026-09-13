@@ -22,6 +22,9 @@ COLUMNS = [
     ("tracklist", "TEXT"),
     ("log_content", "TEXT"),
     ("log_filename", "TEXT"),
+    # 多 CD 的每碟日志（[{"label","filename","content"}, ...]）序列化后存这里。
+    # log_content / log_filename 仍保留首个日志，供旧显示/预览兼容。
+    ("logs_json", "TEXT"),
     ("content_path", "TEXT"),
     ("site_status", "TEXT DEFAULT 'UNKNOWN'"),
     ("site_torrent_id", "TEXT"),
@@ -72,7 +75,7 @@ def init_db():
 
 TASK_FIELDS = (
     "info_hash, torrent_name, formatted_title, small_descr, cover_url, "
-    "tracklist, log_content, log_filename, torrent_file, content_path, "
+    "tracklist, log_content, log_filename, logs_json, torrent_file, content_path, "
     "site_status, site_torrent_id"
 )
 

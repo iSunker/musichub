@@ -4,6 +4,7 @@
 发布(takeupload.php)和编辑(takeedit.php)必须用同一份渲染逻辑，否则编辑一次
 页面内容就跟发布时不一样，很难排查。所以这里是唯一来源。
 """
+import json
 import re
 
 # ==================== 站点字段字典（来自 edit.php 表单实测） ====================
@@ -91,22 +92,30 @@ def detect_tags(*sources):
 
 # ==================== 副标题 ====================
 
-def build_small_descr(artist=None, album=None, year=None, fmt=None,
-                      track_type=None, fallback=""):
+def derive_small_descr(tracklist="", disc_count=None, fallback=""):
     """
-    副标题：`歌手 - 专辑 (年份) | 格式 整轨/分轨`
-    任何一段缺失就自然省略，不留下 " -  () | " 这种残缺文本。
+    副标题只放主标题里没有的客观信息：曲目数（多碟再带碟数）。
+    主标题已是「歌手 - 专辑 年份 - 格式 整轨 - OpenCD」，副标题再抄一遍纯冗余。
+
+    - 有效曲目 = 非空、且不以「【」开头的行（「【CD1】」这类是分段表头，不计数）。
+    - disc_count 缺省时按 tracklist 里的「【」表头数推断，仍无则按 1 碟。
+    - 数不出曲目（n==0，多见于历史分轨记录 tracklist 为空）就回退 fallback，不硬造。
     """
-    left = " - ".join(p for p in (artist, album) if p and str(p).strip())
-    if year and str(year).strip():
-        left = f"{left} ({year})" if left else f"({year})"
+    lines = [l.strip() for l in (tracklist or "").splitlines() if l.strip()]
+    header_count = sum(1 for l in lines if l.startswith("【"))
+    tracks = [l for l in lines if not l.startswith("【")]
+    n = len(tracks)
+    if n == 0:
+        return fallback or ""
+    d = disc_count if disc_count else (header_count or 1)
+    if d > 1:
+        return f"{d}CD · 全 {n} 曲"
+    return f"全 {n} 曲"
 
-    right = " ".join(p for p in (fmt, track_type) if p and str(p).strip())
 
-    parts = [p for p in (left, right) if p]
-    result = " | ".join(parts)
-    result = re.sub(r"\s+", " ", result).strip(" |-")
-    return result or (fallback or "")
+def build_small_descr(tracklist="", disc_count=1, fallback=""):
+    """副标题对外入口（run.py 扫描时用）。渲染时 build_form_fields 会再重算一次。"""
+    return derive_small_descr(tracklist, disc_count=disc_count, fallback=fallback)
 
 
 # ==================== BBCode 简介 ====================
@@ -126,38 +135,51 @@ def extract_cover_url(descr_text):
     return m.group(1) if m else ""
 
 
-def build_descr(formatted_title="", torrent_name="", cover_url="", tracklist="",
-                log_content="", log_filename="", small_descr="", extra_note=None):
+def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
+                logs=None, extra_note=None):
     """
     生成种子页面 BBCode 简介。
-    结构：封面图 -> 基本信息 -> 曲目列表 -> 抓轨日志 -> 署名
+    结构：封面图 -> 曲目列表 -> 抓轨日志（折叠代码）
+    末尾不追加任何程序署名兜底（旧版会写"由自动化发布程序生成。"）。
+
+    专辑名称/副标题/原始名称不写进简介：站点页面顶部的表格已经展示了主标题、
+    副标题和种子文件名，简介里再重复一遍纯属冗余。
+
+    日志用 NexusPHP 折叠代码 [spoiler=标签][code]…[/code][/spoiler]，页面不会被
+    整段抓轨日志撑爆。多 CD 时每碟一块：
+        logs = [{"label":"CD1 LOG","content":..}, {"label":"CD2 LOG","content":..}]
+    单 CD 传 log_content/log_filename 即可（内部包成一条 label="LOG"）。
     """
     blocks = []
 
     if cover_url and str(cover_url).strip():
         blocks.append(f"[center][img]{cover_url.strip()}[/img][/center]")
 
-    info_lines = []
-    if formatted_title:
-        info_lines.append(f"[b]专辑名称：[/b]{formatted_title}")
-    if small_descr:
-        info_lines.append(f"[b]副标题：[/b]{small_descr}")
-    if torrent_name:
-        info_lines.append(f"[b]原始名称：[/b]{torrent_name}")
-    if info_lines:
-        blocks.append("\n".join(info_lines))
-
     if tracklist and str(tracklist).strip():
         body = _truncate(tracklist, TRACKLIST_MAX_CHARS, "曲目列表过长已截断")
         blocks.append(f"[quote][b]曲目列表：[/b]\n{body}[/quote]")
 
-    if log_content and str(log_content).strip():
-        title = f"抓轨日志（{log_filename}）" if log_filename else "抓轨日志"
-        body = _truncate(log_content, LOG_MAX_CHARS, "日志过长已截断")
-        # 长日志放 quote 里，页面不至于被无限拉长
-        blocks.append(f"[quote][b]{title}：[/b]\n{body}[/quote]")
+    # 统一成 [{label, content}, ...]：优先用多碟 logs，否则退回单条 log_content。
+    items = list(logs) if logs else []
+    if not items and log_content and str(log_content).strip():
+        items = [{"label": "LOG", "content": log_content, "filename": log_filename}]
 
-    blocks.append(extra_note if extra_note is not None else "由自动化发布程序生成。")
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not (content and str(content).strip()):
+            continue
+        label = item.get("label") or "LOG"
+        body = _truncate(content, LOG_MAX_CHARS, "日志过长已截断")
+        # 兜底：日志里若真出现 [/code]/[/spoiler] 字面量会提前截断折叠块，替换成全角
+        body = body.replace("[/code]", "［/code］").replace("[/spoiler]", "［/spoiler］")
+        blocks.append(f"[spoiler={label}][code]{body}[/code][/spoiler]")
+
+    # 不再追加任何程序署名/元数据复读（旧版会写"由自动化发布程序生成。"
+    # 和"专辑名称/副标题/原始名称"），页面顶部表格已展示这些信息。
+    if extra_note is not None:
+        blocks.append(extra_note)
 
     return "\n\n".join(blocks)
 
@@ -174,16 +196,35 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
 
     title = task.get("formatted_title") or task.get("torrent_name") or ""
     raw = task.get("torrent_name") or ""
-    small = task.get("small_descr") or ""
+
+    # 多碟日志存在 logs_json 里（run.py 写入）。解析失败就退回单条 log_content。
+    logs = None
+    raw_logs = task.get("logs_json")
+    if raw_logs:
+        try:
+            parsed = json.loads(raw_logs)
+            if isinstance(parsed, list) and parsed:
+                logs = parsed
+        except (ValueError, TypeError):
+            logs = None
+
+    tracklist = task.get("tracklist") or ""
+
+    # 副标题渲染时重算：已发布的老记录当初存的是「歌手-专辑(年)|格式」这种和主标题
+    # 重复的旧值，只有在这里重算才能在下一次编辑时刷新成「全 N 曲 / DCD」。
+    # 数不出曲目（老分轨记录 tracklist 为空）就退回库里旧值，不硬造。
+    small = derive_small_descr(
+        tracklist,
+        disc_count=len(logs) if logs else None,
+        fallback=task.get("small_descr") or "",
+    )
 
     descr = build_descr(
-        formatted_title=title,
-        torrent_name=raw,
         cover_url=task.get("cover_url") or "",
-        tracklist=task.get("tracklist") or "",
+        tracklist=tracklist,
         log_content=task.get("log_content") or "",
         log_filename=task.get("log_filename") or "",
-        small_descr=small,
+        logs=logs,
     )
 
     fields = {

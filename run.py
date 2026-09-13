@@ -64,12 +64,9 @@ def parse_title(raw_title, folder_path):
     formatted_title = f"{core} {year} - {fmt} {track_type} - OpenCD"
     formatted_title = re.sub(r"\s+", " ", formatted_title).strip()
 
-    small_descr = descr.build_small_descr(
-        artist=artist, album=album, year=year, fmt=fmt,
-        track_type=track_type, fallback=raw_title,
-    )
-
-    return formatted_title, small_descr, fmt, track_type
+    # 副标题不在这里算：它只依赖曲目/碟数，由 main() 拿到 tracklist/logs 后
+    # 用 descr.build_small_descr 生成（渲染时 build_form_fields 还会再重算一次）。
+    return formatted_title, fmt, track_type
 
 
 def create_musopia_torrent(content_path, save_path):
@@ -135,20 +132,24 @@ def main():
         print("-" * 60)
         print(f"扫描: {name}")
 
-        log_content, log_filename = assets.read_log(content_path)
-        if not log_filename:
+        logs = assets.read_logs(content_path)
+        if not logs:
             print("❌ 跳过：目录里没有 .log 抓轨日志")
             db.save_task(info_hash=info_hash, torrent_name=name, status="NO_LOG_FILE",
                          reason="目录里没有 .log 抓轨日志", content_path=content_path)
             stats["no_log"] += 1
             continue
 
-        formatted_title, small_descr, fmt, track_type = parse_title(name, content_path)
+        # log_content/log_filename 仍存首个日志，兼容旧的显示/预览；多碟完整日志走 logs_json。
+        log_content, log_filename = logs[0]["content"], logs[0]["filename"]
+
+        formatted_title, fmt, track_type = parse_title(name, content_path)
         tracklist = assets.read_tracklist(content_path)
+        small_descr = descr.build_small_descr(tracklist, disc_count=len(logs), fallback=name)
 
         print(f"✔ 主标题: {formatted_title}")
         print(f"✔ 副标题: {small_descr}")
-        print(f"📄 日志: {log_filename} ({len(log_content)} 字符)")
+        print(f"📄 日志: {len(logs)} 个 [" + ", ".join(x['label'] for x in logs) + "]")
         print(f"🎵 曲目: {len(tracklist.splitlines())} 行")
 
         # 封面：库里已有 URL 就直接复用（重做场景），绝不重复上传。
@@ -195,6 +196,7 @@ def main():
             tracklist=tracklist,
             log_content=log_content,
             log_filename=log_filename,
+            logs_json=json.dumps(logs, ensure_ascii=False),
             content_path=content_path,
         )
         stats["ok"] += 1
@@ -209,6 +211,7 @@ def main():
             "tracklist": tracklist,
             "log_filename": log_filename,
             "log_content": log_content,
+            "logs": logs,
             "torrent_file": os.path.basename(torrent_file),
             "content_path": content_path,
         }
