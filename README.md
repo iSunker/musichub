@@ -301,6 +301,12 @@ docker compose up -d --build      # ✅ 重新构建镜像并替换容器，新�
 
 `restart` 后看不到新行为、日志里没有新输出，**九成是这个原因**。
 
+> **★ 顺序也有讲究**：`up -d --build` 必须跑在**任何** `--profile tools run` **之前**。
+> 三个 service（`musopia` / `tools` / `once`）共用同一个镜像 `musopia-script:latest`
+> （compose 里 `x-common` 锚点定的），而 `docker compose run` **只在镜像不存在时才构建** ——
+> 镜像没重建就直接 `run --rm tools python run.py --recheck`，跑的是**旧代码**，
+> 会白跑一遍还看不出问题（`--recheck` 静默完成，只是结果没变）。
+
 ### 看日志
 
 ```bash
