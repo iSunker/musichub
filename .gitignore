@@ -29,6 +29,11 @@ __pycache__/
 .venv/
 venv/
 
+# deploy.sh 的本地配置与备份
+# .deploy.nasrc 含本机专用的 NAS 路径（各人机器不同），不进仓库
+.deploy.nasrc
+.deploy-backup/
+
 # 编辑器 / 系统
 .vscode/
 .idea/
