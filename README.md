@@ -41,13 +41,13 @@ qBittorrent(:3020, 分类 opencd)
 | 搞清调度为什么是单容器 | **为什么是单容器 + 自研调度** |
 | **下一步该做什么** | **当前状态与下一步** |
 | 想看完整决策理由和踩过的坑 | **SUMMARY.md** |
-| 想看走过的弯路清单 | **走过的弯路.md** |
+| 想看踩过哪些坑、根因是什么 | **SUMMARY §6 坑与归因总表**（23 项） |
 
-> **三份文档怎么分工**：
+> **两份文档怎么分工**：
 > **README = INFO 层**（操作手册：命令、步骤、症状→解法）；
-> **SUMMARY = DEBUG 层**（完整过程、踩坑、决策理由）；
-> **走过的弯路.md** = 从两者里抽出来的**归因清单**（只记「错在哪、根因是什么」，不复述操作）。
-> 同一事实**只在一处维护**，跨文档用「详见 SUMMARY §N」/「详见走过的弯路 #N」单向指路 —— 防止两边漂移。
+> **SUMMARY = DEBUG 层**（完整过程、踩坑、决策理由；**§6 = 坑与归因总表**，只记「错在哪、根因是什么」）。
+> 同一事实**只在一处维护**，跨文档用「详见 SUMMARY §N」单向指路 —— 防止两边漂移。
+> （原 `走过的弯路.md` 已**并入 SUMMARY §6** 后删除，不再单独维护一份。）
 
 ---
 
@@ -73,7 +73,7 @@ musopia_script2/                    # NAS 部署目录（compose 就放这里，
 ├─ check_db.py               53 行  # 状态速览，排查问题先跑这个
 ├─ healthcheck.py            55 行  # 容器健康检查（读写心跳文件）
 ├─ deploy.sh                        # ★本地→NAS 白名单同步（开发工具，不上 NAS）
-└─ README.md / SUMMARY.md / 走过的弯路.md
+└─ README.md / SUMMARY.md
 ```
 
 **运行时状态**（`.gitignore` 覆盖，不随代码走）：
@@ -507,6 +507,8 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 | 容器 unhealthy | 心跳停了。`docker compose logs musopia` 看卡在哪个阶段 |
 | 想立刻重跑某阶段 | 删掉 `daemon_state.json` 里对应的 `last_run`，或整个文件删掉重启 |
 | 改了代码但行为没变 | `restart` 不重新构建镜像。用 `docker compose up -d --build` |
+| **站点打回「請更正曲目列表，使其易於閱讀」** | 源 CUE 被**西欧单页码页**写坏（非 ASCII 字符整体变成 `.`），或码页不在 `LOG_ENCODINGS` 里、被兜底解成**私用区乱码**。先看本地 `tracklist` 是不是整片点号/乱码。`read_tracklist()` 已按**每份 CUE** 判退化并回退到音频文件名，见 **SUMMARY §11** |
+| **多碟页面出现两个同名 `CDx` 折叠块** | 有张碟的目录名不符合 `CD/DISC/DISK+数字`，补号与已有碟号撞了。已修（补号避开已占用编号），见 **SUMMARY §11.6** |
 | `database is locked` | 有别的进程在并发写库。检查是否有孤儿容器（`docker ps`），见「清理孤儿容器」 |
 | `docker logs` 报 requires exactly 1 argument | 后面要跟容器名：`docker logs -f musopia` |
 
@@ -527,7 +529,7 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 
 **状态（2026-09-13）**：生产在 NAS `/volume2/docker_ssd/musopia_script2` 常驻运行，
 254 条记录、站点 ID 已回填。本机在 `D:\Projects\musopia\zhuanzhong` 有一份完整开发副本。
-本文档与 `SUMMARY.md` / `走过的弯路.md` 由本轮补齐。
+本文档与 `SUMMARY.md` 由本轮补齐（原 `走过的弯路.md` 已并入 `SUMMARY.md` §6）。
 
 **✅ 本轮已了结**：
 
