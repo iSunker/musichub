@@ -29,6 +29,37 @@ LOG_ENCODINGS = ("utf-8-sig", "utf-8", "gb18030", "gbk", "utf-16", "latin-1")
 # 分轨专辑没有 CUE 时，用音频文件名兜底做曲目列表
 AUDIO_EXTS = (".flac", ".ape", ".wav", ".mp3", ".m4a", ".dts", ".ogg", ".wv", ".tak", ".tta")
 
+# 有些 CUE 是西欧单字节码页（CP1252/ANSI）写出来的，表示不了中日文，于是
+# **每个非 ASCII 字符被整体替换成一个 "."**（"唇にBe My Baby" → "..Be My Baby"，
+# ASCII 部分原样保留）。这种 CUE 里 TRACK TITLE 会退化成纯点号，
+# 按它渲染出来就是一份没人能读的曲目列表（站点会以「請更正曲目列表，使其易於閱讀」打回）。
+# 判据按**比例**而不是「全部是点」：ASCII 曲名会幸存（如 "Lydia"），
+# 一条幸存项就能让「全是点」的判定失效。
+_DEGENERATE_RE = re.compile(r"^[\s.?_*~\-]*$")
+# 补充判据：含连续点号（"唇にBe My Baby" → "..Be My Baby"，ASCII 部分幸存，
+# 逃过「全是点」的判定）。**不能单独用** —— 实测会误伤正当曲名
+# （莫扎特小夜曲 "…Serenade No. 13 in G major for st..."）。只在下面
+# _degenerate_ratio 里、**这份 CUE 已被证实存在点号替换之后**才启用。
+_DOT_RUN = re.compile(r"\.\.")
+# 私用区码位（U+E000–U+F8FF）是**解码用错了码页**的铁证 —— 正常曲名里不会出现。
+# 实证：`MONSTER HUNTER WILDS` 的 CUE 真实码页是 Big5 系，不在 LOG_ENCODINGS 里，
+# `gbk` 失败后，排在它前面的 `gb18030`「成功」解出带私用区的乱码 —— 调用方收不到
+# 任何失败信号（又是「把解不开伪装成解开了」）。
+# 见到私用区就认定这份 CUE 不可信，整份回退到音频文件名。
+
+
+def _has_pua(text):
+    """文本里有没有私用区码位（U+E000–U+F8FF）。有 = 解码用错了码页。"""
+    return any(0xE000 <= ord(c) <= 0xF8FF for c in text)
+
+
+DEGENERATE_RATIO = 0.5
+
+# 为什么是 0.5：实测全库退化比例在 11%~91% 之间**连续分布，没有干净的分界**
+# （因为比例只是「曲名含中日文的比例」的代理指标）。低比例的专辑（1%/5%/8%）
+# 往往只是整张里坏了一条，按比例整体回退会连 90% 的好曲名一起丢掉。
+# 取 0.5 是**宁可漏判、不可误判**。
+
 
 def _read_text(path):
     """按 LOG_ENCODINGS 依次尝试解码，全失败则忽略坏字节兜底。读不出返回 ""。"""
@@ -63,6 +94,30 @@ def _disc_label(path, folder_path):
         if m:
             return f"CD{int(m.group(1))}"
     return ""
+
+
+def _assign_disc_labels(discs):
+    """
+    给一串碟号补全（元素可能为 "" 表示认不出），返回等长的新列表。
+
+    认得出的原样保留；认不出的补**尚未被占用的最小编号**。
+
+    ★ 不能拿遍历序号补（`CD{idx}`）—— 「认出 CD1、CD3 + 一个认不出」时，
+    认不出的那个 idx=3 会补成 `CD3`，**与已有的 CD3 撞号**，页面上就出现
+    两个同名的折叠块。补号必须避开已被占用的编号。
+    """
+    used = {d for d in discs if d}
+    out, nxt = [], 1
+    for d in discs:
+        if d:
+            out.append(d)
+            continue
+        while f"CD{nxt}" in used:
+            nxt += 1
+        used.add(f"CD{nxt}")
+        out.append(f"CD{nxt}")
+        nxt += 1
+    return out
 
 
 def find_cover(folder_path):
@@ -209,15 +264,13 @@ def read_logs(folder_path):
         return (num, path.lower())
 
     found.sort(key=sort_key)
+    labels = _assign_disc_labels([d for _p, _f, d in found])
 
     single = len(found) == 1
     logs = []
-    for idx, (path, fname, disc) in enumerate(found, start=1):
+    for idx, (path, fname, _disc) in enumerate(found, start=1):
         content = _read_text(path)
-        if single:
-            label = "LOG"
-        else:
-            label = f"{disc} LOG" if disc else f"CD{idx} LOG"
+        label = "LOG" if single else f"{labels[idx - 1]} LOG"
         logs.append({"label": label, "filename": fname, "content": content})
     return logs
 
@@ -258,13 +311,44 @@ def _cue_titles(text):
     return titles
 
 
+def _audio_filenames_in(directory):
+    """列出**单个目录**里的音频文件名（去扩展名，已排序）。读不到返回 []。"""
+    try:
+        names = [os.path.splitext(f)[0] for f in os.listdir(directory)
+                 if f.lower().endswith(AUDIO_EXTS)]
+    except OSError:
+        return []
+    names.sort()
+    return names
+
+
+def _degenerate_ratio(titles):
+    """
+    titles 里「退化」项的占比。空列表返回 0.0。
+
+    先数**确凿**的退化项（整条只剩 . ? _ - * ~ 和空白）。一个都没有，说明这份
+    CUE 没有发生过点号替换，直接返回 0.0 —— 此时**不启用**「连续点号」这条补充
+    判据，免得把 "Serenade No. 13 ... for st..." 这类正当曲名算成坏的。
+
+    有确凿退化项时，再把含连续点号的标题一并计入（ASCII 幸存的半坏标题）。
+    """
+    if not titles:
+        return 0.0
+    # 私用区 = 解码用错了码页，这份 CUE 整份不可信
+    if any(_has_pua(t) for t in titles):
+        return 1.0
+    if not any(_DEGENERATE_RE.match(t) for t in titles):
+        return 0.0
+    return sum(1 for t in titles
+               if _DEGENERATE_RE.match(t) or _DOT_RUN.search(t)) / len(titles)
+
+
 def _audio_filenames_tracklist(folder_path):
     """无 CUE 时兜底：按目录列音频文件名（去扩展名）。多目录(CD1/CD2)加【CDx】表头。"""
     by_dir = {}
     for root, _, files in os.walk(folder_path):
-        names = [os.path.splitext(f)[0] for f in files if f.lower().endswith(AUDIO_EXTS)]
+        names = _audio_filenames_in(root)
         if names:
-            names.sort()
             by_dir[root] = names
 
     if not by_dir:
@@ -278,11 +362,12 @@ def _audio_filenames_tracklist(folder_path):
         num = int(disc[2:]) if disc else 9999
         return (num, d.lower())
 
+    dirs = sorted(by_dir, key=dir_key)
+    heads = _assign_disc_labels(
+        [_disc_label(os.path.join(d, "x"), folder_path) for d in dirs])
     blocks = []
-    for idx, d in enumerate(sorted(by_dir, key=dir_key), start=1):
-        disc = _disc_label(os.path.join(d, "x"), folder_path)
-        head = disc if disc else f"CD{idx}"
-        blocks.append(f"【{head}】\n" + "\n".join(by_dir[d]))
+    for idx, d in enumerate(dirs, start=1):
+        blocks.append(f"【{heads[idx - 1]}】\n" + "\n".join(by_dir[d]))
     return "\n".join(blocks)
 
 
@@ -312,13 +397,21 @@ def read_tracklist(folder_path):
 
         cues.sort(key=sort_key)
         multi = len(cues) > 1
+        heads = _assign_disc_labels([d for _p, d in cues])
         blocks = []
-        for idx, (path, disc) in enumerate(cues, start=1):
+        for idx, (path, _disc) in enumerate(cues, start=1):
             titles = _cue_titles(_read_text(path))
+            # CUE 被西欧码页写坏时 TRACK TITLE 会整体退化成点号
+            # （"唇にBe My Baby" → "..Be My Baby"）。这种曲目列表站点会打回，
+            # 改用**这一碟目录下**的音频文件名 —— 它们通常是完好的原文。
+            if _degenerate_ratio(titles) >= DEGENERATE_RATIO:
+                names = _audio_filenames_in(os.path.dirname(path))
+                if names:
+                    titles = names
             if not titles:
                 continue
             if multi:
-                head = disc if disc else f"CD{idx}"
+                head = heads[idx - 1]
                 blocks.append(f"【{head}】\n" + "\n".join(titles))
             else:
                 blocks.append("\n".join(titles))
