@@ -5,7 +5,7 @@
 !.env.example
 
 # ==================== 运行时状态与产物 ====================
-# SQLite 库（含 254 条种子记录、发布状态、站点 ID）
+# SQLite 库（含种子记录、发布状态、站点 ID）
 data.db
 data.db-journal
 data.db-wal

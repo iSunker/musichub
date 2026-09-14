@@ -82,15 +82,17 @@ musopia_script2/                    # NAS 部署目录（compose 就放这里，
 **运行时状态**（`.gitignore` 覆盖，不随代码走）：
 
 ```
-data.db                     # SQLite，254 条种子记录 + 发布状态 + 站点 ID
+data.db                     # SQLite：种子记录 + 发布状态 + 站点 ID
 output_torrents/            # 生成的 .torrent
 daemon_state.json           # 各阶段 last_run / last_ok（调度进度）
 daemon_heartbeat            # 纯 unix 时间戳，daemon 每轮刷新
 ```
 
 > 这些**放在脚本目录**而不是命名卷，是因为 compose 里是 `${STATE_DIR:-.}:/data`：
-> SMB 上直接看得到、能备份、出问题能直接查库。那份已经回填好 254 个站点 ID 的
+> SMB 上直接看得到、能备份、出问题能直接查库。那份**站点 ID 已回填**的
 > `data.db` 就在这里，**不需要任何迁移**。
+> ★ 具体条数**不写死在文档里** —— 它是每天都在动的量，写死等于制造一个必然过时的"事实"。
+> 要看现在的数：`python tools/doc-audit/04_probes.py`。
 
 ---
 
@@ -566,7 +568,7 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 ## 当前状态与下一步
 
 **状态（2026-09-13）**：生产在 NAS `/volume2/docker_ssd/musopia_script2` 常驻运行，
-254 条记录、站点 ID 已回填。本机在 `D:\Projects\musopia\zhuanzhong` 有一份完整开发副本。
+站点 ID 已回填。本机在 `D:\Projects\musopia\zhuanzhong` 有一份完整开发副本。
 本文档与 `SUMMARY.md` 由本轮补齐（原 `走过的弯路.md` 已并入 `SUMMARY.md` §6）。
 
 **✅ 已了结**：

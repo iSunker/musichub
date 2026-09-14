@@ -108,7 +108,7 @@ musopia_once   (profiles: tools)  ← 跑一轮全部阶段就退出，配 DRY_R
 
 | 文件 | 内容 | 谁写 |
 |---|---|---|
-| `data.db` | 254 条种子记录 + 发布状态 + `site_torrent_id` | 各阶段 |
+| `data.db` | 种子记录 + 发布状态 + `site_torrent_id` | 各阶段 |
 | `output_torrents/` | 生成的 `.torrent` | `run.py` |
 | `daemon_state.json` | 各阶段 `last_run` / `last_ok` / `last_finish` | `daemon.py` |
 | `daemon_heartbeat` | 纯 unix 时间戳，每轮刷新 | `daemon.py` |
@@ -357,7 +357,7 @@ ebbffcc  加 deploy.sh：本地 → NAS 的白名单同步              (2026-09
 
 ### 5.2 当前运行状态
 
-- NAS `<PROD-DIR>` 上常驻 `musopia` 容器，254 条记录，站点 ID 已回填。
+- NAS `<PROD-DIR>` 上常驻 `musopia` 容器，站点 ID 已回填。
 - `daemon_state.json` 记录五个阶段的 `last_run` / `last_ok`（全部 `true`）。
   最近一次落盘是 2026-09-09。
 - 本机 `<DEV-DIR>` 是**整目录复制**来的完整开发副本（含 `.git`、`data.db`、
