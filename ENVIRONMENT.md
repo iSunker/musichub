@@ -159,7 +159,7 @@ grep -n '^## B\.' ENVIRONMENT.md
 | `MAX_BACKOFF` | `21600` | 连续失败的最大退避 |
 | `ALLOW_EMPTY_DB` | `false` | ★ **安全阀，别乱开** |
 | `DATA_DIR` | `/data` | 容器内状态目录 |
-| `QB_HOST` | （compose 兜底 `http://127.0.0.1:3020`）| ★ **只存在于 compose，`.env.example` 里没有它**，见 `ERR-ENV-01` |
+| `QB_HOST` | `http://127.0.0.1:3020` | ★ compose 里还有一层兜底 `${QB_HOST:-…}`；**这一行要显式写**，见 `ERR-ENV-01` |
 | `OPENCD_CATEGORY` / `PUBLISH_CATEGORY` | `opencd` / `Musopia` | 分类名 |
 | `MUSIC_DIR` / `INCOMPLETE_DIR` | `/volume1/video/music` / `/volume2/qb_temp/temp_docker_opencd` | 宿主机路径，compose 里用到 |
 
@@ -534,7 +534,7 @@ NAS 上那份是生产配置；本机 `<DEV-DIR>/.env` 是 2026-09-13 整目录�
 - **规避做法**：直接用宿主机自己的地址 —— 本项目 `QB_HOST=http://127.0.0.1:3020`。
 - **怎么发现的**：`docker-compose.yml:21-23` 的注释、README「常用参数」末段、SUMMARY §2.2。
 - **边界**：**只在 host 网络模式下成立**。桥接模式里 `host.docker.internal` 是正常的
-  —— ★ 而 `.env.example` 里**还写着桥接时代的注释**，见 `ERR-ENV-01`。
+  —— ★ `.env.example` 里曾长期写着桥接时代的注释，2026-09-15 已改（`ERR-ENV-01`）。
 
 ---
 
@@ -601,26 +601,34 @@ NAS 上那份是生产配置；本机 `<DEV-DIR>/.env` 是 2026-09-13 整目录�
 ## B.5 配置层（`.env` / `.env.example`）
 
 ### ERR-ENV-01 `.env.example` **停在旧的双容器架构**，compose 已改用 `QB_HOST`
-- **症状**：照 `.env.example` 配出来的 `.env`，里头有两个**没人读的键**，
+- **症状**：照旧 `.env.example` 配出来的 `.env`，里头有两个**没人读的键**，
   而**真正被读的那个键它根本没提**。
 - **环境前提**：本项目早期是 `musopia-scan`（host 网络）+ `musopia-publish`（桥接）双容器，
   后来重构成**单容器**，但 `.env.example` 的对应段落没跟着改。
 - **根因**：**同一事实在两处维护，其中一处没跟上**。
-  `.env.example:11-12` 仍是 `QB_HOST_SCAN` / `QB_HOST_PUBLISH`（还带着 `8080` 端口与
+  旧 `.env.example:11-12`（行号为改动前）是 `QB_HOST_SCAN` / `QB_HOST_PUBLISH`（`8080` 端口 +
   `host.docker.internal` 的桥接注释），而 `docker-compose.yml:23` 读的是 `QB_HOST`（`3020`）。
-  ★ 同一族还有两处：`config.py:27` 的**代码兜底**仍是 `http://host.docker.internal:3020`
-  （compose 总会覆盖它，所以不发作）；`config.py:44` 的注释还写着"所有 service 都挂同一个**命名卷**"，
-  而 compose 早已改成 **bind mount**（`${STATE_DIR:-.}:/data`）。
 - **触发条件**：新部署时照 `.env.example` 抄配置。
-- **规避做法**：以 **`docker-compose.yml` 实际读的键**为准；
-  `QB_HOST` 缺省时 compose 会兜底 `http://127.0.0.1:3020`（恰好是正确值），
-  所以**不会立刻炸** —— 这正是它一直没被发现的原因。
-  ★ 该段注释与 `DATA_DIR` 那条（还写着"配合命名卷使用"，而 compose 已改成 bind mount）
-  都待订正。
+- **规避做法**：以 **`docker-compose.yml` 实际读的键**为准。
 - **怎么发现的**：2026-09-14 建本文档时逐文件核对发现的
-  （`.env.example:4-12,29-30` ↔ `docker-compose.yml:20-31`）。
-- **边界**：★ **`.env.example` 在 `deploy.sh` 白名单里**，所以这份过时的说明
-  **会被同步到 NAS**。它不影响运行（没人读那两个键），但会**误导下一个人**。
+  （`.env.example:4-12,29-30` ↔ `docker-compose.yml:20-31`）；
+  2026-09-15 复核时又补了两条实测，见下 ★★。
+- **边界**：★ **`.env.example` 在 `deploy.sh` 白名单里**（`:62`；`.env` 在 `:68` 被显式排除），
+  所以这份过时的说明**会被同步到 NAS**，会**误导下一个人**。
+
+- **★★ 2026-09-15 已订正**（改的是 `.env.example`）：
+  - 两个死键合并成 **`QB_HOST=http://127.0.0.1:3020`**，并写明三件事：
+    端口照 NAS 上 qB 实际的 WebUI 端口（本项目 `3020`）；**别写 `host.docker.internal`**（见 `ERR-DOCKER-04`）；
+    **这一行要显式写** —— compose 兜底 `${QB_HOST:-http://127.0.0.1:3020}` 恰好等于正确值，
+    漏了不报错，但地址就不再由 `.env` 钉住。
+  - `DATA_DIR` 那行注释从「配合命名卷使用」改成 **bind mount**（`${STATE_DIR}:/data`）。
+  - ★ 复核时补到的两条实测，正是这次订正的依据：
+    ① NAS 上那份**生产 `.env` 同样带着这两个死键、且全文件没有裸 `QB_HOST`**
+       ⇒ 今天生产跑的**就是** compose 的兜底值 —— 不是「新人照抄才会遇到」，而是**现状**。
+       也就是说：这条漂移至今没发作（好处），但**配置里没有任何一处钉住这个地址**（坏处）。
+    ② NAS 上的 `.env.example` 实测就是 `8080` 那份 ⇒ 「会被同步到 NAS」这条边界**是实测，不是推断**。
+  - ★ **未做**：`config.py:27` 的代码兜底（仍是 `http://host.docker.internal:3020`；compose 总会覆盖它，
+    所以不发作）与 `config.py:44` 的「命名卷」注释；以及**同步到 NAS** —— 那是 `deploy.sh --apply` 的活。
 
 ### ERR-ENV-02 `.env` 不在白名单 ⇒ **新增的键必须在 NAS 上手工加**
 - **症状**：代码里加了新配置键、`deploy.sh --apply` 也跑成功了，但 NAS 上**行为没变**。
@@ -632,7 +640,8 @@ NAS 上那份是生产配置；本机 `<DEV-DIR>/.env` 是 2026-09-13 整目录�
   （SSH 没开 ⇒ 只能在 DSM 里改）。或者**给代码加兜底默认值**，让它"不加也能跑"。
   ★ 本项目 `EDIT_COOLDOWN` 走的是后一条路：代码兜底就是 60，不加也对，
   加它的意义是把节奏**显式写在配置里**。
-- **怎么发现的**：SUMMARY §12「待做」第 1 条；`.env.example:66-70` 的注释。
+- **怎么发现的**：SUMMARY §12「待做」第 1 条；`.env.example:68-72` 的注释
+  （★ 2026-09-15 该文件加了 2 行，旧编号是 `66-70`）。
 - **边界**：**这是设计而非缺陷**。★ 但要注意：
   **代码兜底值必须与 `.env.example` 的默认值一致**（如 `EDIT_MAX_PER_CYCLE` 两处都是 100），
   否则 `.env` 缺这行键时会**静默**按兜底值跑，慢几倍且不报错。
@@ -839,6 +848,7 @@ NAS 上那份是生产配置；本机 `<DEV-DIR>/.env` 是 2026-09-13 整目录�
 | `deploy.sh` | 白名单、`NEVER` 断言、`DST` 优先级、行尾检测、心跳提示 |
 | `docker-compose.yml` / `Dockerfile` / `.env.example` | 服务与网络、挂载、调度参数、配置键 |
 | 当次会话（2026-09-14）| `ERR-OS-01`（GBK 截断，实测）、`ERR-ENV-01`（`.env.example` 漂移，逐文件核对）|
+| 当次会话（2026-09-15）| `ERR-ENV-01` 的**订正**（`.env.example` 两个死键 → `QB_HOST`）；订正依据是 NAS 侧复核的两条实测（生产 `.env` 也没有裸 `QB_HOST`、NAS 的 `.env.example` 仍是 8080 那份）|
 
 > ★ **维护方式**：新踩一个坑 → 在 B 部分对应层加一条 `ERR-XX-nn`（填满七格）；
 > 前提变了 → 改 A 部分对应节。
