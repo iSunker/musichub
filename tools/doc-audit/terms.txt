@@ -1,0 +1,65 @@
+# 03_terms.py 的关键词清单。一行一个；# 开头是注释。
+# 判据是「跨 >=2 个文件的命中数」—— 升了 = 又出现了「同一事实散在多处」。
+# ★ 只放「一旦漂移就会害人」的标识符，不要放普通词。
+
+# ---- 环境与路径 ----
+iSunker-DS423
+/volume2/docker_ssd/musopia_script2
+/volume1/video/music
+/volume2/qb_temp/temp_docker_opencd
+D:\Projects\musopia\zhuanzhong
+
+# ---- 容器与镜像 ----
+musopia-script:latest
+musopia_tools
+musopia_once
+network_mode
+host.docker.internal
+
+# ---- 端口 ----
+:3020
+
+# ---- 调度与配置键 ----
+EDIT_COOLDOWN
+EDIT_INTERVAL
+EDIT_MAX_PER_CYCLE
+EDIT_RATE_PER_MIN
+EDIT_REQUEST_INTERVAL
+EDIT_VERIFY
+SCHED_TICK
+STAGE_TIMEOUT
+RUN_ON_START
+MAX_BACKOFF
+ALLOW_EMPTY_DB
+DRY_RUN
+STATE_DIR
+QB_HOST
+MUSIC_DIR
+INCOMPLETE_DIR
+count_stale
+
+# ---- 部署 ----
+deploy.sh
+.deploy.nasrc
+.deploy-backup
+checkout-index
+.gitattributes
+
+# ---- 运行时代码 ----
+build_form_fields
+read_tracklist
+_audio_filenames_tracklist
+_assign_disc_labels
+_has_pua
+_mojibake_ratio
+MOJIBAKE_RATIO
+DEGENERATE_RATIO
+save_task
+init_db
+_published_where
+
+# ---- 状态文件 ----
+data.db
+daemon_state.json
+daemon_heartbeat
+output_torrents

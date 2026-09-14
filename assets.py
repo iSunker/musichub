@@ -60,6 +60,32 @@ DEGENERATE_RATIO = 0.5
 # 往往只是整张里坏了一条，按比例整体回退会连 90% 的好曲名一起丢掉。
 # 取 0.5 是**宁可漏判、不可误判**。
 
+# 第三类解错码页：解出来**不是**私用区，而是**合法但无意义的汉字**。
+#
+# Shift-JIS 写的 CUE（日本专辑）不在 LOG_ENCODINGS 里；`gbk` 失败后，排在它前面的
+# `gb18030` 这个「永不失败」的兜底会把它整份吃下去：
+#
+#     原字节 82a0 82c8 82bd 82c9 96b2 9286   (Shift-JIS "あなたに夢中")
+#       gb18030 解出 → 偁側偨偵柌拞                ← 既没有点号，也没有私用区
+#
+# 于是 `_has_pua()` 和点号退化**两条判据双双失明**，站点上就挂着这么一份曲目列表。
+# 实证：14619 / 14640 / 14740 / 14824 四张日本专辑，全部已推上站。
+#
+# 判据：把标题按 gb18030 **编回原始字节**（gb18030 是双射，只有它能把解出来的
+# 东西精确还原成原字节），再用候选码页严格重解。重解得**成串假名**就说明
+# 这份 CUE 的真实码页是它。
+#
+# 要求「成串」（≥2 连）而不是「有个假名就算」：单蹦一个假名在误命中里太常见 ——
+# GB 中文编回字节再用 big5 解，很容易蹦出一个孤立的假名来。
+_MOJIBAKE_CANDIDATES = ("cp932", "euc_jp", "big5", "cp949")
+_KANA_RE = re.compile(r"[ぁ-ゖァ-ヺ]")        # 真·假名（刻意不含 ・ U+30FB 与 ー U+30FC）
+_KANA_RUN_RE = re.compile(r"[ぁ-ゖァ-ヺ]{2,}")
+
+# 实测全库（分母=非 ASCII 标题）：真命中 37.5% / 70.1% / 80.0% / 84.6%，
+# 误命中最高 2.9%（"风凄凄意绵绵" 编回字节用 big5 解，恰好出「ぼぼ」）。
+# 取 0.25：离最高误命中还有 8 倍余量，同时接得住最低的真命中（37.5%）。
+MOJIBAKE_RATIO = 0.25
+
 
 def _read_text(path):
     """按 LOG_ENCODINGS 依次尝试解码，全失败则忽略坏字节兜底。读不出返回 ""。"""
@@ -322,6 +348,45 @@ def _audio_filenames_in(directory):
     return names
 
 
+def _mojibake_codepage(text):
+    """
+    这条标题是不是「被 gb18030 兜底吃掉的别的码页」。是就返回那个码页名，否则 ""。
+
+    已经含真假名的直接放行 —— 那说明本来就没解错，不必再猜。
+    """
+    s = (text or "").strip()
+    if len(s) < 2 or _KANA_RE.search(s):
+        return ""
+    try:
+        raw = s.encode("gb18030")      # 双射，能精确还原原始字节
+    except UnicodeEncodeError:
+        return ""
+    for enc in _MOJIBAKE_CANDIDATES:
+        try:
+            alt = raw.decode(enc)      # 严格解码，**不要** errors= 兜底
+        except UnicodeDecodeError:
+            continue
+        if _KANA_RUN_RE.search(alt):
+            return enc
+    return ""
+
+
+def _mojibake_ratio(titles):
+    """
+    titles 里「假汉字」占**非 ASCII 标题**的比例。没有非 ASCII 标题返回 0.0。
+
+    ★ 分母为什么不是 len(titles)：假汉字只可能出现在**含非 ASCII 字符**的标题上，
+    ASCII 标题（"Something"）在任何码页下都长一样。拿总条数当分母，非 ASCII 占比
+    低的专辑会被稀释掉 —— 实测 14640 用总条数算只有 23.1%、够不着阈值，
+    换成非 ASCII 分母是 37.5%；而两份误命中两种算法都只有 ~2.5%。
+    """
+    non_ascii = [t for t in titles if t and any(ord(c) > 127 for c in t)]
+    if not non_ascii:
+        return 0.0
+    bad = sum(1 for t in non_ascii if _mojibake_codepage(t))
+    return bad / len(non_ascii)
+
+
 def _degenerate_ratio(titles):
     """
     titles 里「退化」项的占比。空列表返回 0.0。
@@ -401,12 +466,22 @@ def read_tracklist(folder_path):
         blocks = []
         for idx, (path, _disc) in enumerate(cues, start=1):
             titles = _cue_titles(_read_text(path))
-            # CUE 被西欧码页写坏时 TRACK TITLE 会整体退化成点号
-            # （"唇にBe My Baby" → "..Be My Baby"）。这种曲目列表站点会打回，
-            # 改用**这一碟目录下**的音频文件名 —— 它们通常是完好的原文。
+            # 这份 CUE 不可信时，改用**这一碟目录下**的音频文件名 ——
+            # 它们通常是完好的原文。两种不可信：
+            #   ① 被西欧码页写坏，TRACK TITLE 整体退化成点号
+            #      （"唇にBe My Baby" → "..Be My Baby"）；
+            #   ② 码页不在 LOG_ENCODINGS 里，被 gb18030 兜底解成假汉字
+            #      （Shift-JIS "あなたに夢中" → "偁側偨偵柌拞"）。
+            reason = ""
             if _degenerate_ratio(titles) >= DEGENERATE_RATIO:
+                reason = "点号退化（码页表示不了中日文）"
+            elif _mojibake_ratio(titles) >= MOJIBAKE_RATIO:
+                reason = "假汉字（码页不在 LOG_ENCODINGS，被 gb18030 兜底解坏）"
+            if reason:
                 names = _audio_filenames_in(os.path.dirname(path))
                 if names:
+                    print(f"    ↩️  {os.path.basename(path)} 曲目不可信（{reason}），"
+                          f"回退到音频文件名")
                     titles = names
             if not titles:
                 continue

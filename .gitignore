@@ -39,3 +39,10 @@ venv/
 .idea/
 Thumbs.db
 .DS_Store
+
+# ==================== doc-audit 的投影产物与基线快照 ====================
+# out/            = 可反复生成的派生数据（会漂）—— 进 git 就成了一条会漂的"事实"
+# out.baseline-*/ = 一次测量的快照（会过期）—— 进 git 就从"某天的读数"升级成"事实源"
+# 两种都不该进。判据与用法见 tools/doc-audit/INDEX-USAGE.md。
+tools/doc-audit/out/
+tools/doc-audit/out.baseline-*/
