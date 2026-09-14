@@ -24,12 +24,14 @@ import sqlite3
 import sys
 import threading
 import time
+import types
 import urllib.request
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
 TOOLS = Path(__file__).resolve().parent
+REPO = TOOLS.parent.parent          # 仓库根 —— db.py 在这里
 OUT = TOOLS / "out"
 
 NAS = "//iSunker-DS423"
@@ -78,6 +80,43 @@ def _ro(db_unc, timeout=5):
     return con
 
 
+def _stale_where():
+    """「待办」的 WHERE —— ★ 从**事实源**取，绝不在这里重抄一遍。
+
+    ★★ 为什么必须这样（2026-09-14 实测踩过）：
+      本函数原先不存在，db_overview() 里手抄了一句
+      `WHERE site_synced_at IS NULL OR updated_at > site_synced_at`。
+      它**漏掉了 `site_status='EXISTS'` 和 `site_torrent_id` 那两个条件**，
+      于是把 189 条**从没发布过的** `UNKNOWN` 记录也算成了待办 ——
+      报出「待办 191 条」，而真值是 **2 条**（189 + 2 = 191，数字正好对上，
+      所以**看起来毫无破绽**）。
+
+      `db.py:103-108` 的注释**专门警告过这件事**：「别在两处各写一份……
+      一旦漂移，就是『探针说有活 → 60s 后重跑 → 一条都选不出来』的高频空转，
+      而且**不会报任何错**」。本文件读了那条注释、还在 ENVIRONMENT.md 里引了它，
+      **然后自己犯了同一个错** ⇒ 已登记为 `ERR-META-03`。
+
+    ★ 口径漂移的代价不是报错，是**一个看起来很正常的错数字**。
+      所以这里宁可直接依赖 db.py 的私有函数：它**改签名会当场 TypeError**（响亮地坏），
+      而重抄一遍只会**安静地给出错的数**。
+
+    ★ 纪律②不但没被破坏，反而更硬了：先把 `config` 塞进 `sys.modules` 占位，
+      `db.py` 的 `import config` 拿到的是这个桩 —— **config.py 根本不会执行
+      ⇒ 全程不读 `.env`**。db.py 只在 `connect()` 里用 `config.DB_PATH`，
+      而本文件**永远不调 connect()**（连的是 NAS 上的 UNC）。
+    """
+    if "config" not in sys.modules:
+        stub = types.ModuleType("config")
+        stub.DATA_DIR = ""
+        stub.DB_PATH = ""
+        sys.modules["config"] = stub
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    import db                                  # 必须在塞桩之后
+    where, params = db._published_where(only_stale=True)
+    return " AND ".join(where), params
+
+
 # ---- 探针 ----
 def qb_version():
     with urllib.request.urlopen(QB_URL + "/api/v2/app/version", timeout=5) as r:
@@ -92,9 +131,10 @@ def db_overview():
         with_id = con.execute(
             "SELECT count(*) FROM tasks WHERE site_torrent_id IS NOT NULL "
             "AND site_torrent_id <> ''").fetchone()[0]
+        stale_where, stale_params = _stale_where()
         stale = con.execute(
-            "SELECT count(*) FROM tasks WHERE site_synced_at IS NULL "
-            "OR updated_at > site_synced_at").fetchone()[0]
+            "SELECT count(*) FROM tasks WHERE " + stale_where,
+            stale_params).fetchone()[0]
         st = con.execute(
             "SELECT site_status, count(*) FROM tasks GROUP BY site_status "
             "ORDER BY count(*) DESC").fetchall()
