@@ -567,9 +567,9 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 
 ## 当前状态与下一步
 
-**状态（2026-09-13）**：生产在 NAS `/volume2/docker_ssd/musopia_script2` 常驻运行，
-站点 ID 已回填。本机在 `D:\Projects\musopia\zhuanzhong` 有一份完整开发副本。
-本文档与 `SUMMARY.md` 由本轮补齐（原 `走过的弯路.md` 已并入 `SUMMARY.md` §6）。
+**状态（2026-09-14）**：生产在 NAS `/volume2/docker_ssd/musopia_script2` 常驻运行，
+本机在 `D:\Projects\musopia\zhuanzhong` 有一份完整开发副本。
+★ **全部代码文件本机 ↔ NAS 逐字节一致**（2026-09-14 核）。
 
 **✅ 已了结**：
 
@@ -583,15 +583,39 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
   git ls-files -z | xargs -0 rm -f && git checkout -- .
   ```
   索引里本来就是 LF，所以这一步**不产生 commit**。未跟踪的 `.env` / `data.db` 不受影响。
+- **2026-09-14 文档机制建成**：`README`（INFO）/ `SUMMARY`（DEBUG）/ `ENVIRONMENT.md`
+  （检索层：A 部分环境前提 + B 部分 `ERR-*` 条目）。同一事实只在一处维护，跨层单向指路。
+- **2026-09-14 `tools/doc-audit/` 只读投影建成**（headings / refs / terms / probes + 基线快照）。
+  ★ **投影只读事实源，事实源不读投影** —— 方向由结构强制（事实源是 `.md`，不是可导入模块）。
+- **2026-09-14 调度改动已上生产**（见「有变更就连续跑」与 **SUMMARY §3.16**）。
+- **2026-09-14 `publish` 已关闭**（NAS `.env` 的 `ENABLE_PUBLISH=false`，`18:55` 生效），
+  止住「权限抖动时每 30 分钟一轮无效 POST」。三个时刻与复核判据见
+  **`ENVIRONMENT.md` `ERR-SITE-01` 边界**。
 
-**🔴 下一步**：
+**🔴 下一步**（2026-09-14 定稿）：
 
-1. **把本轮调度改动送上生产** —— `db.py` / `daemon.py` / `.env.example` / 两份文档
-   （见「有变更就连续跑」与 **SUMMARY §3.16**）。
-   ⚠️ `.env` **不在 deploy.sh 白名单里**，NAS 上要**手动**加 `EDIT_COOLDOWN=60`
-   （不加也能跑 —— 代码兜底值就是 60）。
-2. **NAS 上 `sudo docker compose up -d --build`**（**不是** `restart`，代码是 COPY 进镜像的）。
-   ⚠️ 这条会让五个阶段**全部跑一遍**（`DRY_RUN=false` 且 `last_run` 全过期）——
-   发布/编辑会真的敲站点，动手前先确认时机。
+1. **★ 给 `publish` 补一个说真话的退出码。**
+   `publish.py` 即便 `成功 0 条，失败 5 条` 也**以 0 退出**，而 daemon 判成败**只看退出码**
+   （`daemon.py:280`）⇒ `fails["publish"]` 每轮被清零、**退避分支根本进不去** ⇒
+   按 `PUBLISH_INTERVAL=1800` **每 30 分钟原样重来一次**。
+   ★ 实测发种权限是**抖**的（`16:19` 全败、`18:50` 全成）⇒ 这个「一天 240 次无效 POST」
+   的窗口会**反复**出现，不是一次性事故。完整归因见 **`ENVIRONMENT.md` `ERR-SITE-01` 边界**。
+2. **★ 把提交前的凭据扫描落成 `tools/` 里的脚本。**
+   同一个扫描**已经手写过两次**，2026-09-14 那次还被 `ERR-OS-01`（GBK 控制台编不出某些字符）
+   当场打断。本项目对这类东西有现成原则：**不做会各自漂的拷贝**
+   （`mdwalk.py` 就是为这个而生的）。
+3. **恢复 `publish`**（等站方权限稳定）。
+   NAS 上 `.env` 的 `ENABLE_PUBLISH` 改回 `true` + `sudo docker compose up -d`
+   （★ **不是 `restart`** —— 它重启的是同一个容器、沿用同一份环境变量，
+   **新的 `.env` 根本不会被读到**）。
+   ★ **先手工跑一条**再交回定时：
+   ```bash
+   docker compose --profile tools run --rm tools python publish.py --limit 1
+   ```
+   恢复条件见 **`ENVIRONMENT.md` `ERR-SITE-01` 边界**。
+4. **NAS 上的 `README.md` 是旧版。**
+   `deploy.sh` **不带**它（白名单 = `Dockerfile` 的 `COPY` 行，README 不在其中），
+   当年是手工 `cp` 过去的。不进镜像、不影响运行，但会造成「文档说 A、NAS 上是 B」。
+   要么手动 `cp` 一次对齐，要么明确不管。
 
-详见 **SUMMARY.md**。
+详见 **SUMMARY.md**；**环境的坑与检索入口见 `ENVIRONMENT.md`**（A 部分前提 · B 部分 `ERR-*`）。
