@@ -58,6 +58,7 @@ FILES=(
   backfill_covers.py check_db.py
   daemon.py healthcheck.py
   crawl.py opencd_parse.py opencd_rate.py opencd_log.py
+  opencd_map.py opencd_gate.py
   Dockerfile docker-compose.yml
   README.md
   .env.example

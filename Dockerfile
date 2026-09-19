@@ -20,7 +20,8 @@ COPY config.py db.py descr.py assets.py musopia.py \
      run.py publish.py update_metadata.py sync_site.py \
      backfill_covers.py check_db.py \
      daemon.py healthcheck.py \
-     crawl.py opencd_parse.py opencd_rate.py opencd_log.py ./
+     crawl.py opencd_parse.py opencd_rate.py opencd_log.py \
+     opencd_map.py opencd_gate.py ./
 
 # 容器内不需要 root：脚本只写 /data，音乐目录是只读挂载。
 # 但 /data 是 bind mount 过来的宿主机目录，属主由宿主机决定，这里不改 USER，

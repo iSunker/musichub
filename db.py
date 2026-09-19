@@ -30,6 +30,28 @@ COLUMNS = [
     ("site_torrent_id", "TEXT"),
     ("site_synced_at", "TIMESTAMP"),
     ("updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+
+    # ==================== OpenCD 转载流水线（第二阶段）====================
+    # ★ 与第一阶段的记录**共用同一张表**，靠 `source` 区分来源。
+    #   为什么不新起一张表：`daemon.preflight()` 的空库保护认的是 `tasks` 计数
+    #   （`db.py` 的 stats()），新表不并入这个口径的话，「库是空的」这句判断就
+    #   **看不见新数据** —— 保护会在该响时不响（ERR-META-03 家族：口径不一致）。
+    #   而且 COLUMNS + init_db() 本来就能给旧库自动补列，白拿一套迁移。
+    #
+    # 皇后侧的 tid（页面 id）。★ 与 `site_torrent_id` 是**两件事**：
+    #   同一个 infohash 在皇后和 Musopia 上是两个不同的页面编号，别混成一列。
+    ("opencd_tid", "TEXT"),
+    # 两个 3 天闸门（SUMMARY §12 决定 5）：
+    #   闸门① `qb_seed_days` —— 在 qB 做种满几天（★ 它证明种子真的下完可用，
+    #          不只是"延迟了"）。没满 3 天**根本不抓**，更省请求。
+    #   闸门② `fetched_at`  →  `publish_after`
+    #          抓页面的时刻 + 3 天 = 可以发布的时刻。含义是
+    #          "我已经看过页面内容、反悔还来得及"，所以是**串联**不是"做种满6天"。
+    ("qb_seed_days", "REAL"),
+    ("fetched_at", "TIMESTAMP"),
+    ("publish_after", "TIMESTAMP"),
+    # 映射不上的标签等 —— 要显式列出、进每日邮件，**不许静默丢**（SUMMARY §12 决定 9）
+    ("unmapped_json", "TEXT"),
 ]
 
 
