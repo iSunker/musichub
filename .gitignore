@@ -66,3 +66,6 @@ opencdhtml/*
 #   easy-upload 的禁转关键词表），**不是本项目的代码** ——
 #   提交它们等于把别人的源码与提交历史塞进本仓库，且将来会无意义地膨胀。
 repos/
+
+# 本地页面预览（tools/fetch_page.py 的产物）
+_preview/
