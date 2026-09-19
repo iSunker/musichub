@@ -46,3 +46,23 @@ Thumbs.db
 # 两种都不该进。判据与用法见 tools/doc-audit/INDEX-USAGE.md。
 tools/doc-audit/out/
 tools/doc-audit/out.baseline-*/
+
+# ==================== OpenCD 抓取产物与页面样本 ====================
+# ★ 为什么默认忽略（2026-09-19 实测）：从皇后下载的**详情页 HTML 里带真凭据** ——
+#   实测两份样本各有 2 处 passkey（download.php?id=…&passkey=<32位十六进制>），
+#   另有登录用户名与魔力值。与 .env 同级的泄露面，绝不能进仓库。
+#   ENVIRONMENT.md A.5「凭据住在哪」那条纪律同样适用于这里。
+# ★ 注意不能写成「忽略整个目录 + !反忽略某文件」：git **不会进入被忽略的目录**，
+#   那条反忽略**永远不生效**（本项目的 mdwalk.py 就是为这类"静默失效"而生的）。
+#   所以：忽略目录、只反忽略脱敏后的样本 —— 脱敏样本放 opencdhtml/sanitized/。
+raw_html/
+opencdhtml/*
+!opencdhtml/sanitized/
+
+# ==================== 参考用的第三方仓库（只读参考，不是本项目的代码）====================
+# repos/ 下五个独立 clone（各带自己的 .git，合计 33MB）：auto_feed_js / AutoSeed /
+# easy-upload / Pt-Autoseed / PT-Plugin-Plus。
+# ★ 它们**只用于读实现**（尤其 auto_feed_js 的 OpenCD 字段抽取、
+#   easy-upload 的禁转关键词表），**不是本项目的代码** ——
+#   提交它们等于把别人的源码与提交历史塞进本仓库，且将来会无意义地膨胀。
+repos/

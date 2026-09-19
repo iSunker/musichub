@@ -642,9 +642,20 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
    ★ **时机有讲究**：第 1 条修好之后，发布失败会**指数退避**（最长 6 小时一轮）。
    恢复 `publish` 前先确认站方权限确实通了，否则会白等一轮退避。
    恢复条件见 **`ENVIRONMENT.md` `ERR-SITE-01` 边界**。
-4. **NAS 上的 `README.md` 是旧版。**
-   `deploy.sh` **不带**它（白名单 = `Dockerfile` 的 `COPY` 行，README 不在其中），
-   当年是手工 `cp` 过去的。不进镜像、不影响运行，但会造成「文档说 A、NAS 上是 B」。
-   要么手动 `cp` 一次对齐，要么明确不管。
+4. **✅ 已了结（2026-09-19）：NAS 上的 `README.md` 已对齐。**
+   原条目写的是「`deploy.sh` **不带**它（白名单 = `Dockerfile` 的 `COPY` 行）」——
+   ★ **这句是错的**：实测 `deploy.sh` 的 `FILES` 白名单里**有** `README.md` 与
+   `.env.example`（自 `ebbffcc` 起就有），本次 `deploy.sh --apply` 已把 README
+   一起同步过去（`cmp` 逐字节核过）。该条目的两条断言**都不成立**，故销掉。
+   ★ 待修：那三处「白名单 = `Dockerfile` 的 `COPY` 行」的描述仍不准确
+   （本文件 `:508`、`SUMMARY.md §10.2`）—— 归入第 5 条一并处理。
+5. **🔵 新开一条战线：OpenCD 转载流水线（尚未开工）。**
+   定时从 OpenCD（皇后）爬种子详情页 → 解析 → **合规裁决** → 映射字段 →
+   渲染简介（★ 抓轨日志要转成折叠代码）→ 发布到 Musopia。
+   ★ **四条决定与四个步骤已细化，全部写在 `SUMMARY.md §12` 顶部**，
+   含每步的**验收判据**（第 1、2 步纯离线、零请求、零风险）。
+   ★ 动手前先读那节 —— 尤其**转载规则是三态裁决**（`ALLOW/DENY/NEED_CONFIRM`）、
+   以及 `opencdhtml/` 样本**含真实凭据、提交前必须脱敏**。
+   ★ 顺带修上面提到的白名单描述（三处，`README:508` / `SUMMARY §10.2`）。
 
 详见 **SUMMARY.md**；**环境的坑与检索入口见 `ENVIRONMENT.md`**（A 部分前提 · B 部分 `ERR-*`）。
