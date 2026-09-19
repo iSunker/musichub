@@ -21,7 +21,12 @@ def parse_args():
     ap.add_argument("--limit", type=int, default=0, help="最多发布多少条")
     ap.add_argument("--no-readd", action="store_true", help="发布后不回加到 qBittorrent")
     ap.add_argument("--dry-run", action="store_true", help="只列出将要发布的内容，不提交")
-    ap.add_argument("--anonymous", action="store_true", help="匿名发布")
+    # ★ 2026-09-17：匿名改为**默认开启** —— 想具名发布要显式 --no-anonymous。
+    #   两个参数共用 dest="anonymous"，后加的那个覆盖前者（argparse 以最后一次为准）。
+    ap.add_argument("--anonymous", action="store_true", default=True,
+                    help="匿名发布（**默认**；保留此参数只为向后兼容，脚本里若显式传它也无害）")
+    ap.add_argument("--no-anonymous", dest="anonymous", action="store_false",
+                    help="★ 具名发布（覆盖默认的匿名）")
 
     return ap.parse_args()
 
@@ -133,7 +138,7 @@ def main():
         title = task.get("formatted_title")
         print(f"\n[{i}/{len(valid)}] 🚀 发布: {title}")
 
-        fields = descr.build_form_fields(task)
+        fields = descr.build_form_fields(task, anonymous=args.anonymous)
         try:
             torrent_id, msg = client.upload_torrent(task["torrent_file"], fields)
         except (SiteError, LoginExpired) as e:

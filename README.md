@@ -41,7 +41,7 @@ qBittorrent(:3020, 分类 opencd)
 | 搞清调度为什么是单容器 | **为什么是单容器 + 自研调度** |
 | **下一步该做什么** | **当前状态与下一步** |
 | 想看完整决策理由和踩过的坑 | **SUMMARY.md** |
-| 想看踩过哪些坑、根因是什么 | **SUMMARY §6 坑与归因总表**（24 项） |
+| 想看踩过哪些坑、根因是什么 | **SUMMARY §6 坑与归因总表**（25 项） |
 | **新会话开局 / 环境前提 / 按症状找环境坑** | **ENVIRONMENT.md**（检索层：A 部分前提 · B 部分 `ERR-*` 条目）|
 
 > **三份文档怎么分工**：
@@ -248,10 +248,28 @@ docker compose up -d --build
 
 改站点上 250+ 个页面**不可撤销**，`--apply` 是显式动作，批量时还要输入 `yes` 二次确认。
 
-### 不自动改匿名开关
+### 匿名开关：编辑不动，发布默认匿名
 
-dry-run 时发现默认填 `anonymous=1` 会把 254 个非匿名种子悄悄改成匿名。
-这不是需求的一部分，所以改为**不提交该字段**（即沿用站点现状），需要匿名请显式加 `--anonymous`。
+两条路径**结论相反**，因为风险面不同 —— 别把它们当成一件事：
+
+| | 行为 | 为什么 |
+|---|---|---|
+| **编辑**（`update_metadata.py`） | **不提交该字段**（沿用站点现状），要匿名显式加 `--anonymous` | `takeedit.php` 是整表覆盖，提交了就是**对存量 254 条页面的覆盖写**。dry-run 时发现默认填 `anonymous=1` 会把 254 个非匿名种子悄悄改成匿名，所以改为不提交 |
+| **发布**（`publish.py`） | **默认匿名**（2026-09-17 改），要具名显式加 `--no-anonymous` | 发布的是**新种子，没有存量可伤** —— 上面那条「会作用到存量」的前提在这里不成立 |
+
+```bash
+# 具名发布（覆盖默认的匿名）
+python publish.py --no-anonymous
+```
+
+★ `--anonymous` / `--no-anonymous` 共用 `dest`，argparse 以**最后一次**出现的为准，
+所以 `--no-anonymous` 能盖掉 `default=True`；显式写 `--anonymous` 只是冗余无害（向后兼容）。
+
+> ⚠️ 改这次时顺带修掉一处**静默失效**：`publish.py` 里 `descr.build_form_fields(task)`
+> **漏传** `anonymous`，于是参数解析出来了却根本没生效。★ 渲染逻辑共用一处（见下节）
+> 只保证**函数**一致，**参数仍由每个调用方各传各的** —— 共用不会自动带来一致。
+
+详见 **SUMMARY §3.3**。
 
 ### 增量编辑
 
@@ -514,6 +532,9 @@ python update_metadata.py --apply --no-autodetect
 
 # 放慢速度
 python update_metadata.py --apply --interval 5
+
+# 发布：默认匿名；具名发布要显式关掉（见「匿名开关」）
+python publish.py --no-anonymous
 ```
 
 ### 手动执行单次任务
@@ -570,6 +591,11 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 **状态（2026-09-14）**：生产在 NAS `/volume2/docker_ssd/musopia_script2` 常驻运行，
 本机在 `D:\Projects\musopia\zhuanzhong` 有一份完整开发副本。
 ★ **全部代码文件本机 ↔ NAS 逐字节一致**（2026-09-14 核）。
+
+> ⚠️ **2026-09-17 起这条不再成立**：本机改了三处（`publish.py` 匿名默认值、
+> `config.py` 两处订正、`ENVIRONMENT.md`），**还没跑 `deploy.sh --apply`** ⇒
+> **NAS 上仍是旧的**。要生效：`bash deploy.sh --apply`，再在 NAS 上
+> `sudo docker compose up -d --build`。详见 **SUMMARY §5.4**。
 
 **✅ 已了结**：
 

@@ -24,7 +24,14 @@ def require_env(key: str) -> str:
 
 
 # ==================== qBittorrent ====================
-QB_HOST = os.getenv("QB_HOST", "http://host.docker.internal:3020")
+# ★ 兜底默认值与 compose 保持一致：`docker-compose.yml` 用的是
+#   `QB_HOST=${QB_HOST:-http://127.0.0.1:3020}`，且该 service 是 `network_mode: "host"`。
+#   ★★ 不要改回 `host.docker.internal` —— **host 网络下没有那条特殊 DNS 记录**
+#      （compose 里紧挨着的注释也是这么写的），它只在 bridge 网络里存在。
+#   这里这个值平时用不到（compose 总会把 QB_HOST 传进来），但一旦有人不经 compose
+#   直接 `python run.py`，旧的 `host.docker.internal` 会给出一个**看起来像配置问题、
+#   其实是"这条域名根本不存在"**的报错。改成与 compose 同形，错了也错得一致。
+QB_HOST = os.getenv("QB_HOST", "http://127.0.0.1:3020")
 QB_USER = os.getenv("QB_USER", "admin")
 QB_PASS = require_env("QB_PASS")
 
@@ -41,8 +48,12 @@ PICGO_API_KEY = require_env("PICGO_API_KEY")
 PICGO_UPLOAD_URL = os.getenv("PICGO_UPLOAD_URL", "https://www.picgo.net/api/1/upload")
 
 # ==================== 状态与产物存储 ====================
-# 统一挂载点：docker-compose.yml 里所有 service 都挂同一个命名卷到这里，
-# 不再依赖"当前目录是否存在 /app"这种隐式猜测。
+# 统一挂载点：`docker-compose.yml` 里所有 service 都把**同一个 bind mount**
+# 挂到这里 —— 形如 `${STATE_DIR:-.}:/data`（默认就是 compose 文件所在目录本身）。
+# ★ 注意：**不是命名卷**。这段注释原先写的是「都挂同一个命名卷」，
+#   而 compose 早已改成 bind mount ⇒ 照着旧注释去 `docker volume ls` 找状态
+#   会**一个都找不到**（数据其实就在宿主机的 `${STATE_DIR:-.}` 下）。
+# 这么做是为了不再依赖"当前目录是否存在 /app"这种隐式猜测。
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 DB_PATH = os.getenv("DB_PATH", os.path.join(DATA_DIR, "data.db"))
 OUTPUT_TORRENT_DIR = os.getenv("OUTPUT_TORRENT_DIR", os.path.join(DATA_DIR, "output_torrents"))
