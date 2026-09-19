@@ -507,6 +507,21 @@ bash deploy.sh --rollback          # 回滚到最近一次备份
 
 - **白名单 = `Dockerfile` 的 `COPY` 行** + `Dockerfile`/`docker-compose.yml` 本身。
   脚本还会**反向自检**：从 `Dockerfile` 解出实际要 `COPY` 的文件逐个核对，漏一个就拒绝部署。
+- ★★ **白名单 ≠ 容器内可见 —— 这是两条独立的路，别混（2026-09-19 踩过）**：
+
+  | | 决定 |
+  |---|---|
+  | `deploy.sh` 白名单 = `Dockerfile` 的 `COPY` 行 | 文件**能不能被部署过去** |
+  | `Dockerfile` 的 `COPY` / compose 的 `volumes` | 跑起来**容器里看不看得见** |
+
+  白名单里有它，只说明「部署会成功」；**不说明容器跑起来找得到它**。
+  实测翻车形状：脚本放 `tools/` → 在 NAS 上跑 → 容器报
+  `can't open file '/app/tools/publish_probe.py'`（`tools/` 两条都不占）。
+  要进容器只有两条路：写进镜像的 `COPY` 行（得重建镜像），或放进
+  **compose 根目录**（`${STATE_DIR:-.}` bind mount 成 `/data`，容器里看得见）。
+  ★ 连带：`python /data/x.py` 时 Python 只把**脚本所在目录**加进 `sys.path`、**不加 cwd**
+  （容器 `WORKDIR` 是 `/app`）⇒ `import config` 直接 `ModuleNotFoundError`，
+  脚本得自己 `sys.path.insert(0, "/app")`。详见 `SUMMARY §12` 断点存档。
 - **`.env` / `data.db` / `daemon_state.json` / `daemon_heartbeat` / `output_torrents` 永不在白名单里**，
   脚本开头有显式断言（混进去直接退出）。
 - 写入走「临时文件 + `mv`」**原子替换**。

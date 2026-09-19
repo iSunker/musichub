@@ -680,6 +680,23 @@ COPY config.py db.py descr.py assets.py musopia.py \
 
 这 13 个 `.py` 正好就是镜像构建上下文需要的全部 —— 多一个不用同步，**少一个容器里就缺模块**。
 
+> ★★ **白名单 ≠ 容器内可见 —— 这是两条独立的路**（2026-09-19 踩过，详见 §12 断点存档
+> 与 `ENVIRONMENT.md` `ERR-DOCKER-05`）：
+> - `deploy.sh` 白名单决定**文件能不能被部署过去**；
+> - `Dockerfile` 的 `COPY` / compose 的 `volumes` 决定**跑起来容器里看不看得见**。
+>
+> `tools/` **两条都不占** ⇒ 放上去部署得了、容器里跑不了（实测报
+> `can't open file '/app/tools/publish_probe.py'`）。要进容器只有两条路：
+> 写进 `COPY` 行（须重建镜像），或放进 **compose 根目录**（= 挂载进容器的 `/data`）。
+> ★ 连带：脚本放 `/data` 后 `python /data/x.py` **不能** `import config`
+> （Python 只加脚本所在目录、不加 cwd），脚本得自己 `sys.path.insert(0, "/app")`。
+
+> ⚠️ **本节的清单已过时**（2026-09-19 记）：上面的代码块只有 **13 个 `.py`**，
+> 而 `Dockerfile` 现在 `COPY` 的已是 **19 个** —— OpenCD 转载流水线又加了
+> `crawl.py` / `opencd_parse.py` / `opencd_rate.py` / `opencd_log.py` /
+> `opencd_map.py` / `opencd_gate.py`（见 §12）。**以 `Dockerfile` 的 `COPY` 行为准**，
+> 不要照抄本节这个块（这正是 `ERR-META-04`「改了行为却不改文档」的形状）。
+
 脚本另有一道**反向自检**：用 awk 拼掉续行、从 `Dockerfile` 解出实际要 `COPY` 的文件，
 逐个核对白名单，**漏一个就拒绝部署**（退出码 1）。
 
@@ -933,6 +950,84 @@ FILE "01 - ..Be My Baby.wav" WAVE
 > 不是 §11.5 那个「982 目录 / 1295 份 CUE」的口径 —— 后者没有重跑。
 
 ## 12. 未做 / 下一步
+
+### ⏸️ 断点存档：2026-09-19 会话 `e89c6ad9` 中途断流（发布诊断未完成）
+
+> **这一节是给下一个会话读的。** 会话在**生成回复的中途断了**，有一半结论**没来得及说出口**。
+> 下面这些是「下一会话开局必须知道」的，**不要从会话记录里重新推导** —— 记录里那段推导
+> **本身就带着两处错的结论**（见下「★ 两处订正」）。
+
+**断流那一刻的状态**
+
+| 项 | 状态 |
+|---|---|
+| 断点时刻 | `2026-09-19 11:22:02`（正在用真实 docker 验 `.env` 改完能否 `float()`） |
+| ★ **用户始终没拿到正确的运行命令** | **断流就断在这里** —— 命令写完了但没发出去 |
+| NAS 上 `tools/` | 空目录已删；脚本移到 **compose 根目录**（= 容器内 `/data`） |
+| 探针脚本（NAS 根目录） | `_probe_publish.py` / `_probe_show.py` / `_probe_uploads.py` |
+| `.env` 54–56 行行尾注释 | 已删（125 行不变、只 3 行变，备份 `.env.pre-fix`）★ 但这修的值不值得，见订正 ② |
+
+**★ 两处订正：会话里那两个「已用真实 Docker 验证」的结论，一个假、一个存疑**
+
+这两条**都是本会话（2026-09-19 下午）用 `docker compose config` 实测推翻/动摇的**，
+下一个会话**不要再照抄**。
+
+① **「`.env` 注释里的 `${...}` 会被 compose 插值 ⇒ 那些 WARN」—— 假的。**
+   实测：注释里放 `${QB_HOST:-http://127.0.0.1:3020}` / `${DATA_DIR}` / `${STATE_DIR}`，
+   `docker compose config` **零 WARN**。⇒ 把注释里的 `${` 改成 `$ {` 是**无效改动**，不要做。
+   **WARN 的真凶是 `OPENCD_COOKIE` 的值里有 6 个 `$`**（NAS `.env:41`），
+   6 个 `$` 正好切出 6 个 WARN 名（`o35`/`g0`/`t1789806832`/`j60`/`l0`/`h0`）。
+   已在本机复现：值 `AAAA$o35BBBB` 会报出变量名 `"o35BBBB"`（名字取到下一个非标识符字符为止）。
+   ★ **未验**：容器里收到的这个值是否**完整** —— 见 §12 待办。
+
+② **「`.env` 行尾注释是真 bug（`float('120  # …')` → `ValueError`）」—— 存疑。**
+   实测：`docker compose config` 把 `OPENCD_MIN_INTERVAL=120      # 注释` 解析成 **`"120"`**（注释被剥）。
+   怀疑上个会话是拿 **`docker run --env-file`**（docker CLI 的解析器）验的 ——
+   那是**另一套解析器**，与 compose 的 `env_file:` **不等同**。
+   ⇒ 结论**悬置**：等 Docker Desktop 起来后用 compose 真实 `env_file` 跑一次容器核对。
+   若确认剥注释，则行尾注释**无害**，`.env.example` 不必改。
+
+**★ 发布失败：真正的形状与「上个会话判错了」的地方**
+
+- 实测响应：`HTTP 200` + `Content-Type: text/html` + **响应体 0 字节** + 无 `Location`。
+  ⇒ **既不是错误页、也不是退回的上传表单页** —— 会话里「权限问题 vs 字段问题」的二选一框架**不适用**。
+  ★ `_extract_error()` 抠不到文案**不是线索**：body 是空的，它**必然**返回空。
+- ★★ **`upload_torrent()`（`musopia.py:296`）判「成功」的唯一依据是 `Location: ...id=N`。**
+  拿不到就返回 `None` ⇒ `publish.py` 不写库。所以
+  **「发布失败」的真实含义是「我们没解析到 ID」，它完全不等于「站点没建这条种子」。**
+- ★★ 而会话当时**用本地库的 `EXISTS 仍 264` 推断「站点上是干净的」** ——
+  本地库没变，正是**因为我们自己没写**。**这是拿投影当事实源**，`ERR-META-03` 的同一形状。
+  **站点上到底有没有，当时没有查过。**
+- ★ **后果**：那条种子已被尝试 3 次（`publish.py --limit 1` ×2 + 探针 ×1）。
+  若每次都真的建了，**站点上可能有 3 条重复的叶惠美**。
+  `HTTP 200` + 空 body 的一种典型成因是「**先 INSERT、后面再 fatal error**」——那行可能真的进站点了。
+  ⇒ **在查清之前不要再重试任何发布。**
+
+**★ 「白名单 ≠ 容器内可见」——本轮翻车的直接原因**
+
+`tools/` 里的脚本放上 NAS 后容器报 `can't open file '/app/tools/publish_probe.py'`。
+根因是**两条独立的路被当成一条**：
+
+| | 决定 |
+|---|---|
+| `deploy.sh` 白名单 = `Dockerfile` 的 `COPY` 行 | **文件能不能被部署过去** |
+| `Dockerfile` 的 `COPY` / compose 的 `volumes` | **跑起来容器里看不看得见** |
+
+`tools/` **两条都不占**。正确做法：放进镜像的 `COPY` 行（要重建镜像），
+或放进 **compose 根目录**（`${STATE_DIR:-.}` bind mount 成 `/data`，容器里看得见）。
+
+★ **连带坑**：脚本放 `/data` 后，`python /data/x.py` 时 Python 只把**脚本所在目录**加进
+`sys.path`，**不加 cwd**（容器 `WORKDIR` 是 `/app`）⇒ `import config` 直接 `ModuleNotFoundError`。
+**已在本机复现**。写法：脚本顶部自己 `sys.path.insert(0, os.environ.get("MUSOPIA_APP_DIR", "/app"))`。
+
+**断流时欠用户的那条命令**（NAS 上，第一行 `cd` 不能省）
+
+```bash
+cd /volume2/docker_ssd/musopia_script2
+sudo docker compose --profile tools run --rm tools python /data/_probe_uploads.py   # ★ 先跑这个
+sudo docker compose --profile tools run --rm tools python /data/_probe_publish.py
+sudo docker compose --profile tools run --rm tools python /data/_probe_show.py
+```
 
 ### 🔵 进行中：OpenCD 转载流水线（2026-09-19 定稿 · **第 1、2 步已了结 · 第 3 步已落库**）
 

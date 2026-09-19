@@ -541,6 +541,33 @@ NAS 上那份是生产配置；本机 `<DEV-DIR>/.env` 是 2026-09-13 整目录�
 - **边界**：**只在 host 网络模式下成立**。桥接模式里 `host.docker.internal` 是正常的
   —— ★ `.env.example` 里曾长期写着桥接时代的注释，2026-09-15 已改（`ERR-ENV-01`）。
 
+### ERR-DOCKER-05 ★★ 「`deploy.sh` 白名单里有」**不等于**「容器里看得见」
+- **症状**：文件明明 `deploy.sh --apply` 同步过去了（NAS 上 `ls` 得到），
+  但在容器里跑就报 `can't open file '/app/xxx'`。
+- **环境前提**：代码是 **`COPY` 进镜像**的（`ERR-DOCKER-01`），
+  而只有 `compose` 里 `volumes:` 挂的那两处（`${STATE_DIR:-.}:/data`、音乐目录）
+  才在运行时从宿主机透进去。镜像的 `WORKDIR` 是 `/app`。
+- **根因**：**两条独立的路被当成一条** ——
+  ① `deploy.sh` 白名单（= `Dockerfile` 的 `COPY` 行）决定**文件能不能被部署过去**；
+  ② `Dockerfile` 的 `COPY` / compose 的 `volumes` 决定**跑起来容器里看不看得见**。
+  一条文件可以「在白名单里」却**不在镜像里也不在挂载点里**（本项目是 `tools/`）。
+- **触发条件**：往 NAS 上放一个**不在 `Dockerfile` `COPY` 行、也不在挂载目录里**的脚本/数据。
+- **规避做法**：只有两条路 ——
+  **(a)** 写进镜像的 `COPY` 行（然后必须 `up -d --build`，见 `ERR-DOCKER-01`）；
+  **(b)** 放进 **compose 根目录**（`${STATE_DIR:-.}` 被 bind mount 成容器内 `/data`）。
+  ★ **连带坑（同一族，实测复现）**：脚本放 `/data` 后用 `python /data/x.py` 跑时，
+  Python 只把**脚本所在目录**（`/data`）加进 `sys.path`，**不会**把 cwd（`/app`）加进去
+  ⇒ `import config` 直接 `ModuleNotFoundError`。脚本顶部得自己
+  `sys.path.insert(0, os.environ.get("MUSOPIA_APP_DIR", "/app"))`。
+- **怎么发现的**：2026-09-19 会话 `e89c6ad9` —— 把诊断脚本放 NAS 的 `tools/` 后，
+  容器报 `can't open file '/app/tools/publish_probe.py': [Errno 2]`。
+  ★ 当轮只核了「白名单」没核「构建上下文」，所以第一次没看出来。
+  `sys.path` 那条是本机最小复现（`python /tmp/sdata/probe.py` → `ModuleNotFoundError`）验的。
+- **边界**：**`.env` 不适用本条** —— 它不是靠文件可见性进去的，是 `env_file:` 读进去的
+  （且 `.env` 根本不在白名单，见 `ERR-ENV-02`）。
+  ★ 也**不是** `ERR-DOCKER-01` 的重演：那条讲「改了文件要重建镜像」，
+  本条讲「**没在 `COPY` 行里的文件，重建多少次也不会进去**」。
+
 ---
 
 ## B.4 存储层（SQLite / WAL）
@@ -670,6 +697,27 @@ NAS 上那份是生产配置；本机 `<DEV-DIR>/.env` 是 2026-09-13 整目录�
 - **边界**：**这是设计而非缺陷**。★ 但要注意：
   **代码兜底值必须与 `.env.example` 的默认值一致**（如 `EDIT_MAX_PER_CYCLE` 两处都是 100），
   否则 `.env` 缺这行键时会**静默**按兜底值跑，慢几倍且不报错。
+
+### ERR-ENV-03 ★ `.env` 的**值**里含 `$` ⇒ compose 当成变量引用，刷一屏 WARN（且可能改坏值）
+- **症状**：每次 `docker compose ...` 都刷出一串
+  `WARN The "xxx" variable is not set. Defaulting to a blank string.`，
+  名字看着像乱码碎片（本项目实测：`o35` / `g0` / `t1789806832` / `j60` / `l0` / `h0`）。
+- **环境前提**：compose 会把项目根的 `.env` 读进来做**插值**（`${...}`），
+  这一遍**扫的是整个文件的值**，不只是 `docker-compose.yml` 里引用的那些。
+- **根因**：**值里出现了 `$`**。`$xxx` 被当成变量引用，变量名取到**下一个非标识符字符**为止。
+  本项目是 **`OPENCD_COOKIE` 的值里有 6 个 `$`**（NAS `.env:41`）——
+  6 个 `$` 正好对应 6 个 WARN 名，名字就是被 `$` 切开的那段碎片。
+- **触发条件**：往 `.env` 里填任何含 `$` 的值（Cookie 串、passkey、base64 里带 `$` 的、shell 习惯写的 `$VAR`）。
+- **规避做法**：★ **未定论**。可选：把 `$` 写成 `$$`（compose 的转义），或改用不含 `$` 的写法。
+  **在定论之前，别照着未验证的说法去改** —— 这条的成因是实测的，规避做法还没实测过。
+- **怎么发现的**：2026-09-19 会话 `e89c6ad9` 把 WARN 归因成「注释里的 `${...}`」，**是错的**。
+  本会话用 `docker compose config` 实测：注释里放 `${QB_HOST:-...}` / `${DATA_DIR}` / `${STATE_DIR}`
+  **零 WARN** ⇒ 注释不参与插值。真凶定位到 `OPENCD_COOKIE` 的值（按 `$` 数与 WARN 名一一对上），
+  并在本机最小复现：`.env` 写 `OPENCD_COOKIE=AAAA$o35BBBB` ⇒ 报出变量名 `"o35BBBB"`。
+- **边界**：★ **WARN 是噪音不等于值被改坏** ——
+  「compose 对 `env_file` 的值做不做插值」与「它会不会为 `.env` 的插值扫描报 WARN」
+  是**两件事**。**本项目尚未验证容器里收到的 `OPENCD_COOKIE` 是否完整**（见 SUMMARY §12 待办）。
+  ★ 也**不要**把它和 `ERR-ENV-02`（`.env` 不在白名单、新键要手工加）混为一谈。
 
 ---
 
