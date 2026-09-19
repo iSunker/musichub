@@ -649,13 +649,15 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
    一起同步过去（`cmp` 逐字节核过）。该条目的两条断言**都不成立**，故销掉。
    ★ 待修：那三处「白名单 = `Dockerfile` 的 `COPY` 行」的描述仍不准确
    （本文件 `:508`、`SUMMARY.md §10.2`）—— 归入第 5 条一并处理。
-5. **🔵 新开一条战线：OpenCD 转载流水线（尚未开工）。**
+5. **🔵 新开一条战线：OpenCD 转载流水线（第 1、2 步已完成）。**
    定时从 OpenCD（皇后）爬种子详情页 → 解析 → **合规裁决** → 映射字段 →
    渲染简介（★ 抓轨日志要转成折叠代码）→ 发布到 Musopia。
-   ★ **四条决定与四个步骤已细化，全部写在 `SUMMARY.md §12` 顶部**，
-   含每步的**验收判据**（第 1、2 步纯离线、零请求、零风险）。
-   ★ 动手前先读那节 —— 尤其**转载规则是三态裁决**（`ALLOW/DENY/NEED_CONFIRM`）、
-   以及 `opencdhtml/` 样本**含真实凭据、提交前必须脱敏**。
+   ★ **计划与进度全在 `SUMMARY.md §12` 顶部**（四条决定 + 四个步骤 + 每步验收判据）。
+   - **已完成**：`opencd_parse.py` 解析 + 三态裁决，`--selftest` **51/51 通过**（纯离线）。
+     就地验：`python opencd_parse.py --selftest`
+   - **下一步**：第 3 步抓取层（**那一步才开始碰站点**，限速在这里）。
+   - ★ 动手前必读：**转载规则是三态**（只有明确 ALLOW 才自动发布）、
+     样本脱敏（`opencdhtml/` 默认忽略，只放行 `sanitized/`）。
    ★ 顺带修上面提到的白名单描述（三处，`README:508` / `SUMMARY §10.2`）。
 
 详见 **SUMMARY.md**；**环境的坑与检索入口见 `ENVIRONMENT.md`**（A 部分前提 · B 部分 `ERR-*`）。
