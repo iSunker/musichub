@@ -48,6 +48,18 @@ RENAME_MAP = {
     # 列表页（torrents.php）—— 抓取层的入口，解析出「有哪些新种子」
     "OpenCD __ 種子.html":
         "sample-listpage.html",
+    # 列表页的第 2、3 页 —— 用来验证「分页顺序」与「页间重叠」（实测：不按时间排、
+    # 页1∩页2 重叠 1 个）。★ 只为审计用，抓取层不依赖它们。
+    "OpenCD __ 種子2.html":
+        "sample-listpage-p2.html",
+    "OpenCD __ 種子3.html":
+        "sample-listpage-p3.html",
+    # 搜索结果页 —— ★ 实测结构与列表页**完全一致**（同 torrentname 行、同列序），
+    # 所以 parse_list() 零改动就能吃。用于「qB 反查」：按名字搜出候选 → 再验 infohash。
+    "OpenCD __ 搜索結果 - 齐秦 - 我拿什么爱你---搜索结果页.html":
+        "sample-search-qinqin.html",
+    "OpenCD __ 搜索結果 - 周杰伦---搜索结果页.html":
+        "sample-search-jay.html",
 }
 
 

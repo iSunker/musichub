@@ -485,6 +485,37 @@ def _compare(name, info, exp):
     return checked, fails
 
 
+def _check_searchpages():
+    """
+    搜索页自检（★ 「qB 反查」的关键一环）。
+    ★ 判据的重点是**那条危险**：搜出的候选**不能取第一条**——
+      实测「齐秦 - 我拿什么爱你」返回 2 条、**名字几乎一样**
+      （`… 1998 - FLAC 分轨` / `… 1998 - WAV 整轨`），取第一条会发错种子。
+      所以搜索页只用来**拿候选 tid**，必须再逐个进详情页验 infohash。
+    """
+    path = os.path.join(SAMPLE_DIR, "sample-search-qinqin.html")
+    if not os.path.exists(path):
+        print("  ⚠️  缺搜索页样本，跳过")
+        return 0, 0
+    rows = parse_list(open(path, encoding="utf-8").read())
+    ids = [r["torrent_id"] for r in rows]
+    checks = [
+        ("搜索页解析行数（齐秦）", 2, len(rows)),
+        # ★ 同名不同格式 —— 证明「必须验 infohash、不能取第一条」
+        ("候选含 200028（FLAC 分轨）", True, "200028" in ids),
+        ("候选含 30167（WAV 整轨）", True, "30167" in ids),
+        ("★ 两条候选**名字几乎相同** ⇒ 取第一条会发错",
+         True,
+         len({r["title"][:12] for r in rows}) == 1),
+    ]
+    fails = 0
+    for label, want, got in checks:
+        ok = got == want
+        fails += 0 if ok else 1
+        print(f"    {'✅' if ok else '❌'} {label:<40} 期望={want!r:<8} 实得={got!r}")
+    return len(checks), fails
+
+
 def _check_listpage():
     """
     列表页自检。★ 判据分两层：
@@ -572,6 +603,12 @@ def cmd_selftest():
     lc, lf = _check_listpage()
     total_checked += lc
     total_fails += lf
+
+    print(f"\n{'─' * 72}")
+    print("搜索页解析 · 「qB 反查」的匹配环节（★ 结构与列表页一致，零改动复用）")
+    sc, sf = _check_searchpages()
+    total_checked += sc
+    total_fails += sf
 
     print(f"\n{'=' * 72}")
     if total_fails:
