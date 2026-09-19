@@ -302,6 +302,99 @@ def _extract_cover_candidates(soup):
     return out
 
 
+# ==================== 列表页（torrents.php）解析 ====================
+#
+# 为什么需要它：定时任务不能凭空知道「站上多了哪些种子」。抓取流程是
+#     ① GET torrents.php（**1 个请求**）→ 解析出 [(id, 标题, …), …]
+#     ② 与本地已抓过的 id 比对 → 只挑没抓过的（**0 请求**）
+#     ③ 逐个 GET 详情页（每个 1 个请求，★ 这里最贵，受限速约束）
+# 所以列表页是**唯一的入口**，也是控制频次的关键：一次请求就知道该抓哪些，
+# 避免盲猜 id 去撞（既费请求、又正撞上「注意频次」那条）。
+#
+# ★ 实测（2026-09-19，脱敏列表页样本）拿到的结构：
+#   · 每行是一个 `<table class="torrentname">`（**嵌套**在外层 <tr> 里的表格）
+#   · **每行里同时有** `details.php?id=N` 与 `plugin_details.php?id=N`，**同一个 id**
+#   · 列序：td[2]=标题 td[3][4]=促销相关 td[5]=相对时间 td[6]=大小
+#           td[7]=做種 td[8]=下載 td[9]=完成 td[10]=发布者
+#     ★ 列含义是**交叉验证**出来的，不是猜的：拿列表页 id=200610 那行
+#       （它有详情页可对照）比出来 —— 大小 `681.42 MB` 与详情页**逐字一致**；
+#       做種/下載/完成 `247/0/549` 与详情页「同伴 245 做種 1 下載」「完成 546」
+#       **同量级吻合**（同一时刻的浮动读数）。
+#
+# ★★ **真正的陷阱是「在哪扫」+「正则边界」，不是用哪个文件名** —— 这条我第一版归因错了，
+#    订正于此（两处都实测过）：
+#      ① 陷阱是**子串匹配**：`userdetails.php?id=85068` 这个 URL 里**字面上包含**
+#         `details.php?id=85068` ⇒ 无边界锚的正则**会**把它抓出来。实测
+#         `re.search(r"details\.php\?id=85068", "userdetails.php?id=85068")` → True。
+#         而 `plugin_details.php?id=` 没有这个后缀歧义（前缀不同）。
+#      ② 所以安全做法有两条，**我们的实现两条都做了**：
+#         (a) **限定在 `table.torrentname` 行内**取（不是全页扫）；
+#         (b) 用 `LIST_DETAIL_HREF`（`plugin_details`）这个**无歧义**的形态。
+#      ★ 换句话说：`details.php?id=` 在这页上**不是**错的（逐行取 50/50 全对），
+#        错的是「全页无锚扫」。别把结论记成「必须用 plugin_details」。
+
+LIST_DETAIL_HREF = re.compile(r"plugin_details\.php\?id=(\d+)")
+
+
+class ListRow(dict):
+    """列表页的一行。"""
+
+    @property
+    def torrent_id(self):
+        return self.get("torrent_id", "")
+
+
+def parse_list(html, *, source_file=None):
+    """
+    解析 torrents.php 列表页，返回 [ListRow, ...]（**纯函数，不碰网络**）。
+
+    ★ 只从 `table.torrentname` 里取 id —— 见上面那段「实测订正」。
+    ★ `\\xa0`（不换行空格）：实测大小那格是 `681.42\\xa0MB`（不是普通空格），
+      直接与 `"681.42 MB"` 比较会**静默不相等**。所有字段一律过 `_norm`
+      （它用的是 `\\s+`，Python 的 `\\s` **包含 `\\xa0`** ⇒ 能正确处理）。
+    """
+    soup = BeautifulSoup(html or "", "html.parser")
+    rows = []
+
+    for tn in soup.find_all("table", class_="torrentname"):
+        row = ListRow()
+
+        link = tn.find("a", href=LIST_DETAIL_HREF)
+        if link is None:
+            continue
+        m = LIST_DETAIL_HREF.search(link.get("href") or "")
+        row["torrent_id"] = m.group(1) if m else ""
+        # ★ 标题优先取 `title` 属性（完整、不被 CSS 截断），退回链接文本
+        row["title"] = _norm(link.get("title") or link.get_text())
+
+        # 外层 <tr> 的直接子 td 才是「大小/做種/時間」这些统计列
+        outer = tn.find_parent("tr")
+        tds = outer.find_all("td", recursive=False) if outer else []
+        def cell(i):
+            return _norm(tds[i].get_text(" ")) if i < len(tds) and tds[i] else ""
+
+        row["promo"] = cell(3)
+        row["age_text"] = cell(5)          # 相对时间（`13時51分`）
+        row["size"] = cell(6)
+        row["seeders"] = cell(7)
+        row["leechers"] = cell(8)
+        row["snatched"] = cell(9)
+        row["uploader"] = cell(10)
+
+        # 促销状态（免費/2X/熱門…）：只看图标 alt，别去解析那段 domTT_activate JS
+        promos = []
+        for img in tn.find_all("img") + (outer.find_all("img", recursive=False) if outer else []):
+            alt = _norm(img.get("alt") or "")
+            if alt in ("Free", "2X", "2X Free", "2XFree", "50%", "30%", "熱門"):
+                promos.append(alt)
+        row["promo_flags"] = sorted(set(promos))
+
+        row["_source_file"] = source_file or ""
+        rows.append(row)
+
+    return rows
+
+
 # ==================== 自检 ====================
 
 # 期望值：★ 从样本**人工核过**再写进来（不是从解析结果反填 —— 那样是自证）。
@@ -392,6 +485,49 @@ def _compare(name, info, exp):
     return checked, fails
 
 
+def _check_listpage():
+    """
+    列表页自检。★ 判据分两层：
+      ① 结构：能解析出 50 行、id 不重复、且**没有把会员 id 混进来**
+      ② 交叉验证：拿 id=200610 那行与它的**详情页**对账 ——
+         大小必须**逐字一致**（这是能对上的硬证据）。
+    """
+    path = os.path.join(SAMPLE_DIR, "sample-listpage.html")
+    if not os.path.exists(path):
+        print("  ⚠️  缺列表页样本，跳过")
+        return 0, 0
+    rows = parse_list(open(path, encoding="utf-8").read(),
+                      source_file="sample-listpage.html")
+    raw = open(path, encoding="utf-8").read()
+    ids = [r["torrent_id"] for r in rows]
+    # ★ 陷阱的**机制**用构造串验（不依赖样本内容）——
+    #   因为**脱敏样本里已经没有 85068 了**（脱敏器把它换成了 `<UID>`），
+    #   所以「在全页无锚扫会不会中招」**无法在脱敏样本上复现**。
+    #   第一版我把这条写成 `"85068" in re.findall(...)` 期望 True ⇒ **跑出来是 False**，
+    #   因为样本里根本没有那个 id。★ 教训：**判据必须能在被测样本上真的成立**，
+    #   否则它是个假判据（这次是它自己把我拦下来的，算它立功）。
+    mech_ok = bool(re.search(r"details\.php\?id=85068", "userdetails.php?id=85068")) \
+        and not bool(re.search(r"plugin_details\.php\?id=85068", "userdetails.php?id=85068"))
+    checks = [
+        ("解析出行数", 50, len(rows)),
+        ("id 去重后数量", 50, len(set(ids))),
+        # ★ 行内取 ⇒ 会员 id 绝不出现
+        ("行内取：会员 id 85068 未被当作种子", False, "85068" in ids),
+        # ★ 陷阱机制（构造串验，与样本内容无关）：`details.php?id=` 会被
+        #   `userdetails.php?id=` **子串命中**，而 `plugin_details.php?id=` 不会。
+        ("机制：details.php 会被 userdetails 子串命中", True, mech_ok),
+        # ★ `\xa0` 陷阱：列表页大小是 `681.42\xa0MB`，归一化后必须等于普通空格版
+        ("大小 \\xa0 已归一化（=详情页逐字一致）", "681.42 MB",
+         next((r["size"] for r in rows if r["torrent_id"] == "200610"), "")),
+    ]
+    fails = 0
+    for label, want, got in checks:
+        ok = got == want
+        fails += 0 if ok else 1
+        print(f"    {'✅' if ok else '❌'} {label:<38} 期望={want!r:<14} 实得={got!r}")
+    return len(checks), fails
+
+
 def cmd_selftest():
     files = sorted(glob.glob(os.path.join(SAMPLE_DIR, "*.html")))
     if not files:
@@ -430,6 +566,12 @@ def cmd_selftest():
     mc, mf = _rule_mutations()
     total_checked += mc
     total_fails += mf
+
+    print(f"\n{'─' * 72}")
+    print("列表页解析（torrents.php）· 抓取层的入口（★ 第 3 步用）")
+    lc, lf = _check_listpage()
+    total_checked += lc
+    total_fails += lf
 
     print(f"\n{'=' * 72}")
     if total_fails:

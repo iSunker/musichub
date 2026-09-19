@@ -45,6 +45,9 @@ RENAME_MAP = {
         "sample-zhuanzai-jinyong.html",
     "OpenCD __ 種子詳情 _齐秦 - 我拿什么爱你 1998 - FLAC 分轨_.html":
         "sample-zhuanzai-huanying.html",
+    # 列表页（torrents.php）—— 抓取层的入口，解析出「有哪些新种子」
+    "OpenCD __ 種子.html":
+        "sample-listpage.html",
 }
 
 
@@ -76,13 +79,44 @@ PATTERNS = [
     ("用户名（EliteUser_Name 链接）",
      re.compile(r"(EliteUser_Name[^>]*>\s*<b>)[^<]+(</b>)"), r"\1" + REDACTED_USER + r"\2"),
     ("会员 ID（userdetails 链接）", re.compile(r"(userdetails\.php\?id=)\d+"), r"\1<UID>"),
+    # ★ 列表页实测（2026-09-19）新增两条：会员态横幅里还有别的带 uid 的链接
+    #   `invite.php?id=85068`，以及**魔力值**那格的写法是
+    #   `[<font …>魔力值</font>: 258,590.0 <a href="mybonus.php">使用</a>]`
+    #   —— 值在 `</font>` **之后**、且冒号在 font 外面 ⇒ 上一版漏了它。
+    ("会员 ID（invite 链接）", re.compile(r"(invite\.php\?id=)\d+"), r"\1<UID>"),
+    ("魔力值（font 闭合后跟值）",
+     re.compile(r"(魔力值\s*</font>\s*[:：]\s*)[\d,\.]+"), r"\1<NUM>"),
+    ("魔力值（label 后跟值与「使用」链接）",
+     re.compile(r"(魔力值\s*[:：]\s*)[\d,\.]+(?=\s*<a)"), r"\1<NUM>"),
     ("魔力值面额", re.compile(r"(魔力值\s*[:：]\s*)[\d,\.]+"), r"\1<NUM>"),
-    ("分享率 / 上传量 / 下载量",
+    # ★ 会员态读数：值**不一定紧跟标签** —— 列表页的写法是
+    #     `<font class='color_ratio'>分享率：</font>3.013`
+    #   即标签在 `<font>` 里、**值在 font 外面**。所以既要有「标签+值」的紧邻写法，
+    #   也要有「标签后先跳过标签再取值」的写法。实测（2026-09-19）：
+    #   只写前者会在列表页上**漏掉 3.013 / 413.10 GB / 137.13 GB**（已实测确认漏）。
+    ("分享率（标签后直接跟值）",
      re.compile(r"((?:分享率|上傳量|下載量)\s*[:：]\s*)[\d,\.]+\s*\w*"), r"\1<NUM>"),
+    ("分享率（标签在 font 里、值在外面）",
+     re.compile(r"((?:分享率|上傳量|下載量)\s*[:：]\s*</font>\s*)[\d,\.]+\s*\w*"), r"\1<NUM>"),
+    ("分享率（label 与值之间夹**闭合**标签）",
+     # ★ 只允许「闭合标签」夹在中间（如 `分享率：</font>3.013`）。
+     #   第一版写的是 `(?:\s*</?\w+[^>]*>)*` —— 允许**开闭都行**，
+     #   于是匹配跨过了 `<a href="/torrents.php?…">` 这种长开标签，
+     #   在「當前活動：<a href=...><img ...>` 上产生**假阳性**（实测）：
+     #   它把后面那一大段都算进 group，`--check` 于是永远报"仍检出"。
+     #   判据：**只吃闭合标签**，遇到开标签就停。宁可少抹（有 check 兜底），
+     #   不要假阳性（假阳性会让检查器变成"永远红"= 没人看）。
+     re.compile(r"((?:分享率|上傳量|下載量)\s*[:：](?:\s*</\w+>)*\s*)[\d,\.]+\s*\w*"),
+     r"\1<NUM>"),
     ("邀请数", re.compile(r"(邀請\s*[:：]\s*)\d+"), r"\1<NUM>"),
-    ("H&R 计数", re.compile(r"(H&R\s*[:：]\s*)\d+"), r"\1<NUM>"),
+    ("H&R 计数", re.compile(r"(H&R\s*[:：]\s*(?:<[^>]+>\s*)*)\d+"), r"\1<NUM>"),
     ("當前活動 / 連接數等会员读数",
-     re.compile(r"((?:當前活動|可連接|連接數)\s*[:：]\s*)[\d,]+\s*\w*"), r"\1<NUM>"),
+     # ★ 同上去掉「任意开标签」的写法。实测：`當前活動：</font>` 后面跟的是
+     #   `<a href=…><img class="arrowup">`（**图标**，不是数字）——
+     #   那条规则本来是给详情页的 `當前活動： 500` 用的，列表页形状不同。
+     #   现在只吃闭合标签，匹配不到就不匹配（由 --check 兜底，不再假阳性）。
+     re.compile(r"((?:當前活動|可連接|連接數)\s*[:：](?:\s*</\w+>)*\s*)[\d,]+\s*\w*"),
+     r"\1<NUM>"),
     # ══════════════ ★ 这里**故意没有**「裸 32+ 位十六进制」那条笼统兜底 ══════════════
     # 第一版写了它，实测（2026-09-19）发现它**越界**：同一页里的十六进制串有四种来源，
     # 只有一种是凭据 ——
@@ -252,6 +286,32 @@ def cmd_selftest():
         ok = False
     else:
         print("  ✅ passkey 已抹，其余内容逐字不变")
+
+    print("\n" + "=" * 66)
+    print("[5] 列表页的会员横幅：值在 `<font>` **外面**也必须抹掉")
+    print("=" * 66)
+    # ★ 实测（2026-09-19）第一版漏了这个形状：列表页写成
+    #   `<font class='color_ratio'>分享率：</font>3.013` —— 标签在 font 里、值在外面，
+    #   而规则只覆盖了「标签后紧跟值」。结果 3.013 / 413.10 GB / 137.13 GB 全部漏网。
+    banner = (
+        '<font class="color_downloaded">H&R: <a href="/x"><b style="color:green">7</b></a></font> '
+        "<font class='color_ratio'>分享率：</font>3.013 "
+        "<font class='color_uploaded'>上傳量：</font>413.10 GB "
+        "<font class='color_downloaded'>下載量：</font>137.13 GB"
+    )
+    clean5, _ = sanitize_text(banner)
+    leaked = [v for v in ("3.013", "413.10", "137.13") if v in clean5]
+    if leaked:
+        print(f"  ❌ 仍有会员读数漏网：{leaked}")
+        ok = False
+    else:
+        print("  ✅ 分享率/上传量/下载量 全部抹掉（含 font 包裹与标签间隔两种形状）")
+    if "7" in clean5.replace("<NUM>", "").replace("7</a>", ""):
+        pass        # H&R 的 7 藏在 <b> 里，见下一条断言
+    if "<b style=\"color:green\">7</b>" in clean5:
+        print("  ⚠️  H&R 计数（藏在 <b> 里）未抹 —— 已知，见下")
+    else:
+        print("  ✅ H&R 计数也已抹掉")
 
     print()
     print("✅ 自检全部通过（三个方向都验过）" if ok else "❌ 自检失败")
