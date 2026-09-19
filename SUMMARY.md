@@ -1077,6 +1077,79 @@ sudo docker logs --tail=60 musopia
 不 cp 生产库），精确计算各阶段年龄/心跳，并落一份上次快照用于「只报变化」。
 ★ 已挂每小时定时任务（本地 CST，`17 * * * *`，7 天后自动过期）。
 
+**★ 21:55 CST 追加：心跳停止的**原因已确定，不是故障****
+
+`docker logs --tail=60 musopia` 直接把原因说清楚了：
+
+```
+[2026-09-19 21:30:00] 收到信号 15，等当前阶段结束后退出（不会中途打断正在提交的请求）
+[2026-09-19 21:30:01] 👋 编排器已退出。
+```
+
+⇒ **是 SIGTERM 主动停的、优雅退出**，不是崩溃也不是卡死。
+`docker ps | grep musopia` 无输出 ⇒ 容器当前**没有在跑**。
+
+★ 订正本节上面那条的措辞：「daemon 可能已停/卡住」→ **「已确定停止，原因已知且非故障」**。
+★ **但仍需注意**：容器停着 ⇒ **daemon 不会做任何事**（scan/edit/covers 全部停摆），
+  而**心跳会一直是陈旧的** ⇒ 每小时巡检会持续报"心跳停了"。
+  **那是预期内的**，在容器没重新起来之前，别把那条当成新故障反复上报。
+
+---
+
+### 🔴 移交待办清单（2026-09-19 会话结束 · 共 8 项）
+
+> ★ **这一节就是"落盘"本身** —— 本项目有成文约定：**会话 TaskList 换会话即失**
+> （`ENVIRONMENT.md` `A.12`），跨会话的东西必须落到文件里。
+> 下面这份就是当时 TaskList 的完整副本，**下一个会话照这个干，不要重新推导**。
+
+| # | 事项 | 状态 / 被谁挡着 |
+|---|---|---|
+| 8 | ★ **修 `musopia.iter_my_uploads()` 的翻页 bug** | **优先做这个** —— 它挡着 #1、#4 |
+| 1 | 查站点到底有没有叶惠美 | 被 #8 挡着（判据已失效） |
+| 4 | 定位「HTTP 200 + 空 body」的根因 | 被 #1 挡着 |
+| 2 | 验容器内 `OPENCD_COOKIE` 是否被 `$` 插值改坏 | 独立，可随时做 |
+| 3 | 重新裁定 `.env.example` 的两个「陷阱」 | 独立（两个都已证伪/存疑） |
+| 5 | 删三个临时探针脚本（本地 + NAS） | 诊断完再做 |
+| 7 | 把「凭据扫描」落成 `tools/` 脚本 | 不紧急（README 下一步第 2 条） |
+| — | 重启 daemon 容器 | `sudo docker compose up -d --build` |
+
+**#8 修 `iter_my_uploads()` 翻页** —— `musopia.py:91`
+实测：库里 `site_torrent_id` 非空 **264** 条（`min=14611 max=15975`），该函数只捞出 **2** 条。
+铁证是邻近区间 `15971`/`15973`/`15975`（库里都是 `EXISTS`、确实在站上）**一条都没回**。
+怀疑根因：请求用 `page` 从 **0** 起（`for page in range(max_pages)`），而站点从 **1** 起
+⇒ 第 0/1 页返回同一批 ⇒ 全在 `seen` 里 ⇒ `found == 0` ⇒ **循环在第 0 页就 break**。
+修法：起始页改 1；且 `break` 判据不能只看 `found == 0`，至少要「连续两页无新增」。
+★ 修完**必须实测**：捞出条数应与库里 `site_torrent_id IS NOT NULL` 的条数接近，
+并**逐条比对邻近 id** —— **不许只看"跑通了"**。
+
+**#1 查站点有没有叶惠美** —— 用修好的 #8，或换一条**不依赖翻页**的判据
+（例：站点搜索 `torrents.php?search=叶惠美`，再逐条看 uploader 是不是 `10427`）。
+★ 当前结论：**「站点上没有」尚未成立**。「叶惠美 0 条」不足以证明任何事。
+★ **在 #1 出结果前，不要再重试发布** —— 那条已被尝试 3 次
+（`publish.py --limit 1` ×2 + 探针 ×1），若都真建了就是 3 条重复。
+
+**#4 空 body 根因** —— 实测 `HTTP 200` + `Content-Type: text/html` + **响应体 0 字节** + 无 `Location`。
+既不是错误页也不是退回的表单页 ⇒「权限问题 vs 字段问题」的二选一**不适用**。
+★ `_extract_error()` 抠不到文案**不是线索** —— body 是空的，它**必然**返回空。
+★ 关键：`upload_torrent()`（`musopia.py:296`）判「成功」的唯一依据是 `Location: ...id=N`，
+**拿不到就报"失败"，但那只说明我们没解析到 ID，不说明站点没建种子。**
+
+**#2 验 `OPENCD_COOKIE` 完整性**（只打印长度/md5/`$` 数，**不打印明文**）
+```bash
+sudo docker compose --profile tools run --rm tools python -c "import os,hashlib;v=os.environ.get('OPENCD_COOKIE') or '';print(len(v), hashlib.md5(v.encode()).hexdigest(), v.count('$'))"
+```
+与 `.env` 原文比：长度应一致、`$` 数应为 **6**。不一致 ⇒ 皇后 Cookie 在容器里是坏的。
+
+**#5 删探针** —— 本地 `tools/{publish_probe,show_response,uploads_probe}.py`（未进 git）；
+NAS compose 根目录 `_probe_publish.py` / `_probe_show.py` / `_probe_uploads.py`；
+外加探针落盘的 `/data/last_upload_response.html`（当前 0 字节）。
+
+**#7 凭据扫描脚本** —— 扫受控文件里像真凭据的串（长 base64 / `c_secure_pass=` / cookie 串 / api key），
+排除占位符（`changeme` 等）。★ 用 Python 写，**不要串 grep**
+（`ERR-OS-02` 裸 CR 被 Windows `grep.exe` 吃掉、`ERR-OS-03` `od -c | grep '\r'` 假阳性）。
+
+---
+
 ### 🔵 进行中：OpenCD 转载流水线（2026-09-19 定稿 · **第 1、2 步已了结 · 第 3 步已落库**）
 
 > **进度**：第 1 步（解析器）、第 2 步（三态裁决）、第 3 步（抓取层）**代码已完成并落库**，
