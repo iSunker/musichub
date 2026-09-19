@@ -41,7 +41,7 @@ qBittorrent(:3020, 分类 opencd)
 | 搞清调度为什么是单容器 | **为什么是单容器 + 自研调度** |
 | **下一步该做什么** | **当前状态与下一步** |
 | 想看完整决策理由和踩过的坑 | **SUMMARY.md** |
-| 想看踩过哪些坑、根因是什么 | **SUMMARY §6 坑与归因总表**（25 项） |
+| 想看踩过哪些坑、根因是什么 | **SUMMARY §6 坑与归因总表**（27 项） |
 | **新会话开局 / 环境前提 / 按症状找环境坑** | **ENVIRONMENT.md**（检索层：A 部分前提 · B 部分 `ERR-*` 条目）|
 
 > **三份文档怎么分工**：
@@ -588,14 +588,16 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 
 ## 当前状态与下一步
 
-**状态（2026-09-14）**：生产在 NAS `/volume2/docker_ssd/musopia_script2` 常驻运行，
+**状态（2026-09-14 核 · 2026-09-19 复核）**：生产在 NAS `/volume2/docker_ssd/musopia_script2` 常驻运行，
 本机在 `D:\Projects\musopia\zhuanzhong` 有一份完整开发副本。
-★ **全部代码文件本机 ↔ NAS 逐字节一致**（2026-09-14 核）。
+★ **全部代码文件本机 ↔ NAS 逐字节一致**（2026-09-19 复核：`deploy.sh` 报「生产与本地一致」）。
 
-> ⚠️ **2026-09-17 起这条不再成立**：本机改了三处（`publish.py` 匿名默认值、
-> `config.py` 两处订正、`ENVIRONMENT.md`），**还没跑 `deploy.sh --apply`** ⇒
-> **NAS 上仍是旧的**。要生效：`bash deploy.sh --apply`，再在 NAS 上
-> `sudo docker compose up -d --build`。详见 **SUMMARY §5.4**。
+> ✅ **2026-09-17/18 那笔积压已清（2026-09-19 10:21 部署）**：`publish.py` 匿名默认值、
+> `config.py` 两处订正、OpenCD 第 3/4 步全部文件，共 **9 个文件**已随
+> `deploy.sh --apply` 写入 NAS，并已 `up -d --build` 重建镜像、
+> **实测确认新代码生效**（库列数 17 → 22）。详见 **SUMMARY §5.4 / §5.5 / §5.6**。
+> ★ 两点仍不成立，别读成"什么都跟上了"：① `ENABLE_PUBLISH=false` **未恢复**；
+> ② `OPENCD_COOKIE` **仍未填**（crawl 未接调度，暂不需要）。
 
 **✅ 已了结**：
 
@@ -624,8 +626,10 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
    `publish.py` 现在**只要有失败就以非 0 退出**，于是 daemon 的退避分支真的进得去：
    实测 `n_fail=1..4` 分别等 `60 / 120 / 240 / 360` 分钟（上限 `MAX_BACKOFF`），
    原先卡死的那一行是 `30` 分钟 —— 「一天 240 次无效 POST」降到约 **8 次**。
-   ★ **仍未部署**（`publish.py` 在白名单里，但没跑 `deploy.sh --apply`），见 **SUMMARY §5.5**。
-   ★ 注意 `ENABLE_PUBLISH=false` 还没恢复 ⇒ **恢复正常发种仍要看第 3 条**。
+   ★ **已部署（2026-09-19）**：`publish.py` 在白名单里，已随那次 `deploy.sh --apply`
+   上线并重建镜像，见 **SUMMARY §5.5**。
+   ★ 但**功能尚未启用**：`ENABLE_PUBLISH=false` 还没恢复 ⇒ 这个退避语义
+   **要等 publish 重新启用才真正起作用** ⇒ **恢复正常发种仍要看第 3 条**。
    完整归因见 **`ENVIRONMENT.md` `ERR-SITE-01` 边界**（已同步订正）。
 2. **★ 把提交前的凭据扫描落成 `tools/` 里的脚本。**
    同一个扫描**已经手写过两次**，2026-09-14 那次还被 `ERR-OS-01`（GBK 控制台编不出某些字符）
@@ -659,7 +663,12 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
      离线自检 `python tools/opencd-crawl-selftest.py` **20/20**（本地 mock 皇后，不碰外网）。
      ★ **但还没接进 `daemon.py`，也没入库** —— 现在只能手工跑，抓到的数据只落盘
      `raw_html/<tid>.html`，不进 `data.db`。**它还没开始自动敲站点。**
-   - **下一步**：把抓取层接进调度 + 入库（那两个 3 天闸门），
+   - **限速（2026-09-19 调）**：每请求最小间隔 **120s**、每日上限 **50**（见 `.env.example`）。
+     ⚠️ **这两个旋钮都是「请求」量纲，不是「种子」** —— 用户要的「每天 50 个种子」
+     目前只能**近似**成「每天 50 个请求」（一种子 ≈ 2~3 请求 ⇒ 实际约 17~25 种子/天，偏保守）。
+     ⚠️ 更要注意：`RateGate` 每轮新建 ⇒ 那个「每日」上限**实际退化成每轮上限**。
+     真·跨轮配额留到**接调度 + 入库**那步一起做（详见 `SUMMARY §12` 的「已知缺口」）。
+   - **下一步**：把抓取层接进调度 + 入库（那两个 3 天闸门 + 跨轮配额账本），
      然后才是**第 4 步**（字段映射 → 渲染 → 发布，**全部默认 dry-run**）。
    - ★ 动手前必读：**转载规则是三态**（只有明确 ALLOW 才自动发布；
      ★ 且裁决**只认字段、不靠关键词兜底** —— 见 `SUMMARY §12` 第 2 步）、

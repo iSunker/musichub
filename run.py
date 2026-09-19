@@ -104,7 +104,7 @@ def main():
     known = {row[0]: (row[1], row[2], row[3], row[4]) for row in cur.fetchall()}
     conn.close()
 
-    stats = {"skipped": 0, "no_log": 0, "ok": 0, "failed": 0}
+    stats = {"skipped": 0, "no_log": 0, "ok": 0, "failed": 0, "skipped_no_log": 0}
 
     for torrent in torrents:
         info_hash = torrent.hash
@@ -128,6 +128,22 @@ def main():
                 print(f"⚠️  库里标记已完成但种子文件不在了，重做: {name}")
                 if known_cover:
                     print(f"   （已有封面 URL，重做时复用，不再重传图床）")
+
+            # ★ 已知无抓轨日志的种子：直接短路，**不再读目录、不再逐条打日志**。
+            #
+            # 为什么：qB 的 opencd 分类里约 43% 的种子本来就没有 .log
+            # （WEB 下载 / 非抓轨来源），它们**永远不会被发布**（第一代的纪律：
+            # 必须有 .log 才发，见本文件下面的 NO_LOG_FILE）。但原先是**每轮
+            # 重扫一遍**：read_logs() 走一遍目录 + 打一行「❌ 跳过：…」，
+            # 505 条里 216 条是这种，日志被这些**必然重复**的行占掉将近一半。
+            #
+            # ★ 判据用库内 `status`（这是上一次扫描的**结论**，已持久化），
+            # 不是重新去读目录判断 —— 那才是"省掉重复劳动"这件事本身。
+            # ★ `--recheck` 时**不短路**：那个开关的语义就是"无视缓存重做一遍"，
+            # 若它也被短路，就没法用它来复核"这些真的还是没日志吗"了。
+            if status == "NO_LOG_FILE":
+                stats["skipped_no_log"] += 1
+                continue
 
         print("-" * 60)
         print(f"扫描: {name}")
@@ -224,7 +240,13 @@ def main():
 
     print("\n" + "=" * 60)
     print(f"🎯 扫描完成：新处理 {stats['ok']} 个 | 缓存跳过 {stats['skipped']} 个 | "
-          f"无日志 {stats['no_log']} 个 | 失败 {stats['failed']} 个")
+          f"无日志 {stats['no_log']} 个 | 已知无日志(短路) {stats['skipped_no_log']} 个 | "
+          f"失败 {stats['failed']} 个")
+    # ★ 口径提醒（别把这两组数对账，它们是两个量纲）：
+    #   · 「无日志 N 个」= **本轮**扫到几个没 .log 的（会写库）
+    #   · 「已知无日志(短路) M 个」= 库内**历史累积**、本轮**连扫都没扫**的
+    #   两者之和 ≈ 库里 NO_LOG_FILE 的总数，但**不等于**「本轮 qB 里的种子数」
+    #   （qB 里可能还有从未进过库的）。详见 SUMMARY §6 的口径坑那两条。
     st = db.stats()
     print(f"📊 库内共 {st['total']} 行，待发布可用 python publish.py 查看")
 

@@ -22,6 +22,13 @@ OpenCD（皇后）抓取层 —— ★ **本项目唯一主动访问别人站点
   · 每轮预算 / 每日上限 / 最小间隔 → 全部过 `RateGate`（**每个请求都要过**）
   · 详情页**抓过就跳** —— 这才是真正省请求的机制（不是把间隔调大）
 
+★ 2026-09-19 调整（用户要求）：每请求最小间隔 **2s → 120s**；
+  每日上限 **300 → 50**（目标是「每天 50 个种子」，但闸门是**请求**量纲 —— 见下）。
+★★ 缺口（**未解决**）：真正的「每天 50 个种子」需要**跨轮持久**的计数，
+  而 `RateGate` 每进程新建 ⇒ `_count_day` 每轮归 0 ⇒ 当前的「每日」上限
+  实际是**每轮**上限。跨轮账本与真·种子配额留到「接调度 + 入库」那步一起做。
+  完整理由见 `opencd_rate.py` 模块头「已知缺口」。
+
 ═══════════════════════════════════════════════════════════════════════════
 用法
 ═══════════════════════════════════════════════════════════════════════════
@@ -54,12 +61,20 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
 # ==================== 默认频率参数（可用 .env 覆盖） ====================
-# ★ 这几个数都**先给保守值**，跑一周看真实量再调（`SUMMARY §12` 第 3 步）。
+# ★ 2026-09-19 调整（用户要求）：最小间隔 2s → **120s**；每日上限 300 → **50**。
+# ★★ 量纲警告：`OPENCD_MAX_PER_DAY` 是**请求**量纲，用户要的是「每天最多 **50 个种子**」
+#    （一种子 ≈ 2~3 请求：搜索 1 + 验候选 1~5 + 详情页 0~1）。
+#    取 50 即**把请求上限压到种子数之下** —— 结果是偏保守（实际约 17~25 种子/天），
+#    而不是超量。★ 想真正按种子卡，需要跨轮持久的账本，那是「接调度 + 入库」那步的事
+#    （缺口详见 `opencd_rate.py` 模块头「已知缺口」，**别读成已解决**）。
 DEFAULT_MAX_PER_ROUND = int(os.getenv("OPENCD_MAX_PER_ROUND", "20"))
-DEFAULT_MIN_INTERVAL = float(os.getenv("OPENCD_MIN_INTERVAL", "2"))
-DEFAULT_MAX_PER_DAY = int(os.getenv("OPENCD_MAX_PER_DAY", "300"))
-# 2026-09-19 定的：阶段周期由 daemon 传，默认 1800s（30 min）
-DEFAULT_INTERVAL = int(os.getenv("OPENCD_INTERVAL", "1800"))
+DEFAULT_MIN_INTERVAL = float(os.getenv("OPENCD_MIN_INTERVAL", "120"))
+DEFAULT_MAX_PER_DAY = int(os.getenv("OPENCD_MAX_PER_DAY", "50"))
+# ⚠️ 原来这里还有个 DEFAULT_INTERVAL（OPENCD_INTERVAL，阶段周期）—— 已删。
+#   ★ 它**零消费者**：抓取节奏是 `daemon.py` 的事（本模块 :20-21 自己就这么写），
+#     而 crawl 还没接进 daemon ⇒ 这个值从来没人读过。
+#     留一个"调了没效果"的旋钮，比没有这个旋钮更糟（`opencd_rate.py` 的 reset_round()
+#     那条注释是同一个道理）。
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -78,12 +93,19 @@ class Client:
     def __init__(self, cookie=None, gate=None, dry_run=False):
         self.base = (os.getenv("OPENCD_URL", "https://open.cd")).rstrip("/")
         self.cookie = cookie or os.getenv("OPENCD_COOKIE", "")
-        self.gate = gate or opencd_rate.RateGate(
-            max_per_round=DEFAULT_MAX_PER_ROUND,
-            min_interval=DEFAULT_MIN_INTERVAL,
-            max_per_day=DEFAULT_MAX_PER_DAY,
-            log=log,
-        )
+        # ★ 2026-09-19：**删掉**原来这里的 `gate or RateGate(...)` 兜底。
+        #   那个兜底造的 gate **没有 day_key** ⇒ 「每日上限」静默失效
+        #   （`roll_day()` 永远不会清零，`_day_key=None` 与任何日期都不等）。
+        #   「有个看起来能跑的兜底」比「必须显式传」危险得多 ——
+        #   同 `SUMMARY §3.15`（密钥不留默认值）的推理。
+        #   ★ 零影响已核实：自检 5 处 `crawl.Client(...)` 全都显式传 `gate=`。
+        if gate is None:
+            raise ValueError(
+                "Client 必须显式传 gate=（RateGate 实例）。"
+                "不传时闸门没有 day_key，「每日上限」会静默失效 —— "
+                "频率控制是本条流水线最要紧的纪律，不允许有绕过它的路径。"
+            )
+        self.gate = gate
         self.dry_run = dry_run
         self.sess = requests.Session()
         self.sess.headers.update({
@@ -365,8 +387,14 @@ def main():
         day_key=time.strftime("%Y-%m-%d"),
         log=log,
     )
-    log(f"⏱️  频率：每轮 {gate.max_per_round} 个请求 · 最小间隔 {gate.min_interval}s · "
-        f"每日上限 {gate.max_per_day}")
+    log(f"⏱️  频率：每轮 {gate.max_per_round} 个请求 · 最小间隔 {gate.min_interval:g}s · "
+        f"每日上限 {gate.max_per_day}（★ **请求**量纲）")
+    # ★ 显式打出「用户要的是 50 个种子」与其真实的保守含义 —— 免得日志里
+    #   `每日上限 50` 被读成「每天 50 个种子已经做到了」（那是量纲混淆）。
+    log(f"   ★ 目标：每天最多 50 个**种子**（一种子 ≈ 2~3 请求）⇒ 折合约 "
+        f"{gate.max_per_day // 3}~{gate.max_per_day // 2} 个种子/天。")
+    log(f"   ⚠️  且当前 `_count_day` **每轮归 0**（RateGate 每进程新建）"
+        f"⇒ 这个「每日」上限实际退化成「每轮」上限，跨轮持久配额待接调度那步再做。")
 
     client = Client(gate=gate, dry_run=args.dry_run)
     if not client.cookie:
