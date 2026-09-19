@@ -630,6 +630,13 @@ def cmd_selftest():
     total_checked += mc
     total_fails += mf
 
+    # ★ 「不靠关键词反推」的护栏 —— 把一条曾经的**假声称**钉成可跑的判据。
+    print(f"\n{'─' * 72}")
+    print("三态裁决 · 正文塞满禁转关键词也不许改判（★ 防「关键词兜底」复活）")
+    kc, kf = _rule_no_keyword_fallback()
+    total_checked += kc
+    total_fails += kf
+
     print(f"\n{'─' * 72}")
     print("列表页解析（torrents.php）· 抓取层的入口（★ 第 3 步用）")
     lc, lf = _check_listpage()
@@ -662,6 +669,27 @@ RULE_MUTATIONS = [
     ("值置空", "set:", "", RULE_UNKNOWN, False),
     ("简体禁止转载", "set:禁止转载", "禁止转载", RULE_DENY, False),
     ("简体欢迎转载", "set:欢迎转载", "欢迎转载", RULE_ALLOW, True),
+]
+
+# ★★ 「不靠关键词反推」的护栏 —— 对应 SUMMARY §12 第 2 步那条**销掉的假声称**。
+#   计划里写过「关键词兜底抄 easy-upload 的 FORBIDDEN_KEYWORDS」，但代码里从来没有；
+#   核对后**决定不补**（够不着 + 会误杀，理由见 SUMMARY）。这里把「不靠关键词」
+#   从一句注释钉成**可跑的判据**：正文里塞满禁转关键词，裁决必须**只由字段决定**。
+#
+#   方向很要紧：写反了就成了「塞关键词 ⇒ 更保守」，那样这条判据会**奖励**
+#   一个我们不想要的实现。两例必须**相反**才说明"正文与裁决无关"：
+#     ① 字段 = 歡迎轉載 + 正文满是禁转字样  → 仍 ALLOW（★ 不能被正文拉成 DENY/UNKNOWN）
+#     ② 字段 = 缺失      + 正文满是禁转字样  → 仍 NEED_CONFIRM（★ 不能被正文"救"成 DENY）
+#   ② 容易被写错成「正文有禁转 ⇒ DENY」——那正是原计划那条兜底的形状，也正是要防的。
+RULE_NO_KEYWORD_FALLBACK = [
+    ("字段=歡迎轉載 而正文满是禁转字样", "set:歡迎轉載", RULE_ALLOW, True),
+    ("字段缺失   而正文满是禁转字样", "drop", RULE_UNKNOWN, False),
+]
+
+# 塞进正文的关键词（照抄 easy-upload 的 FORBIDDEN_KEYWORDS，实测该表确有此 7 项）
+FORBIDDEN_KEYWORDS = [
+    "禁转", "禁轉", "严禁转载", "嚴禁轉載",
+    "谢绝转载", "謝絕轉載", "exclusive",
 ]
 
 
@@ -701,6 +729,55 @@ def _rule_mutations():
         if not ok:
             print(f"        期望 raw={want_raw!r} rule={want_rule} auto={want_auto}")
     print(f"    → 三态裁决 {checked - fails}/{checked} 项通过")
+    return checked, fails
+
+
+def _rule_no_keyword_fallback():
+    """
+    「不靠关键词反推」的护栏 —— 见上面 RULE_NO_KEYWORD_FALLBACK 的注释。
+
+    ★ 做法：把 7 个禁转关键词**塞进简介正文**（`divdescr`），再验裁决只由
+      `轉載規則` 字段决定。两例方向相反，所以能真正证明"正文与裁决无关"。
+    ★ 注入点必须是 `divdescr`（那是简介正文所在），不是整页 —— 整页替换
+      容易连字段一起改掉，测的就不是"正文不影响裁决"了。
+    """
+    path = os.path.join(SAMPLE_DIR, "sample-zhuanzai-huanying.html")
+    if not os.path.exists(path):
+        print("  ⚠️  缺样本，跳过")
+        return 0, 0
+    base = open(path, encoding="utf-8").read()
+    poison = " ".join(FORBIDDEN_KEYWORDS)
+
+    # 自检前提：这个样本里确实有 divdescr 可注入（否则判据是空的）
+    if 'id="divdescr"' not in base:
+        print("    ⚠️  样本里没有 divdescr，无法注入关键词 —— 判据不成立")
+        return 0, 1
+
+    checked = fails = 0
+    for label, mut, want_rule, want_auto in RULE_NO_KEYWORD_FALLBACK:
+        if mut == "drop":
+            html = re.sub(r'<td class="rowtitle">轉載規則[：:]?</td>\s*<td[^>]*>.*?</td>',
+                          "", base, flags=re.S)
+        else:                                   # set:<值>
+            html = re.sub(r"(轉載規則[：:]?</td>\s*<td[^>]*>)[^<]*(</td>)",
+                          r"\g<1>" + mut[4:] + r"\g<2>", base)
+        # ★ 把禁转关键词塞进简介正文（divdescr 的开头）
+        html = html.replace('id="divdescr"', f'id="divdescr" data-poison="{poison}"', 1)
+        html = re.sub(r'(<div[^>]*id="divdescr"[^>]*>)', r"\g<1>" + poison + " ", html, count=1)
+
+        info = parse_detail(html)
+        got = (info.rule, info.may_auto_publish())
+        expect = (want_rule, want_auto)
+        checked += 1
+        ok = got == expect
+        if not ok:
+            fails += 1
+        print(f"    {'✅' if ok else '❌'} {label:<26} rule={info.rule:<12} "
+              f"可自动发布={info.may_auto_publish()}  （正文已注入 {len(FORBIDDEN_KEYWORDS)} 个禁转词）")
+        if not ok:
+            print(f"        期望 rule={want_rule} auto={want_auto}"
+                  f"  ⇒ ★ 正文影响了裁决，说明实现里混进了关键词兜底")
+    print(f"    → 不靠关键词反推 {checked - fails}/{checked} 项通过")
     return checked, fails
 
 
