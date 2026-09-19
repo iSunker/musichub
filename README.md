@@ -588,14 +588,16 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 
 ## 当前状态与下一步
 
-**状态（2026-09-14）**：生产在 NAS `/volume2/docker_ssd/musopia_script2` 常驻运行，
+**状态（2026-09-14 核 · 2026-09-19 复核）**：生产在 NAS `/volume2/docker_ssd/musopia_script2` 常驻运行，
 本机在 `D:\Projects\musopia\zhuanzhong` 有一份完整开发副本。
-★ **全部代码文件本机 ↔ NAS 逐字节一致**（2026-09-14 核）。
+★ **全部代码文件本机 ↔ NAS 逐字节一致**（2026-09-19 复核：`deploy.sh` 报「生产与本地一致」）。
 
-> ⚠️ **2026-09-17 起这条不再成立**：本机改了三处（`publish.py` 匿名默认值、
-> `config.py` 两处订正、`ENVIRONMENT.md`），**还没跑 `deploy.sh --apply`** ⇒
-> **NAS 上仍是旧的**。要生效：`bash deploy.sh --apply`，再在 NAS 上
-> `sudo docker compose up -d --build`。详见 **SUMMARY §5.4**。
+> ✅ **2026-09-17/18 那笔积压已清（2026-09-19 10:21 部署）**：`publish.py` 匿名默认值、
+> `config.py` 两处订正、OpenCD 第 3/4 步全部文件，共 **9 个文件**已随
+> `deploy.sh --apply` 写入 NAS，并已 `up -d --build` 重建镜像、
+> **实测确认新代码生效**（库列数 17 → 22）。详见 **SUMMARY §5.4 / §5.5 / §5.6**。
+> ★ 两点仍不成立，别读成"什么都跟上了"：① `ENABLE_PUBLISH=false` **未恢复**；
+> ② `OPENCD_COOKIE` **仍未填**（crawl 未接调度，暂不需要）。
 
 **✅ 已了结**：
 
@@ -624,8 +626,10 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
    `publish.py` 现在**只要有失败就以非 0 退出**，于是 daemon 的退避分支真的进得去：
    实测 `n_fail=1..4` 分别等 `60 / 120 / 240 / 360` 分钟（上限 `MAX_BACKOFF`），
    原先卡死的那一行是 `30` 分钟 —— 「一天 240 次无效 POST」降到约 **8 次**。
-   ★ **仍未部署**（`publish.py` 在白名单里，但没跑 `deploy.sh --apply`），见 **SUMMARY §5.5**。
-   ★ 注意 `ENABLE_PUBLISH=false` 还没恢复 ⇒ **恢复正常发种仍要看第 3 条**。
+   ★ **已部署（2026-09-19）**：`publish.py` 在白名单里，已随那次 `deploy.sh --apply`
+   上线并重建镜像，见 **SUMMARY §5.5**。
+   ★ 但**功能尚未启用**：`ENABLE_PUBLISH=false` 还没恢复 ⇒ 这个退避语义
+   **要等 publish 重新启用才真正起作用** ⇒ **恢复正常发种仍要看第 3 条**。
    完整归因见 **`ENVIRONMENT.md` `ERR-SITE-01` 边界**（已同步订正）。
 2. **★ 把提交前的凭据扫描落成 `tools/` 里的脚本。**
    同一个扫描**已经手写过两次**，2026-09-14 那次还被 `ERR-OS-01`（GBK 控制台编不出某些字符）
