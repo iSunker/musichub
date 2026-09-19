@@ -618,14 +618,15 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
   止住「权限抖动时每 30 分钟一轮无效 POST」。三个时刻与复核判据见
   **`ENVIRONMENT.md` `ERR-SITE-01` 边界**。
 
-**🔴 下一步**（2026-09-14 定稿）：
+**🔴 下一步**（2026-09-14 定稿 · 2026-09-18 销掉第 1 条）：
 
-1. **★ 给 `publish` 补一个说真话的退出码。**
-   `publish.py` 即便 `成功 0 条，失败 5 条` 也**以 0 退出**，而 daemon 判成败**只看退出码**
-   （`daemon.py:280`）⇒ `fails["publish"]` 每轮被清零、**退避分支根本进不去** ⇒
-   按 `PUBLISH_INTERVAL=1800` **每 30 分钟原样重来一次**。
-   ★ 实测发种权限是**抖**的（`16:19` 全败、`18:50` 全成）⇒ 这个「一天 240 次无效 POST」
-   的窗口会**反复**出现，不是一次性事故。完整归因见 **`ENVIRONMENT.md` `ERR-SITE-01` 边界**。
+1. **✅ 已了结（2026-09-18）：`publish` 的退出码说真话了。**
+   `publish.py` 现在**只要有失败就以非 0 退出**，于是 daemon 的退避分支真的进得去：
+   实测 `n_fail=1..4` 分别等 `60 / 120 / 240 / 360` 分钟（上限 `MAX_BACKOFF`），
+   原先卡死的那一行是 `30` 分钟 —— 「一天 240 次无效 POST」降到约 **8 次**。
+   ★ **仍未部署**（`publish.py` 在白名单里，但没跑 `deploy.sh --apply`），见 **SUMMARY §5.5**。
+   ★ 注意 `ENABLE_PUBLISH=false` 还没恢复 ⇒ **恢复正常发种仍要看第 3 条**。
+   完整归因见 **`ENVIRONMENT.md` `ERR-SITE-01` 边界**（已同步订正）。
 2. **★ 把提交前的凭据扫描落成 `tools/` 里的脚本。**
    同一个扫描**已经手写过两次**，2026-09-14 那次还被 `ERR-OS-01`（GBK 控制台编不出某些字符）
    当场打断。本项目对这类东西有现成原则：**不做会各自漂的拷贝**
@@ -638,6 +639,8 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
    ```bash
    docker compose --profile tools run --rm tools python publish.py --limit 1
    ```
+   ★ **时机有讲究**：第 1 条修好之后，发布失败会**指数退避**（最长 6 小时一轮）。
+   恢复 `publish` 前先确认站方权限确实通了，否则会白等一轮退避。
    恢复条件见 **`ENVIRONMENT.md` `ERR-SITE-01` 边界**。
 4. **NAS 上的 `README.md` 是旧版。**
    `deploy.sh` **不带**它（白名单 = `Dockerfile` 的 `COPY` 行，README 不在其中），
