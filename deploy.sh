@@ -57,6 +57,7 @@ FILES=(
   run.py publish.py update_metadata.py sync_site.py
   backfill_covers.py check_db.py
   daemon.py healthcheck.py
+  crawl.py opencd_parse.py opencd_rate.py opencd_log.py
   Dockerfile docker-compose.yml
   README.md
   .env.example
