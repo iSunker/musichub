@@ -21,12 +21,61 @@ TEAM = {"MUSOPIA": "6", "OTHER": "5", "HDS": "1", "CHD": "2",
         "MYSILU": "3", "WIKI": "4"}
 
 # input type=checkbox name="tags[4][]"
+#
+# ★★ 2026-09-21 订正 —— 这张表原先只有 23 项，**缺了 21 项**。
+#    真实证据：用户提供的 `opencdhtml/音乐乌托邦 __ 发布 - Powered by NexusPHP.html`
+#    （乌托邦 `takeupload.php` 的真实表单），逐行数出 `name="tags[4][]"` 的
+#    checkbox **正好 44 个**，值从 1 到 47。
+#    ⇒ 「乌托邦没有 Soul/Blues/NewAge…这些标签」是**旧判断，错的**：
+#      它在真实表单里**一个一个都在**（18 天籁(Soul)、22 蓝调(Blues)、19 新世纪(NewAge)…）。
+#
+# ★ 原有的 23 项**值全部正确**（逐条对过 44 项表，无一错位）⇒ 这次只做**加法**。
+# ★ 表里放**短名**（`流行` 而不是 `流行(Pop)`）：站点表单的 checkbox 正文是
+#   `流行(Pop)`，但我们只用 `value`（`10`）提交，label 文字不参与提交。
+#   短名同时让 `opencd_map` 的「按名字映射」两边对齐（皇后写 `流行(Pop)`，
+#   剥后缀后正是 `流行`）。
 TAGS = {
+    # —— 原有的 23 项（值已逐条对着 44 项表核过，全对）——
     "禁转": "1", "首发": "2", "港台": "6", "大陆": "4", "欧美": "5",
     "日韩": "7", "其他地区": "8", "流行": "10", "OpenCD": "31", "Redacted": "30",
     "完成加速": "47", "种子加速": "44", "摇滚": "9", "爵士": "11", "电子": "12",
     "金属": "13", "古典": "15", "原声": "16", "发烧": "17", "民间": "23",
     "乡村": "24", "器乐": "34", "儿童": "35",
+    # —— ★★ 2026-09-21 补的 21 项（原先缺，全在真实 44 项表里）——
+    #   风格/地区类：
+    "天籁": "18", "新世纪": "19", "说唱": "20", "雷鬼": "21", "蓝调": "22",
+    "朋克": "25", "民族": "26", "音乐剧": "27", "汽车": "28", "宗教": "29",
+    "嘻哈": "32", "latin": "33", "贝斯": "14",
+    #   站点/来源类（`Orpheus`/`Jpopsuki` 是两个转发友站，`OpenCD`/`Redacted` 已在上面）：
+    "Orpheus": "36", "Jpopsuki": "37",
+    #   风格细分类（小写英文，与站点 label 一致）：
+    "dance": "38", "japanese": "39", "indie": "40", "korean": "41",
+    "piano": "42", "bollywood": "43",
+}
+
+# ★★ `tags[4][]` 的真实**全表**（44 项，含短名 → 站点 label 原文）。
+#    用途有二，都是为了让「表不全」这件事**看得见**：
+#      ① `--selftest` 里判 `len(TAGS) == len(TAGS_LABELS) == 44`，
+#         哪天站点加/删标签，这条会**当场响**，而不是静默少勾几个；
+#      ② 巡检/对照工具能打印"站点有、我们没有"的差集。
+#    ★ 值取自真实表单的 `value`；label 取自 checkbox 的正文（原样，含英文后缀）。
+TAGS_LABELS = {
+    "禁转": "禁转", "首发": "首发", "港台": "港台", "大陆": "大陆",
+    "欧美": "欧美", "日韩": "日韩", "其他地区": "其他地区",
+    "流行": "流行(Pop)", "OpenCD": "OpenCD", "Redacted": "Redacted",
+    "完成加速": "完成加速", "种子加速": "种子加速",
+    "摇滚": "摇滚(rock)", "爵士": "爵士(Jazz)", "电子": "电子(Electronic)",
+    "金属": "金属(Metal)", "古典": "古典(Classical)", "原声": "原声(OST)",
+    "发烧": "发烧(HiFi)", "民间": "民间(Folk)", "乡村": "乡村(Country)",
+    "器乐": "器乐(Instrumental)", "儿童": "儿童(Children's)",
+    "天籁": "天籁(Soul)", "新世纪": "新世纪(NewAge)", "说唱": "说唱(Rap)",
+    "雷鬼": "雷鬼(Reggae)", "蓝调": "蓝调(Blues)", "朋克": "朋克(Punk)",
+    "民族": "民族(National)", "音乐剧": "音乐剧(musical)", "汽车": "汽车(garage)",
+    "宗教": "宗教(Religion)", "嘻哈": "嘻哈(hip.hop)", "latin": "latin",
+    "贝斯": "贝斯(Drum&Bass)",
+    "Orpheus": "Orpheus", "Jpopsuki": "Jpopsuki",
+    "dance": "dance", "japanese": "japanese", "indie": "indie",
+    "korean": "korean", "piano": "piano", "bollywood": "bollywood",
 }
 
 # 简介里日志过长会把页面撑爆，超过这个长度就折叠/截断
@@ -262,6 +311,29 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         logs=logs,
     )
 
+    # ★★ `custom_fields[4][N]` 的**真实序号**（2026-09-21 实测自乌托邦 `takeupload.php`
+    #    真实表单 —— 用户提供的 `opencdhtml/音乐乌托邦 __ 发布 - Powered by NexusPHP.html`，
+    #    逐行读出的 `<td class="rowhead">标签</td>` + `<input/textarea name=...>`）：
+    #
+    #      [4][1] = 艺术家          input
+    #      [4][2] = 发行年份 ★必填   input
+    #      [4][3] = 抓轨日志 ★必填   **textarea**   ← 不是 input！
+    #      [4][4] = 唱片厂牌         input
+    #      [4][5] = 抓轨日志得分      input
+    #
+    #    ★★ **序号不是 1/2/3/4 的顺序** —— 这是本表存在的最大意义。
+    #    原代码硬写 `1/2/3/4`，后果有两条，**都是静默的**：
+    #      ① `[4][3]` 我们当成普通 input ⇒ 实际是**必填的抓轨日志 textarea**
+    #      ② `[4][4]` 我们以为是「第四个自定义字段」⇒ 实际是**唱片厂牌**
+    #      ③ `[4][5]`（抓轨日志得分）我们**根本没发这个 key**
+    #    ⇒ ★★ 而且 `[4][2]` / `[4][3]` 都是**必填**，我们恰恰把 `[4][3]` 发空
+    #      ⇒ 很可能正是「HTTP 200 + 空 body」的成因（站点拒绝但回空 body，
+    #      见 `ERR-SITE-01` 与待办 #4）。
+    #
+    #    ★ 值来源：`artist` / `year` 由 `opencd_parse` 解析「藝術家名」/「發行年份」得来，
+    #      实测样本给出 `'齐秦'` / `'1998年'`。
+    #      ⚠️ `year` 带「年」字 —— 站点要不要纯数字**尚未确认**，先原样发，
+    #        并在回读校验里逐字比对（不一致会当场报出来，不会静默）。
     fields = {
         "name": title,
         "small_descr": small,
@@ -274,11 +346,38 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         "medium_sel[4]": "0",
         "audiocodec_sel[4]": "0",
         "team_sel[4]": "0",
-        "custom_fields[4][1]": "",
-        "custom_fields[4][2]": "",
-        "custom_fields[4][3]": "",
-        "custom_fields[4][4]": "",
+        # ★ 键名里的数字是**站点的字段序号**，不是"第几个" —— 见上面那张表。
+        "custom_fields[4][1]": "",   # 艺术家
+        "custom_fields[4][2]": "",   # 发行年份（必填）
+        "custom_fields[4][3]": "",   # 抓轨日志（必填，textarea）
+        "custom_fields[4][4]": "",   # 唱片厂牌
+        "custom_fields[4][5]": "",   # 抓轨日志得分
     }
+
+    # ★ 艺术家 / 发行年份：有值就填。**取不到就留空，不编**（同全项目的纪律）。
+    #   ★ 这两个字段**只从"页面已写明"的来源取**（`task` 里由解析层写入），
+    #     不从标题里猜 —— 猜错年份/艺术家比留空更糟，而且回读校验看不出来
+    #     （它只比对自己发出去的值）。
+    artist = (task.get("artist") or "").strip()
+    if artist:
+        fields["custom_fields[4][1]"] = artist
+    year = (task.get("year") or "").strip()
+    if year:
+        fields["custom_fields[4][2]"] = year
+
+    # ★ 抓轨日志（`[4][3]`，textarea）与日志得分（`[4][5]`）。
+    #   ⚠️ 这两格**与 `descr` 里的日志折叠块是两回事**：
+    #     · `descr` 里的 `[spoiler=LOG][code]…` 是**简介正文**里给人看的；
+    #     · `custom_fields[4][3]` 是站点自己的**日志字段**（必填），
+    #       站点会拿它算「日志得分」并做 logcheck。
+    #   ⇒ 必须两个都发。原先只发 `descr`，站点的日志字段是空的 —— 这与
+    #     用户看到的「页面缺东西」是同一族的症状。
+    #   ★ `rip_score`（日志得分）站点表单里是独立字段（`input name="rip_score"`），
+    #     不是 `custom_fields[4][5]`；`[4][5]` 实测标签就是「抓轨日志得分」，
+    #     两者**待确认关系** ⇒ **先不发**，不猜（见 SUMMARY #15）。
+    log_for_field = (task.get("log_content") or "").strip()
+    if log_for_field:
+        fields["custom_fields[4][3]"] = log_for_field
 
     if autodetect:
         fields["medium_sel[4]"] = detect_medium(title, raw)

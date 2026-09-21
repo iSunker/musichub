@@ -53,11 +53,16 @@ def _strip_suffix(name):
 #     若哪天 Musopia 改了编号，只改 descr.py 一处即可，这张表不用动。
 #     （本项目「同一事实只在一处维护」的成文约定，见 A.11。）
 #
-# 皇后 27 项里，能对上的 22 项；剩下 5 项**故意不映射**（不是遗漏）：
-#   · 天籁(Soul)/蓝调(Blues)/新世纪(NewAge)/宗教(Religion)/雷鬼(Reggae)
-#     贝斯(Drum Bass)/说唱(Rap)/音乐剧(musical) —— 这些**Musopia 没有对应标签**
-#   ⇒ 它们会落进 `unmapped`，由调用方显式列出。**不硬凑一个相近的**：
-#     把「雷鬼」塞成「电子」是制造假数据，比少一个标签糟得多。
+# ★★ 2026-09-21 订正：原先这里写着「剩下 5 项故意不映射（Musopia 没有对应标签）」
+#    —— **那句话是错的**，是我在手上没有真实表单时的旧判断。
+#    真实证据：乌托邦 `takeupload.php` 的 `tags[4][]` **实测 44 项**（逐行读出，
+#    见 `descr.TAGS` 与 `SUMMARY #16`）。皇后那 27 项**全都能在乌托邦找到对应**，
+#    只是当初写映射表时手上没有这张表单。
+#    ⇒ 现在把「有实测依据」的补进来；仍无依据的**留作 unmapped**（不静默丢、不硬凑）。
+#
+# ★ 补进来的判据是**双向的**：乌托邦真实标签表里**确有此名**（值也取自那张表）。
+#   这一条很重要 —— 原先 `TAG_NAME_MAP` 把「器乐」映射过去时，乌托邦侧其实**也有**
+#   器乐（值 34），当时能对上纯属巧合好运气；现在的每个右边都能逐一对回 44 项表。
 TAG_NAME_MAP = {
     # 地区
     "大陆": "大陆",
@@ -78,6 +83,23 @@ TAG_NAME_MAP = {
     "乡村": "乡村",
     "儿童": "儿童",
     "器乐": "器乐",              # ★ 皇后表里**没有**这个标签，但 Musopia 有 —— 留着备用
+    # ★★ 以下 11 项是 2026-09-21 拿到真实表单后补上的（原先全落 unmapped）。
+    #    右边一律是**乌托邦真实标签里的名字**（`descr.TAGS` 有编号才算数）。
+    "汽车": "汽车",              # 乌托邦 28 garage
+    "民族": "民族",              # 26 National
+    "天籁": "天籁",              # 18 Soul
+    "新世纪": "新世纪",           # 19 NewAge
+    "蓝调": "蓝调",              # 22 Blues
+    "朋克": "朋克",              # 25 Punk
+    "宗教": "宗教",              # 29 Religion
+    "雷鬼": "雷鬼",              # 21 Reggae
+    "说唱": "说唱",              # 20 Rap
+    "音乐剧": "音乐剧",           # 27 musical
+    # ★★ 「贝斯」这一项是**用字差异**，不是缺标签 —— 最容易看漏的一格：
+    #    皇后写 `贝斯(Drum Bass)`（空格），乌托邦写 `贝斯(Drum&Bass)`（&）。
+    #    `_strip_suffix()` 会把两边括号都剥掉 ⇒ 剥完都叫「贝斯」，正好接上。
+    #    （这是 `SUMMARY §12` 里那个「贝斯没有对应」旧结论的订正。）
+    "贝斯": "贝斯",              # 14 Drum&Bass
 }
 
 
@@ -169,6 +191,7 @@ def map_all(info):
       · `unmapped`  —— ★ 映射不上的标签名（**调用方必须显式处理**）
       · `audiocodec_sel` / `medium_sel`
       · `title` / `small_descr` / `tracklist` / `log_content` —— 直接透传（渲染用）
+      · `artist` / `year` / `source` —— 透传（★ `year` 带「年」字，站点要不要纯数字待定）
 
     ★ 本函数**不碰网络、不写库、不渲染** —— 只做字段搬运与翻译，方便单测。
     """
@@ -182,6 +205,10 @@ def map_all(info):
         "small_descr": info.get("small_descr") or "",
         "tracklist": info.get("tracklist") or "",
         "log_content": info.get("log_content") or "",
+        # ★ 艺术家 / 发行年份：**透传，不改写**。落位见 descr.build_form_fields
+        #   （`custom_fields[4][1]` / `[4][2]`）。取不到就是 ""，调用方原样发空。
+        "artist": info.get("artist") or "",
+        "year": info.get("year") or "",
         # 原样保留，不改写、不渲染成「转载自 OpenCD」（SUMMARY §12 决定 2）
         "source": info.get("source") or "",
     }
@@ -202,9 +229,22 @@ TAG_CASES = [
     ("其它地区 → 8（★「其它」↔「其他」用字不同）", "其它地区", "8", False),
     ("流行(Pop) → 10", "流行(Pop)", "10", False),
     ("器乐 → 34（皇后没这标签，但 Musopia 有）", "器乐", "34", False),
-    ("新世纪(NewAge) → 无对应，进 unmapped", "新世纪(NewAge)", None, True),
-    ("雷鬼(Reggae) → 无对应，进 unmapped（★ 不硬凑成电子）", "雷鬼(Reggae)", None, True),
-    ("说唱(Rap) → 无对应，进 unmapped", "说唱(Rap)", None, True),
+    # ★★ 以下 11 项 2026-09-21 **订正**：原先断言它们落 unmapped，那是错的 ——
+    #    拿到乌托邦真实表单后发现**乌托邦全都有这些标签**（见 TAG_NAME_MAP 上方注释）。
+    ("★ 订正：贝斯(Drum Bass) → 14（乌托邦写 Drum&Bass，靠剥括号接上）",
+     "贝斯(Drum Bass)", "14", False),
+    ("★ 订正：天籁(Soul) → 18", "天籁(Soul)", "18", False),
+    ("★ 订正：新世纪(NewAge) → 19", "新世纪(NewAge)", "19", False),
+    ("★ 订正：说唱(Rap) → 20", "说唱(Rap)", "20", False),
+    ("★ 订正：雷鬼(Reggae) → 21", "雷鬼(Reggae)", "21", False),
+    ("★ 订正：蓝调(Blues) → 22", "蓝调(Blues)", "22", False),
+    ("★ 订正：朋克(Punk) → 25", "朋克(Punk)", "25", False),
+    ("★ 订正：民族(National) → 26", "民族(National)", "26", False),
+    ("★ 订正：音乐剧(musical) → 27", "音乐剧(musical)", "27", False),
+    ("★ 订正：汽车(garage) → 28", "汽车(garage)", "28", False),
+    ("★ 订正：宗教(Religion) → 29", "宗教(Religion)", "29", False),
+    # ★ 阴性对照：**真**认不出的仍然必须落 unmapped（不许为了"好看"硬凑）
+    ("阴性对照：不存在的标签 → 必须落 unmapped", "根本不存在的标签", None, True),
 ]
 
 CODEC_CASES = [
@@ -230,6 +270,26 @@ def _check():
         ok, fails = ok + good, fails + (not good)
         print(f"  {'✅' if good else '❌'} {label:<48} "
               f"→ {got_val!r:<6} unmapped={got_unmapped}")
+
+    # ★★ 两张表不许漂移：TAG_NAME_MAP 的**每个右边**都必须能在 descr.TAGS 里找到编号。
+    #    理由：`map_tags()` 遇到「表里有名、descr.TAGS 里没编号」时会把它塞进 unmapped
+    #    —— 那是**响了**，但如果没人跑自检就没人听见。这里把它变成**硬判据**。
+    print("\n①b 表一致性 —— TAG_NAME_MAP 的每个右边都要在 descr.TAGS 里有编号")
+    for oc, mu in sorted(TAG_NAME_MAP.items()):
+        good = mu in descr.TAGS
+        ok, fails = ok + good, fails + (not good)
+        print(f"  {'✅' if good else '❌'} 皇后「{oc}」→ 乌托邦「{mu}」"
+              f" → 编号 {descr.TAGS.get(mu, '❌ 不存在！')}")
+
+    # ★★ 覆盖率判据（**这次是真结论，不是感觉**）：皇后的 27 个标签**全部**要能映射。
+    #    ★ 这条会随着皇后/乌托邦任一边改变而失效 ⇒ 失效时应当**修表**，
+    #      不是把这条判据删掉（删判据 = 回到"少几个标签没人知道"的老状态）。
+    print("\n①c 覆盖率 —— 皇后 27 个标签应当**全部**映射得上")
+    missed = [n for n in opencd_parse.OPENCD_TAGS if not (
+        TAG_NAME_MAP.get(n) or TAG_NAME_MAP.get(_strip_suffix(n)))]
+    good = not missed
+    ok, fails = ok + good, fails + (not good)
+    print(f"  {'✅' if good else '❌'} 未映射的皇后标签：{missed or '（无，全部覆盖）'}")
 
     print("\n② 音频编码映射 —— 取不到给 0（不指定），不猜")
     for src, want in CODEC_CASES:
