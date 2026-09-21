@@ -48,9 +48,33 @@ def bbcode_to_html(text):
     return "<br>".join(s.splitlines())
 
 
+def sel(name, options, chosen, extra=""):
+    """
+    渲染成**真实的 `<select>`**，选中态照站点原样 —— 不是打印数字。
+
+    ★★ 2026-09-21 用户指出：「媒介、编码、制作组什么的怎么都是数字啊？
+      乌托邦页面哪有媒介编码制作组啊？」—— 没错。
+      **数字是提交值（value），人在页面上看到的是文字**（`<option value="8">CD`）。
+      原先预览直接显示 `8`，那是**预览做得不对**：它把"提交包"当成了"页面"。
+      ⇒ 现在渲染成下拉框，选中项显示**文字**，并保留 value 供核对。
+    """
+    opts = []
+    for val, label in options:
+        mark = " selected" if str(val) == str(chosen) else ""
+        opts.append('<option value="%s"%s>%s</option>'
+                    % (html.escape(str(val)), mark, html.escape(str(label))))
+    return ('<select%s style="font-size:12px">%s</select>' % (extra, "".join(opts)))
+
+
 def build_html(info, m, fields):
     title = fields.get("name") or ""
     tags_sent = [str(x) for x in (fields.get("tags[4][]") or [])]
+
+    # ★ 下拉项按**乌托邦真实顺序**列出（逐行读自 takeupload.php）
+    MEDIUM_OPTS = [("0", "请选择一项")] + [(v, k) for k, v in descr.MEDIUM.items()]
+    CODEC_OPTS = [("0", "请选择一项")] + [(v, k) for k, v in descr.AUDIOCODEC.items()]
+    TEAM_OPTS = ([("0", "请选择一项"), ("6", "Musopia"), ("5", "Other"),
+                  ("1", "HDS"), ("2", "CHD"), ("3", "MySiLU"), ("4", "WiKi")])
 
     def row(label, value, req=False, kind="input"):
         star = ' <span style="color:red">*</span>' if req else ""
@@ -78,12 +102,14 @@ def build_html(info, m, fields):
 
     dropped = [t for t in (m.get("unmapped") or [])]
 
+    no_log = not (fields.get("custom_fields[4][3]") or "").strip()
+
     return """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <title>预览：%s</title>
 <style>
  body{font-family:"Microsoft YaHei",sans-serif;margin:0;background:#f2f2f2;color:#222}
- .wrap{max-width:960px;margin:0 auto;background:#fff;padding:18px 26px 40px}
+ .wrap{max-width:1000px;margin:0 auto;background:#fff;padding:18px 26px 40px}
  h1{font-size:19px;border-bottom:3px solid #2a7;padding-bottom:8px}
  h2{font-size:15px;margin-top:26px;color:#2a7;border-left:4px solid #2a7;padding-left:8px}
  table.form{border-collapse:collapse;width:100%%}
@@ -98,31 +124,48 @@ def build_html(info, m, fields):
        max-height:420px;overflow:auto}
  .note{background:#fffbe6;border-left:3px solid #e8b;padding:8px 12px;
        font-size:12px;color:#664;margin:10px 0}
+ .blocked{background:#ffecec;border-left:3px solid #c00;padding:8px 12px;
+          font-size:13px;color:#900;margin:10px 0}
  .bad{color:#c00}
  .tagbox{border:1px solid #ddd;padding:10px;background:#fafafa}
+ .q b{color:#555;font-weight:normal}
 </style></head><body><div class="wrap">
 
 <h1>乌托邦发布表单预览 —— %s</h1>
 
 <div class="note">
   <b>这是本地渲染，不是真发。</b>内容来自
-  <code>descr.build_form_fields()</code> 的**实际产出**，
-  即真发布时站点会收到的同一份数据。<br>
+  <code>descr.build_form_fields()</code> 的**实际产出**。
+  <b>布局照乌托邦 <code>takeupload.php</code> 原样</b>：下拉框显示**文字**，
+  括号里的小字是对应的提交值。<br>
   <b>来源样本</b>：%s
 </div>
 
+%s
+
 <h2>基本字段</h2>
 <table class="form">
-  <tr><td class="rowhead">种子文件</td>
+  <tr><td class="rowhead">种子文件<span style="color:red">*</span></td>
       <td class="rowfollow" style="color:#bbb">（本地预览无文件）</td></tr>
   <tr><td class="rowhead">标题</td><td class="rowfollow">%s</td></tr>
   <tr><td class="rowhead">副标题</td><td class="rowfollow">%s</td></tr>
-  <tr><td class="rowhead">类型</td>
-      <td class="rowfollow">408 = HQ Audio</td></tr>
-  <tr><td class="rowhead">媒介 medium_sel[4]</td><td class="rowfollow">%s</td></tr>
-  <tr><td class="rowhead">编码 audiocodec_sel[4]</td><td class="rowfollow">%s</td></tr>
-  <tr><td class="rowhead">制作组 team_sel[4]</td><td class="rowfollow">%s</td></tr>
+  <tr><td class="rowhead">类型<span style="color:red">*</span></td>
+      <td class="rowfollow">发布至<b>种子</b>区
+        <select style="font-size:12px">
+          <option>请选择</option>
+          <option selected>HQ Audio</option>
+        </select>
+        &nbsp;<span class="v">(408)</span></td></tr>
 </table>
+
+<h2>质量（★ 乌托邦原样：**一行三格**）</h2>
+<table class="form"><tr>
+  <td class="rowhead">质量</td>
+  <td class="rowfollow q">
+    <b>媒介: </b>%s&nbsp;&nbsp;
+    <b>音频编码: </b>%s&nbsp;&nbsp;
+    <b>制作组: </b>%s
+  </td></tr></table>
 
 <h2>自定义字段 custom_fields[4][N] ★ 序号不是 1/2/3/4 的顺序</h2>
 <table class="form">
@@ -139,9 +182,8 @@ def build_html(info, m, fields):
 <h2>简介 descr（BBCode 渲染）</h2>
 <div class="desc">%s</div>
 
-<h2>副标题与曲目（原始值）</h2>
+<h2>曲目列表（原始值）</h2>
 <table class="form">
-  <tr><td class="rowhead">全 N 曲</td><td class="rowfollow">%s</td></tr>
   <tr><td class="rowhead">曲目列表</td>
       <td class="rowfollow"><pre style="margin:0;font-size:12px">%s</pre></td></tr>
 </table>
@@ -151,11 +193,17 @@ def build_html(info, m, fields):
         html.escape(title),
         html.escape(title),
         os.path.relpath(info.get("_source_file") or "", ROOT).replace(os.sep, "/"),
+        (('<div class="blocked"><b>❌ 这条会被拦下，不发布。</b><br>'
+          '原因：<b>无 log</b> —— 皇后页面本身就没有 NFO/LOG'
+          '（<code>&lt;div id="divnfo"&gt;&lt;pre&gt;&lt;/pre&gt;&lt;/div&gt;</code>）。<br>'
+          '乌托邦的「抓轨日志」是<b>必填</b>，发空的出去站点大概率退回，'
+          '症状是「HTTP 200 + 空 body」，<b>失败还看不出原因</b>。<br>'
+          '规矩：<b>没有 log 就不发布</b>。</div>') if no_log else ""),
         html.escape(title),
         html.escape(str(fields.get("small_descr") or "")),
-        html.escape(str(fields.get("medium_sel[4]") or "")),
-        html.escape(str(fields.get("audiocodec_sel[4]") or "")),
-        html.escape(str(fields.get("team_sel[4]") or "")),
+        sel("medium_sel[4]", MEDIUM_OPTS, fields.get("medium_sel[4]") or "0"),
+        sel("audiocodec_sel[4]", CODEC_OPTS, fields.get("audiocodec_sel[4]") or "0"),
+        sel("team_sel[4]", TEAM_OPTS, fields.get("team_sel[4]") or "0"),
         "".join([
             row("艺术家", fields.get("custom_fields[4][1]")),
             row("发行年份", fields.get("custom_fields[4][2]"), req=True),
@@ -170,7 +218,6 @@ def build_html(info, m, fields):
           % html.escape(", ".join(dropped))) if dropped else
          "★ 未映射的标签会显式列出，不静默丢。"),
         bbcode_to_html(fields.get("descr") or ""),
-        html.escape(str(fields.get("small_descr") or "")),
         html.escape(str(info.get("tracklist") or "")),
     )
 
@@ -215,6 +262,10 @@ def main(argv):
         "artist": m["artist"],
         "year": m["year"],
         "team_sel": m["team_sel"],
+        # ★★ 媒介/编码：**必须传进 task**，否则 build_form_fields 会退回
+        #    `detect_medium()` 从标题猜 —— 那会把皇后的 `Web` 猜成 `CD`。
+        "medium_sel": m["medium_sel"],
+        "audiocodec_sel": m["audiocodec_sel"],
         "opencd_tid": info.get("torrent_id") or "sample",
     }
     fields = descr.build_form_fields(task, autodetect=True)

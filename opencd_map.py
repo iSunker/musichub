@@ -174,12 +174,32 @@ def map_audiocodec(opencd_format):
 
 
 def map_medium(opencd_medium, opencd_format=""):
-    """`CD` / `SACD` / `DVD` / `VCD` → Musopia `medium_sel` 的编号。取不到给 CD。"""
+    """
+    `CD` / `SACD` / `DVD` / `VCD` / `Web` → Musopia `medium_sel` 的编号。
+
+    ★★ 2026-09-21 修：**`Web` 原先被静默当成 `CD`**（因为乌托邦的 `MEDIUM` 表里
+      没有 Web，而本函数最后一行 `return MEDIUM["CD"]` 是**无条件兜底**）。
+      实测依据：三个皇后页面写着 `<td>媒介：</td><td>Web</td>`（Web 来源发行，
+      **不是实体 CD**）⇒ 发 `CD(8)` 是**写了一个错的事实**。
+
+    ★ 映射规则（按**名字**，同标签/制作组的纪律）：
+      · `CD`/`SACD`/`DVD`/`VCD` → 同名项
+      · `Web` → **`Other(12)`**：它不是实体媒介，乌托邦没有 Web 这一项，
+        `Other` 是站点**真有**的选项，且「其它」正是对 Web 最诚实的表述。
+      · 拿不到（空 / 认不出）→ **`0`（请选择一项）**，**不再无条件兜底成 CD**。
+        ★ 这是本函数最要紧的行为改变：**"取不到" 不许长得像 "是 CD"**。
+    """
     blob = f"{opencd_medium or ''} {opencd_format or ''}".upper()
     for key in ("SACD", "DVD", "VCD"):
         if key in blob:
-            return descr.MEDIUM.get(key, descr.MEDIUM["CD"])
-    return descr.MEDIUM["CD"]
+            return descr.MEDIUM.get(key, "0")
+    if "CD" in blob:
+        return descr.MEDIUM["CD"]
+    # ★ Web 来源：非实体媒介 ⇒ 落「其它」，不是 CD。
+    if "WEB" in blob:
+        return descr.MEDIUM["OTHER"]
+    # ★ 认不出/为空 ⇒ 不指定（0），**不猜成 CD**。
+    return "0"
 
 
 # ==================== 制作组 team_sel[4] ====================
@@ -310,7 +330,10 @@ CODEC_CASES = [
 
 MEDIUM_CASES = [
     ("CD", "", "8"), ("SACD", "", "9"), ("DVD", "", "10"),
-    ("", "FLAC 分轨", "8"),
+    ("", "FLAC 分轨", "0"),          # ★ 修订：认不出不再兜底成 CD
+    ("Web", "", "12"),               # ★★ Web → Other（原先错成 CD）
+    ("Web", "FLAC 分轨", "12"),      # ★ 格式里没有 CD 字样时也一样
+    ("", "WAV 整轨", "0"),           # ★ 只给格式、且不含 CD ⇒ 不猜
 ]
 
 # ★ 制作组：★ 按**名字**映射，不是搬数字。皇后 `其他(Other)`=5 / 乌托邦 `Other`=5
@@ -365,7 +388,7 @@ def _check():
         ok, fails = ok + good, fails + (not good)
         print(f"  {'✅' if good else '❌'} {src!r:<16} → {got!r:<4} 期望 {want!r}")
 
-    print("\n③ 媒介映射 —— 默认 CD")
+    print("\n③ 媒介映射 —— ★ Web→Other，取不到给 0（**不再兜底成 CD**）")
     for med, fmt, want in MEDIUM_CASES:
         got = map_medium(med, fmt)
         good = got == want

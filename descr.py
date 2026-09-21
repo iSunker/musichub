@@ -220,6 +220,17 @@ AUDIOCODEC_UNKNOWN_OK = ("WAV",)
 
 
 def detect_medium(*sources):
+    """
+    **从名字猜**媒介（qB 本地抓轨路的兜底）。
+
+    ★ 2026-09-21：本函数只该在**没有"页面已写明的媒介"**时被调用
+      —— 见 `build_form_fields()` 里的优先级注释。
+      ★ 末尾仍按 CD 兜底是有意的：这条路（qB 抓轨）**本来就是 CD 抓轨**，
+        与皇后转载路不同（那条走 `opencd_map.map_medium()`，`Web` → `Other`）。
+        ⇒ 两处的"默认"**刻意不一样**，因为它们的**来源不同**：
+          · 这里：名字里没有线索，但**流程上就是 CD 抓轨** ⇒ 猜 CD 合理；
+          · 那里：页面**明写** `Web` ⇒ 落 `Other`，**绝不猜 CD**。
+    """
     blob = " ".join(str(s or "") for s in sources).upper()
     if "SACD" in blob:
         return MEDIUM["SACD"]
@@ -255,11 +266,42 @@ def detect_tags(*sources):
 
 
 # ==================== 副标题 ====================
+#
+# ★★ 2026-09-21 用户拍板：**皇后 → 乌托邦 这条路，副标题直接用皇后主标题原文**。
+#
+#   为什么（这条推翻了本文件早先的设计）：
+#     早先 `derive_small_descr()` 是自己造「全 N 曲」/「DCD · 全 N 曲」，
+#     理由是"主标题已含这些，副标题再抄一遍纯冗余"。
+#     ★ 但那个理由**只对自建(qB 本地抓轨)那条路成立** ——
+#       那条路的主标题是我们自己 `parse_title()` 拼的，我们知道它有什么。
+#     ★ 而**皇后转载**这条路：副标题是**站点页面上的一格**，
+#       填"全 N 曲"等于**我们替皇后编了一个它没写的值**。
+#       用户要的是「副标题也采用皇后的」⇒ 就是**主标题那一串原文**。
+#     ★ 皇后详情页里**没有「副標題」字段**（12 行信息表实测全列过，无此项）
+#       ⇒ "采用皇后的" 只能取**皇后的主标题**。
+#
+#   ★ 两条路**分开**，不再共用同一个函数的行为：
+#     · `run.py`（qB 本地抓轨）继续用 `build_small_descr()` 造「全 N 曲」——
+#       那条路的主标题是我们拼的，行为不变，**不受本次改动影响**。
+#     · 皇后转载路：`build_form_fields()` 优先用 `task["small_descr"]`
+#       （由 `opencd_parse` 从皇后页面读来的那一串）⇒ 见下面的取值顺序。
+
+def opencd_small_descr(title=""):
+    """
+    皇后转载路的副标题 = **皇后主标题原文**（用户 2026-09-21 拍板）。
+
+    ★ 取不到（标题为空）就返回 `""`，**不硬造**（同全项目纪律）。
+    ★ 判据：`opencd_small_descr("好好（张轩睿） - 宝宝 2020 - FLAC 分轨 - Yuekui")`
+      == 原样那串；`opencd_small_descr("")` == `""`。
+    """
+    return (title or "").strip()
+
 
 def derive_small_descr(tracklist="", disc_count=None, fallback=""):
     """
     副标题只放主标题里没有的客观信息：曲目数（多碟再带碟数）。
-    主标题已是「歌手 - 专辑 年份 - 格式 整轨 - OpenCD」，副标题再抄一遍纯冗余。
+    ★ 本函数供 **qB 本地抓轨那条路**（`run.py`）用，行为**未变**。
+      皇后转载路的副标题走 `opencd_small_descr()`（= 皇后主标题原文）。
 
     - 有效曲目 = 非空、且不以「【」开头的行（「【CD1】」这类是分段表头，不计数）。
     - disc_count 缺省时按 tracklist 里的「【」表头数推断，仍无则按 1 碟。
@@ -377,11 +419,22 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
     # 副标题渲染时重算：已发布的老记录当初存的是「歌手-专辑(年)|格式」这种和主标题
     # 重复的旧值，只有在这里重算才能在下一次编辑时刷新成「全 N 曲 / DCD」。
     # 数不出曲目（老分轨记录 tracklist 为空）就退回库里旧值，不硬造。
-    small = derive_small_descr(
-        tracklist,
-        disc_count=len(logs) if logs else None,
-        fallback=task.get("small_descr") or "",
-    )
+    # ★★ 副标题的取值顺序（2026-09-21 用户拍板：皇后转载路用**皇后主标题原文**）：
+    #    ① `task["small_descr"]` —— ★ 有值就用它（皇后转载路走这条）
+    #       ★ 但历史记录里存的是**旧版**造的「歌手-专辑(年)|格式」或「全 N 曲」，
+    #         两者都不是"皇后主标题原文"。⇒ 用 `is_opencd` 区分：
+    #         皇后转载路**一律**以主标题原文为准（`opencd_small_descr`），
+    #         不信任库里那个旧值 —— 否则旧记录改不回来。
+    #    ② qB 本地抓轨路（无 `opencd_tid`）：维持 `derive_small_descr()` 不变。
+    is_opencd = bool(task.get("opencd_tid"))
+    if is_opencd:
+        small = opencd_small_descr(title)
+    else:
+        small = derive_small_descr(
+            tracklist,
+            disc_count=len(logs) if logs else None,
+            fallback=task.get("small_descr") or "",
+        )
 
     descr = build_descr(
         cover_url=task.get("cover_url") or "",
@@ -460,8 +513,31 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         fields["custom_fields[4][3]"] = log_for_field
 
     if autodetect:
-        fields["medium_sel[4]"] = detect_medium(title, raw)
-        fields["audiocodec_sel[4]"] = detect_audiocodec(title, raw)
+        # ★★ 2026-09-21 修 —— **顺序即优先级**，这是一条真 bug 的修法：
+        #    原先是 `fields["medium_sel[4]"] = detect_medium(title, raw)`，
+        #    **无条件覆盖**。于是 `opencd_map.map_medium()` 算得再对也没用：
+        #    皇后页面写 `媒介：Web` ⇒ `map_medium` 正解是 `Other(12)`，
+        #    但紧跟着被 `detect_medium()` 从**标题**里猜成 `CD(8)` 覆盖掉。
+        #    ★ 实测症状：三个 `Web` 页面预览里媒介显示 `CD` —— **暴露的就是这个**。
+        #
+        #    ★ 现在的规则（"页面已写明" > "从名字猜"，同标签那条纪律）：
+        #      · `task["medium_sel"]`（`opencd_map.map_all()` 的产出，
+        #        来自**皇后页面已写明的「媒介」**）**优先**；
+        #      · 没有才 `detect_medium()` 从标题/文件名猜（qB 本地抓轨路）。
+        #    ★ 注意 `"0"` 是**合法值**（= 请选择一项），所以判据是
+        #      `is not None` 而不是真值判断 —— 否则 `"0"` 会被当成"没给"而退回猜。
+        declared_medium = task.get("medium_sel")
+        if declared_medium is not None:
+            fields["medium_sel[4]"] = declared_medium
+        else:
+            fields["medium_sel[4]"] = detect_medium(title, raw)
+
+        # ★ 同理：`audiocodec_sel` 也**优先用页面已写明的**，猜是兜底。
+        declared_codec = task.get("audiocodec_sel")
+        if declared_codec is not None:
+            fields["audiocodec_sel[4]"] = declared_codec
+        else:
+            fields["audiocodec_sel[4]"] = detect_audiocodec(title, raw)
 
         # ★★ 制作组 `team_sel[4]` —— 2026-09-21 接上（**按名字**映射，不搬数字）。
         #    缺口本身：原先这一格**恒发 "0"**（请选择一项），即**从来没填过**。

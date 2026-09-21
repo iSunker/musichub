@@ -6,6 +6,7 @@
 拿到 302 只代表种子进库了，简介有没有正确落地是另一回事。
 """
 import argparse
+import json
 import os
 import sys
 
@@ -83,6 +84,29 @@ def main():
         tf = t.get("torrent_file")
         if not tf or not os.path.exists(tf):
             reasons.append("种子文件缺失")
+
+        # ★★ 没有 log 就不发布 —— **最初的规矩**（2026-09-21 用户重申并确认）。
+        #   ★ 为什么必须在这里也拦一道：`run.py` 的 `NO_LOG_FILE` 短路只覆盖
+        #     **qB 本地抓轨那条路**（它读目录找 `.log`）。皇后转载那条路的日志
+        #     来自**页面里的 NFO/LOG 字段**，那是**另一条来源** ——
+        #     页面本来就没有（`<div id="divnfo"><pre></pre></div>`，实测三个
+        #     Web 来源页面都是空的）⇒ 它**不会**被 `run.py` 判断到。
+        #   ★ 而且乌托邦的 `custom_fields[4][3]`（抓轨日志）是**必填**：
+        #     发一条空的出去，站点大概率退回，症状正是 `ERR-SITE-01` 那个
+        #     「HTTP 200 + 空 body」—— **失败还看不出原因**。
+        #   ⇒ 拦在发布前，进邮件提醒，让人自己判断。
+        has_log = bool((t.get("log_content") or "").strip())
+        if not has_log:
+            # 多碟日志走 logs_json，也要认（否则会误拦）
+            try:
+                lj = json.loads(t.get("logs_json") or "null")
+                has_log = bool(lj) and any(
+                    (x.get("content") or "").strip()
+                    for x in lj if isinstance(x, dict))
+            except (ValueError, TypeError):
+                pass
+        if not has_log:
+            reasons.append("无 log（最初的规矩：没有 log 不发布）")
 
         flag = "✅ 可发布" if not reasons else "❌ " + "、".join(reasons)
         print(f"[{i}] {t.get('formatted_title')}")
