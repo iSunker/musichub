@@ -15,10 +15,12 @@
     python tools/preview_form.py                    # 用默认样本
     python tools/preview_form.py <详情页.html>       # 用指定页面
 """
+import glob
 import html
 import os
 import re
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.stdout.reconfigure(encoding="utf-8")
@@ -242,8 +244,66 @@ def _first_cover(info):
     return ""
 
 
+def _write_with_cache_bust(base, html_text, keep_stale=False):
+    """
+    写预览文件，并**保证浏览器不会拿旧缓存糊弄人**。
+
+    ★★ 为什么需要这个（2026-09-21 踩过一次，用户"看了预览还是没改啊"）：
+      实测**文件早就改对了**，但 Windows 用 `explorer.exe` 打开 `file://` 时会
+      **复用同一个已开的标签**，文件名没变就**直接吃缓存、不重新读盘**
+      ⇒ 用户看到的是几分钟前那份 ⇒ 以为"没改"。
+      ★ 这是**同一个病**的另一张脸（同本项目 ERR-META 家族）：
+        **"我看到的没变" ≠ "文件没变"** —— 中间隔着一个**没被验证的环节**。
+      （更早那次是把"提交包"当成"页面"，也是没验证中间环节。）
+
+    ★ 做法：文件名带**时间戳**（`xxx.preview.HHMMSS.html`）。
+      文件名变了 ⇒ 浏览器**必须重新读**，缓存骗不了。
+    ★ 同时把**上一批**旧文件删掉：否则 `_preview/` 会越积越多，
+      而且**旧文件是主动的误导源**（人可能点开的是旧那份）。
+      `keep_stale=True` 时保留（调试用）。
+    """
+    os.makedirs(OUT_DIR, exist_ok=True)
+    stamp = time.strftime("%H%M%S")
+    out = os.path.join(OUT_DIR, f"{base}.preview.{stamp}.html")
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(html_text)
+
+    if not keep_stale:
+        # 删掉同一个 base 的**其它所有**版本 —— 包括：
+        #   · 旧的无时间戳版 `xxx.preview.html`
+        #   · 带时间戳的旧批次 `xxx.preview.HHMMSS.html`
+        #   · ★ **手造的临时副本**（如 `xxx.v101639.html`）——
+        #     实测漏删过一次：我手动生成的那批 `.v101639.html` 没被这个 glob
+        #     覆盖到，留在了目录里。**旧文件是主动的误导源**（人可能点开旧那份
+        #     还以为是新的）⇒ 所以按 `base + "."` 前缀**全清**，只留刚写的这个。
+        stale = [p for p in glob.glob(os.path.join(OUT_DIR, base + ".*"))
+                 if os.path.abspath(p) != os.path.abspath(out)]
+        for old in stale:
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+    return out
+
+
+def _open_in_browser(path):
+    """尽力用系统默认方式打开；失败**不算错**（用户可自己双击）。"""
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(path)                       # noqa: S606
+        elif sys.platform == "darwin":
+            os.system(f'open "{path}"')
+        else:
+            os.system(f'xdg-open "{path}" >/dev/null 2>&1 &')
+        return True
+    except Exception:
+        return False
+
+
 def main(argv):
-    path = argv[1] if len(argv) > 1 else DEFAULT_SAMPLE
+    args = [a for a in argv[1:] if not a.startswith("--")]
+    open_flag = "--open" in argv
+    path = args[0] if args else DEFAULT_SAMPLE
     if not os.path.exists(path):
         sys.exit("找不到文件: " + path)
 
@@ -290,16 +350,20 @@ def main(argv):
     if gap:
         print("  ⚠️  传参缺口（页面有值但没传进 task）：%s" % "、".join(gap))
 
-    os.makedirs(OUT_DIR, exist_ok=True)
     base = re.sub(r"[^\w\-]+", "_", os.path.splitext(os.path.basename(path))[0])[:60]
-    out = os.path.join(OUT_DIR, base + ".preview.html")
-    with open(out, "w", encoding="utf-8") as fh:
-        fh.write(build_html(info, m, fields))
+    out = _write_with_cache_bust(base, build_html(info, m, fields))
 
-    print("已生成预览: " + os.path.relpath(out, ROOT).replace(os.sep, "/"))
-    print("用浏览器打开即可（file:// 直接开，无需服务器）")
+    rel = os.path.relpath(out, ROOT).replace(os.sep, "/")
+    print("已生成预览: " + rel)
+    print("  ★ 文件名带时间戳 ⇒ 浏览器**必须重新读**，不会拿旧缓存糊弄（旧版已清掉）")
     print("  发出的 tags[4][] = %s" % (fields.get("tags[4][]")))
     print("  team_sel[4]      = %s" % fields.get("team_sel[4]"))
+    print("  副标题           = %r" % (fields.get("small_descr") or ""))
+    if open_flag:
+        print("  已请求浏览器打开" if _open_in_browser(out) else
+              "  ⚠️ 自动打开失败，请手动双击上面那个文件")
+    else:
+        print("  （加 --open 可直接用浏览器打开）")
     return 0
 
 
