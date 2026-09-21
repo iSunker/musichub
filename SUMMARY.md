@@ -1158,7 +1158,7 @@ ENABLE_COVERS=true ENABLE_EDIT=true
 
 | # | 事项 | 状态 / 被谁挡着 |
 |---|---|---|
-| 12 | ★★ **补上 `tags[4][]` 与 `custom_fields[4][1..2]`** —— 用户已拍板：**不抓 `edit.php`**，字段对照改用 `repos/auto_feed_js`（见下方 #12） | 待做，判据已定 |
+| 12 | ★★ **补上 `tags[4][]` 与 `custom_fields[4][1..2]`** —— ★ **①② 已落地（2026-09-21）**；③ `custom_fields` 仍待做（编号无外部实据，见下方 #12） | 部分完成 |
 | 13 | ~~★ **`publish` 阶段在容器日志里完全不存在**~~ ⇒ **已查清：`ENABLE_PUBLISH=false`，用户主动停用，非故障**（见下方 #13） | 已了结 |
 | 14 | ★ **「已知无日志(短路) 238 个」是否符合预期** —— 用户要「未含 log 的种子进每日邮件」，需确认这 238 条是被正确短路还是被静默丢掉 | 待确认 |
 | 10 | ★★ **发布表单缺字段** ⇒ **2026-09-21 已定位到代码行 + 现场证据**（见下方 #10） | 已归因，修法已写 |
@@ -1305,6 +1305,67 @@ custom_fields[4][1..4]
 比现在「两处各硬编码一张编号表」抗站点改版。
 
 **动手清单（①② 风险低、可离线自检 —— 用户 2026-09-21 指定先做这两条）**：
+
+> ✅ **①② 已于 2026-09-21 落地**（见下「✅ 已完成」）。③（`custom_fields`）
+> **仍未做**，原因是**编号没有外部实据** —— 实测查证：参考项目
+> `auto_feed_js:15330` 对 `custom_fields[4][1]` **只在 `KuFei` 站填**，
+> **对 Musopia 一个字都没填** ⇒ 它是用 `#artist` / `#year` 这种 **id** 在选择器里
+> 赋值，**根本没走 `custom_fields[4][N]` 这条路** ⇒ **序号→字段名无外部实据**。
+> ⇒ 维持原判断：③ 只能从站点表单确认，**单独排**。
+
+**✅ 已完成（2026-09-21）**：
+
+| # | 改动 | 文件 | 判据 / 阴性对照 |
+|---|---|---|---|
+| ① | `tags[4][]` 真的进 form | `descr.py:build_form_fields` | `render_compare.py` 报 `OK tags[4][]`；**摘掉那两行 ⇒ 当场 `MISS`**（已实测，见下） |
+| ② | WAV **识别出来**（编号仍留 `"0"`） | `descr.py:detect_audiocodec` + `opencd_map.map_audiocodec` | `detect_audiocodec('WAV 整轨')=='0'` 且 `'WAV' in AUDIOCODEC_UNKNOWN_OK`；`FLAC/APE` 不受影响 |
+| ③ | 回读校验**扩到表单字段** | `publish.py`（发布后那段） | 逐项比「发出去的 vs 回读到的」；`custom_fields` 暂只提示不判失败 |
+
+★ **① 的实现细节**（两个来源，**优先"页面已写明"的**）：
+```python
+declared = task.get("tags")          # ← opencd_map.map_all() 从页面「標籤列表」映射而来
+if declared:
+    fields["tags[4][]"] = list(declared)
+else:
+    picked = detect_tags(title, raw)  # ← 原有路径：从标题猜（qB 本地抓轨用）
+    if picked:
+        fields["tags[4][]"] = picked
+```
+★★ **为什么不能只留 `detect_tags`** —— 这是本次**踩到并写进注释**的坑：
+第一版只写 `detect_tags(title, raw)`，实测对 OpenCD 标题返回 **`[]`**，
+因为 `detect_tags` 第一条判据是 `"OPENCD" in upper`，而 `map_all()` 产出的
+title（`齐秦 - 我拿什么爱你 1998 - FLAC 分轨`）**不含站点名**。
+⇒ `[]` 和「这条真没标签」**长得一模一样** —— **又一次把「取不到」当「没有」**，
+正是本次要修的那个病的形状。是 `render_compare.py` 把它拦下来的（它报 MISS）。
+
+★ **多值 key 的正确姿势**（实测，两条路都验过）：
+| 提交路径 | 机制 | 实测结果 |
+|---|---|---|
+| `upload_torrent`（`data=fields`） | requests 走 `urlencode(..., doseq=True)` | `tags[4][]=6&tags[4][]=10` ✅ 两个同名键 |
+| `edit_torrent`（`files=parts`） | `musopia.py:241-246` 已有 list 展开分支 | 展开成 2 个同名分片 ✅ |
+★ **反例**（刻意避开）：若 join 成 `"6,10"`，会发成**一个** `tags[4][]=6,10`
+⇒ 站点把整个串当一个 value ⇒ **一个标签都选不中**。
+★ 空 list 会被 `urlencode` **整个丢掉**（不带该键）—— 那正是想要的语义
+（「没推断出标签」= 什么都不提交）。
+
+**③ 待做（`custom_fields[4][1..2]`）**：
+- 值**已经有了**：`opencd_parse` 实测解析出 `artist='齐秦'` / `year='1998年'`
+  （样本 `sample-zhuanzai-huanying.html`，`--selftest` 里就是这么断言的）。
+- **缺的只是「序号→字段名」的对应**（`[4][1]` 是艺术家还是年份？）。
+  ★ 这个**必须从站点表单确认**（`edit.php` 的 `<input name="custom_fields[4][N]">`
+  附近的 `rowhead` 文本），**参考项目提供不了**（它对 Musopia 从不填这些）。
+- ★ 注意 `year` 解析出来带「年」字（`'1998年'`）—— 站点要的是不是纯数字**待确认**。
+
+**回归判据（每次改完都跑）**：
+```bash
+python tools/render_compare.py         # ⇒ 缺口 2 处（custom_fields 未做前就是这个数）
+python opencd_parse.py --selftest      # ⇒ 62/62
+python tools/opencd-crawl-selftest.py  # ⇒ 20/20
+python opencd_map.py --selftest        # ⇒ 30/30
+python opencd_gate.py --selftest       # ⇒ 15/15
+```
+
+**原始清单（保留，① ② 已完成）**：
 
 1. **`tags[4][]` 进 form** —— `build_form_fields()` 里加
    `fields["tags[4][]"] = ...`，值取自 `detect_tags(...)` 或 OpenCD 路径的

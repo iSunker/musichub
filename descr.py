@@ -12,6 +12,7 @@ import re
 MEDIUM = {"CD": "8", "SACD": "9", "DVD": "10", "VCD": "11", "OTHER": "12"}
 
 # select name="audiocodec_sel[4]"
+# ★★ WAV 的编号**未实测**，刻意不放进这张表 —— 见 detect_audiocodec() 的注释。
 AUDIOCODEC = {"FLAC": "1", "MP3": "4", "AAC": "6", "APE": "2",
               "DTS": "3", "OGG": "5", "OTHER": "7"}
 
@@ -45,14 +46,48 @@ def _truncate(text, limit, note="内容过长已截断"):
 # ==================== 推断站点下拉项 ====================
 
 def detect_audiocodec(*sources):
-    """从标题/文件名里判断音频编码。"""
+    """
+    从标题/文件名里判断音频编码，返回 Musopia `audiocodec_sel` 的编号。
+
+    ★★ `WAV` 是**已知缺口，不是疏忽**（2026-09-21 实测 + 查证）：
+      · 原先关键词表只有 `FLAC/APE/DTS/AAC/OGG/MP3`，**没有 `WAV`**
+        ⇒ `… 2003 - WAV 整轨 - OpenCD` 一律得到 `"0"`（= 不指定）。
+        而 2026-09-19 发布的那 5 条里 **4 条是 WAV** ⇒ 编码这格**系统性为空**。
+      · 参考实现 `repos/auto_feed_js/auto_feed.user.js:2561` **显式认 WAV**
+        （`result.match(/(WAV)/i) ⇒ 'WAV'`）⇒ WAV 确实该认。
+      · ★ **但「认出来」不等于「知道 Musopia 的编号」** —— 它是影音站的
+        字符串标签（`'WAV'`），本项目要的是 `audiocodec_sel[4]` 的**数字编号**，
+        这张表（`descr.py:15` 实测自 `edit.php`）里**没有 WAV**，
+        参考项目也**只给到字符串、没给 Musopia 的号**。
+      ⇒ **拿不到编号就不编一个**（同 `opencd_map.map_audiocodec` 的纪律：
+        「取不到就返回 0，**不猜一个相近的**」）。
+        猜错的后果比留空更糟：站点上会写一个**错误的编码**，
+        而回读校验看不出来（它只比对自己发出去的值）。
+
+    ★ 修复动作**刻意分两步**（2026-09-21）：
+      第一步（本次）：把 WAV **识别出来**但**仍返回 `"0"`**，并在返回值旁
+        给出显式标记（见 `AUDIOCODEC_UNKNOWN_OK`）—— 这样「知道它是 WAV
+        但不知道编号」这件事**在代码里看得见**，不再沉默地退化成"没这回事"。
+      第二步（待 `audiocodec_sel` 的真实 `<option>` 值确认后）：填进 `AUDIOCODEC`。
+        ★ 验收判据届时补：`detect_audiocodec("…WAV…")` == 那个实编号。
+    """
     blob = " ".join(str(s or "") for s in sources).upper()
     for key in ("FLAC", "APE", "DTS", "AAC", "OGG"):
         if key in blob:
             return AUDIOCODEC[key]
     if re.search(r"\bMP3\b|320K|V0", blob):
         return AUDIOCODEC["MP3"]
+    # ★ WAV：**已识别，但编号未知** ⇒ 仍返回 "0"（不指定）。
+    #   这条分支存在的唯一目的是**让缺口可见**（否则它和"没认出来"长得一模一样）。
+    if re.search(r"\bWAV\b", blob):
+        return "0"
     return "0"
+
+
+# ★ 供判据/巡检用：这些格式**认得出但表里没有编号**（当前只有 WAV）。
+#   用途：让「系统性为空」这件事能被脚本查出来，而不是靠人记得。
+#   判据示例：detect_audiocodec("x - WAV") == "0" 且 "WAV" in AUDIOCODEC_UNKNOWN_OK
+AUDIOCODEC_UNKNOWN_OK = ("WAV",)
 
 
 def detect_medium(*sources):
@@ -248,6 +283,40 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
     if autodetect:
         fields["medium_sel[4]"] = detect_medium(title, raw)
         fields["audiocodec_sel[4]"] = detect_audiocodec(title, raw)
+
+        # ★★ 标签：必须真的发出去 —— 2026-09-21 修。
+        #    缺口本身：`detect_tags()` 早已写好、`TAGS` 全表也在，
+        #    但 `build_form_fields()` **从不调用它**，form 里连 `tags` 开头的 key
+        #    都没有 ⇒ 它是**死代码**（实测：form keys 里零个 `tags*`）。
+        #
+        #    ★★ 两个来源，**优先"页面已写明"的那个**（这条是 2026-09-21 实测踩出来的）：
+        #      · `task["tags"]` —— 由 `opencd_map.map_all()` 从**皇后页面的
+        #        「標籤列表」字段**映射而来。那是**站点自己写的事实**（实测样本给出
+        #        `['6','10']`，即 港台 + 流行）。**这是 OpenCD 路径的正道。**
+        #      · `detect_tags()` —— 从**标题里猜**（只看 OpenCD 字样 / 日韩假名 /
+        #        古典·JAZZ·OST 关键词）。本仓库原有路径（qB 本地抓轨）用它。
+        #      ⇒ **绝不能只留后者**：实测把 OpenCD 标题喂给它，返回 **`[]`** ——
+        #        因为 `map_all()` 产出的 title 是 `齐秦 - 我拿什么爱你 1998 - FLAC 分轨`
+        #        （解析出来的、**不含 `OpenCD` 字样**），而 `detect_tags` 的第一条
+        #        判据正是 `"OPENCD" in upper`。`[]` 与"没有标签"长得一模一样 ⇒
+        #        **又是一次把"取不到"当"没有"**，而这正是本次要修的病的形状。
+        #
+        #    ★ 站点表单是 `input type=checkbox name="tags[4][]"` —— 注意 **`[]` 后缀**，
+        #      它是**多值 key**。这里刻意给 **list** 而不是 join 成字符串：
+        #        · `requests` 的 `data=` 走 `urlencode(..., doseq=True)`
+        #          ⇒ list 展开成**多个同名键**（实测 `tags[4][]=6&tags[4][]=10`）；
+        #        · 若 join 成 `"6,10"`，会发成**一个** `tags[4][]=6,10`
+        #          ⇒ 站点把 `"6,10"` 当一个 value 解析 ⇒ **一个标签都选不中**。
+        #    空 list 会被 `urlencode` 整个丢掉（不带该键）—— 那是想要的语义。
+        #    ★ 判据见 `tools/render_compare.py`：最终 form 里必须**有** `tags[4][]`。
+        #    ★ 阴性对照：把这行删掉，该判据必须当场报 MISS。
+        declared = task.get("tags")
+        if declared:
+            fields["tags[4][]"] = list(declared)
+        else:
+            picked = detect_tags(title, raw)
+            if picked:
+                fields["tags[4][]"] = picked
 
     if anonymous:
         fields["anonymous"] = "1"

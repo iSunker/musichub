@@ -159,6 +159,13 @@ def main():
 
         # 回读确认简介真的落地了。takeupload.php 返回 302 只说明种子进库，
         # 简介字段有没有被正确接收要另外验证。
+        #
+        # ★★ 2026-09-21 扩到**表单字段**（原先只查简介里的封面 URL）：
+        #    为什么必须扩：2026-09-19 那 5 条发布，程序全报成功、
+        #    但站点上「艺术家 / 发行年份」整行都不存在 —— 因为那些值在
+        #    `custom_fields[4][*]` 里是空的，而**回读校验从不看这些字段**
+        #    （`ERR-META-01`：检测方法只覆盖了一部分，于是"全绿"是假的）。
+        #    ★ 判据是「**回读到的值 == 我们发出去的值**」，逐字段比，不是看有没有。
         try:
             got, _ = client.fetch_edit_form(torrent_id)
             site_descr = got.get("descr") or ""
@@ -168,6 +175,31 @@ def main():
                       f"update_metadata.py {torrent_id} --apply 修补")
             else:
                 print(f"    🔎 简介已确认落地（{len(site_descr)} 字符）")
+
+            # ---- 表单字段逐项回读（★ 比的是「发出去的 vs 回读到的」）----
+            # tags[4][] 是**多值**：两边都排好序再比，否则顺序不同会假报差异。
+            sent_tags = sorted(str(x) for x in (fields.get("tags[4][]") or []))
+            got_tags = sorted(str(x) for x in (got.get("tags[4][]") or []))
+            if sent_tags != got_tags:
+                print(f"    ⚠️  标签回读不一致：发出 {sent_tags} / 站点 {got_tags}")
+
+            # 编码/媒介：发出 "0" = 我们**没指定**，那不比对（比对会假报"不一致"）。
+            for key, label in (("audiocodec_sel[4]", "音频编码"),
+                               ("medium_sel[4]", "媒介")):
+                sent = str(fields.get(key) or "")
+                if sent and sent != "0":
+                    back = str(got.get(key) or "")
+                    if sent != back:
+                        print(f"    ⚠️  {label}回读不一致：发出 {sent} / 站点 {back}")
+
+            # ★ 已知缺口（见 SUMMARY #10）：custom_fields[4][*] 我们目前一律发空，
+            #   所以这里**刻意只提示、不判失败** —— 一旦开始填它们，就该升级成硬校验。
+            empties = [k for k in ("custom_fields[4][1]", "custom_fields[4][2]",
+                                  "custom_fields[4][3]", "custom_fields[4][4]")
+                       if not (fields.get(k) or "").strip()]
+            if len(empties) == 4:
+                print("    ℹ️  自定义字段（艺术家/发行年份等）仍为空 —— 已知缺口，"
+                      "见 SUMMARY #10（修完这条提示应消失）")
         except SiteError as e:
             print(f"    ⚠️  回读校验失败: {e}")
 

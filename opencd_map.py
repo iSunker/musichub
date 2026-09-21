@@ -130,11 +130,24 @@ def map_audiocodec(opencd_format):
     ★ 取不到就返回 `"0"`（= 不指定），**不猜一个相近的**。
       `descr.detect_audiocodec()` 是另一条路（从标题/文件名猜），
       两者用途不同：这里是「页面已写明」，那里是「从文件名推断」。
+
+    ★★ `WAV` 是**已知缺口**（2026-09-21 实测）：原先关键词表里**没有 WAV**
+      ⇒ 皇后的 `WAV 整轨` 一律得到 `"0"`（= 不指定），而 2026-09-19 发布的那 5 条里
+      **4 条是 WAV** ⇒ 编码这格**系统性为空**。
+      · 参考实现 `repos/auto_feed_js/auto_feed.user.js:2561` **显式认 WAV**；
+      · 但**编号**仍是未知的（`descr.AUDIOCODEC` 实测自 `edit.php`，表里没有 WAV）
+        ⇒ **识别出来、仍返回 `"0"`**，并在返回处留可见的痕迹（见下面 return 的注释），
+        而不是让它和"没认出格式"长得一模一样。
+      ⇒ 补编号是**第二步**，等 `audiocodec_sel` 的真实 `<option>` 值确认后再做。
     """
     blob = (opencd_format or "").upper()
     for key in ("FLAC", "APE", "DTS", "AAC", "OGG", "MP3"):
         if key in blob:
             return descr.AUDIOCODEC.get(key, "0")
+    # ★ WAV：**认得出，但没有编号** ⇒ 仍返回 "0"（不指定）。
+    #   这条分支的目的只是**让缺口可见** —— 见 `descr.AUDIOCODEC_UNKNOWN_OK`。
+    if "WAV" in blob:
+        return descr.AUDIOCODEC.get("WAV", "0")
     return "0"
 
 
