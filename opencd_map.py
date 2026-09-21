@@ -186,19 +186,35 @@ def map_medium(opencd_medium, opencd_format=""):
       · `CD`/`SACD`/`DVD`/`VCD` → 同名项
       · `Web` → **`Other(12)`**：它不是实体媒介，乌托邦没有 Web 这一项，
         `Other` 是站点**真有**的选项，且「其它」正是对 Web 最诚实的表述。
+      · `HI-RES` → **`Other(12)`**：同上（高解析数字发行，非实体媒介）。
       · 拿不到（空 / 认不出）→ **`0`（请选择一项）**，**不再无条件兜底成 CD**。
         ★ 这是本函数最要紧的行为改变：**"取不到" 不许长得像 "是 CD"**。
+
+    ★★ 2026-09-21 又修一个我自己刚写出的 bug：**子串匹配会误判**。
+      原先我写 `if "CD" in blob: return CD` —— 而皇后媒介下拉里有
+      **`HQCD` / `24KCD` / `LPCD` / `HDCD` / `SRCD` / `K2CD` / `SHM-CD`**，
+      每一个都**含 `"CD"`** ⇒ 全会被错认成普通 `CD(8)`。
+      这和本模块存在的理由（防静默错标）**是同一类错误**，只是方向相反。
+      ⇒ 改成**逐个精确比对**（剥掉空白后整串相等），不再用 `in` 做媒介判断。
     """
-    blob = f"{opencd_medium or ''} {opencd_format or ''}".upper()
-    for key in ("SACD", "DVD", "VCD"):
-        if key in blob:
-            return descr.MEDIUM.get(key, "0")
-    if "CD" in blob:
-        return descr.MEDIUM["CD"]
-    # ★ Web 来源：非实体媒介 ⇒ 落「其它」，不是 CD。
-    if "WEB" in blob:
-        return descr.MEDIUM["OTHER"]
-    # ★ 认不出/为空 ⇒ 不指定（0），**不猜成 CD**。
+    # ★ 精确比对：把"空白/大小写"归一后**整串相等**才算命中，**不做子串匹配**。
+    raw = (opencd_medium or "").strip().upper()
+    norm = raw.replace(" ", "").replace("-", "").replace("_", "")
+    # 皇后侧媒介名 → 乌托邦编号（左右两边都是**实测读出来的**名字）
+    EXACT = {
+        "CD": descr.MEDIUM["CD"],
+        "SACD": descr.MEDIUM["SACD"],
+        "DVD": descr.MEDIUM["DVD"],
+        "VCD": descr.MEDIUM["VCD"],
+        # ★ 非实体媒介 / 乌托邦没有对应项 ⇒ 落「其它」，**不冒充 CD**。
+        "WEB": descr.MEDIUM["OTHER"],
+        "HIRES": descr.MEDIUM["OTHER"],
+        "OTHER": descr.MEDIUM["OTHER"],
+    }
+    if norm in EXACT:
+        return EXACT[norm]
+    # ★ 乌托邦**没有**这些项（24KCD/HDCD/XRCD/Vinyl/Blu-ray…），
+    #   也**不**退化成 CD —— 它们确实不是普通 CD。⇒ 不指定（0）。
     return "0"
 
 
@@ -333,7 +349,14 @@ MEDIUM_CASES = [
     ("", "FLAC 分轨", "0"),          # ★ 修订：认不出不再兜底成 CD
     ("Web", "", "12"),               # ★★ Web → Other（原先错成 CD）
     ("Web", "FLAC 分轨", "12"),      # ★ 格式里没有 CD 字样时也一样
+    ("HI-RES", "", "12"),            # ★★ HI-RES → Other
+    ("HI-RES", "FLAC 分轨", "12"),
     ("", "WAV 整轨", "0"),           # ★ 只给格式、且不含 CD ⇒ 不猜
+    # ★★ 子串陷阱的**阴性对照**（我自己刚写出过的 bug）：
+    #    HQCD/24KCD/LPCD/HDCD/SRCD/K2CD 里都含 "CD" 子串 ⇒ 若用 `in` 判断
+    #    会被全部错认成普通 CD。下面每条都必须**不是 8**。
+    ("HQCD", "", "0"), ("24KCD", "", "0"), ("LPCD", "", "0"),
+    ("HDCD", "", "0"), ("SRCD", "", "0"), ("K2CD", "", "0"),
 ]
 
 # ★ 制作组：★ 按**名字**映射，不是搬数字。皇后 `其他(Other)`=5 / 乌托邦 `Other`=5
