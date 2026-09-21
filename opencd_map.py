@@ -182,6 +182,59 @@ def map_medium(opencd_medium, opencd_format=""):
     return descr.MEDIUM["CD"]
 
 
+# ==================== 制作组 team_sel[4] ====================
+#
+# ★★ 和标签同一个病：**两套编号完全错位**，必须**按名字**映射，不能搬数字。
+#
+#   实测两边的下拉（都是逐行读出，非推断）：
+#
+#     皇后 `OpenCD __ 發布.html`  `<select name="team">`：
+#        0 請選擇 / 7 OpenCD / 8 LLM / 9 TSxD / 6 KHQ / 5 其他(Other)
+#     乌托邦 `音乐乌托邦 __ 发布.html` `<select name="team_sel[4]">`：
+#        0 请选择一项 / 6 Musopia / 5 Other / 1 HDS / 2 CHD / 3 MySiLU / 4 WiKi
+#
+#   ★ 最危险的一格：皇后写 `其他(Other)` = **5**，乌托邦的 `Other` **也** = 5
+#     —— 这两个 5 纯属巧合相等，**不能靠"值一样"来匹配**。
+#     若哪天站点改号，靠值匹配就会**静默错标**（同 `opencd_map` 存在的理由）。
+#   ★ 反过来，皇后 `OpenCD` = 7、乌托邦 `Musopia` = 6：
+#     「把从 OpenCD 转载的种子标成 OpenCD 制作组」在乌托邦侧**没有对应项**
+#     （乌托邦只有自己的 `Musopia` 和友站 HDS/CHD/MySiLU/WiKi），
+#     且**语义也不该混**（我们不是那批制作组的人）
+#     ⇒ `OpenCD` 这一项**映射到 `Other`**：皇后页面自己写的 `其他(Other)`
+#       正是 `Other`，而样本实测 `team = '其他(Other)'` ⇒ 两边本来就一致。
+#   ★ 取不到就返回 `"0"`（= 请选择一项），**不猜**。
+TEAM_NAME_MAP = {
+    "其他": "OTHER",
+    "其他(Other)": "OTHER",
+    "Other": "OTHER",
+    "OpenCD": "OTHER",      # ★ 语义见上：不冒充制作组，落到「其他」
+    "請選擇": "OTHER",
+    # 以下三个乌托邦**没有对应项**，留着备用但**当前只作注释**（不放进映射，
+    # 否则等于凭空把 LLM/TSxD/KHQ 认成乌托邦的 HDS/CHD/WiKi —— 那是编数据）。
+    #   "LLM":  ?, "TSxD": ?, "KHQ": ?,
+}
+
+
+def map_team(opencd_team):
+    """
+    皇后「製作組」名字 → Musopia `team_sel[4]` 的编号。
+
+    ★ 按**名字**映射（同 `map_tags`）。取不到给 `"0"`（请选择一项），**不猜相近的**。
+
+    ★ 判据（`--selftest` 里验）：
+      · `其他(Other)` → `5`（Other）—— ★ 两边数字恰好都是 5，但**理由是名字**
+      · `OpenCD`      → `5`（Other）—— ★ 不是 7，也不是乌托邦的 Musopia(6)
+      · 认不出的       → `"0"`，且**不挑一个近的**
+    """
+    name = (opencd_team or "").strip()
+    if not name:
+        return "0"
+    key = TEAM_NAME_MAP.get(name) or TEAM_NAME_MAP.get(_strip_suffix(name))
+    if key is None:
+        return "0"
+    return descr.TEAM.get(key, "0")
+
+
 def map_all(info):
     """
     把 `opencd_parse.TorrentInfo` 映射成 Musopia 表单要用的字段。
@@ -201,6 +254,9 @@ def map_all(info):
         "unmapped": unmapped,
         "audiocodec_sel": map_audiocodec(info.get("format")),
         "medium_sel": map_medium(info.get("medium"), info.get("format")),
+        # ★ 制作组：**按名字**映射（皇后 `其他(Other)` → 乌托邦 `Other=5`）。
+        #   取不到给 "0"（请选择一项）。原先恒发 "0" 是"没做"，不是"做不了"。
+        "team_sel": map_team(info.get("team")),
         "title": info.get("name") or "",
         "small_descr": info.get("small_descr") or "",
         "tracklist": info.get("tracklist") or "",
@@ -257,6 +313,17 @@ MEDIUM_CASES = [
     ("", "FLAC 分轨", "8"),
 ]
 
+# ★ 制作组：★ 按**名字**映射，不是搬数字。皇后 `其他(Other)`=5 / 乌托邦 `Other`=5
+#   —— 数字**恰好相等纯属巧合**，所以这里刻意写「名字 → 编号」而不是「5 → 5」。
+TEAM_CASES = [
+    ("其他(Other) → 5（乌托邦 Other）", "其他(Other)", "5"),
+    ("★ OpenCD → 5（**不是 7**，也不是乌托邦 Musopia=6）", "OpenCD", "5"),
+    ("其他 → 5（无括号形态也要接住）", "其他", "5"),
+    ("LLM → 0（乌托邦没有对应项，**不猜成 HDS/CHD/WiKi**）", "LLM", "0"),
+    ("空 → 0", "", "0"),
+    ("认不出的 → 0，**不挑一个近的**", "莫名其妙的组", "0"),
+]
+
 
 def _check():
     ok = fails = 0
@@ -304,6 +371,13 @@ def _check():
         good = got == want
         ok, fails = ok + good, fails + (not good)
         print(f"  {'✅' if good else '❌'} {med!r}/{fmt!r:<12} → {got!r:<4} 期望 {want!r}")
+
+    print("\n③b 制作组映射 —— ★ 按**名字**，不是搬数字（两边恰好都是 5，别被骗）")
+    for label, src, want in TEAM_CASES:
+        got = map_team(src)
+        good = got == want
+        ok, fails = ok + good, fails + (not good)
+        print(f"  {'✅' if good else '❌'} {label:<48} → {got!r:<4} 期望 {want!r}")
 
     print("\n④ 端到端：拿真实样本走一遍 map_all()")
     import glob

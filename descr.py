@@ -78,6 +78,86 @@ TAGS_LABELS = {
     "korean": "korean", "piano": "piano", "bollywood": "bollywood",
 }
 
+# ★★ 转发方向白名单 —— 「哪些标签**允许**被勾上」（2026-09-21 用户拍板）。
+#
+#    背景：本项目是**皇后 → 乌托邦**的单向适配。两个站**各自**都有一批标签，
+#    但**「皇后有」不等于「该在乌托邦勾上」**。下面按**来源**分三类：
+#
+#    ① 皇后标签 → 乌托邦同名标签：**该勾**（页面已写明的事实，走 `map_tags`）
+#    ② 乌托邦**自己的**标签（皇后侧没有对应物）：**一律不勾**
+#       —— 典型就是「转发友站」和「站内标记」这类，见下面 `TAG_NEVER_FORWARD`
+#    ③ 语义相反/危险的：**绝不勾**（如乌托邦的 `禁转`）
+#
+#    ★★ 用户点名**不勾**的（逐条）：
+#       · `禁转`(1) / `首发`(2) —— **语义相反**：我们是**转载**过去的，
+#         勾「禁转」= 禁止别人再转载（且这也正是 `opencd_map` 那句
+#         「最危险的错误：把皇后的 1 当成乌托邦的 1」要防的事）；
+#         勾「首发」= 谎称本站首发。**两者都是假数据。**
+#       · `Redacted`(30) / `Orpheus`(36) / `Jpopsuki`(37) —— **转发友站的标签**，
+#         是乌托邦标记"这条来自哪个友站"用的。我们来自 **OpenCD**，
+#         勾这些等于**冒充别的站的来源**。
+#       · `种子加速`(44) / `完成加速`(47) —— **站内运营标记**，不是内容属性，
+#         由站点自己按运营规则打，**转载方不该自己勾**。
+#       · `latin`(33) —— 皇后三套标签体系里**都没有**这个东西（实测），
+#         无来源 ⇒ 不勾。
+#
+#    ★ 用户点名**该勾**的：`OpenCD`(31) —— 它标记"这条来自 OpenCD"，
+#      正是我们这批种子的**事实来源**。★ 也正因如此，
+#      `detect_tags()` 的第一条判据就是 `"OPENCD" in upper`。
+#
+#    ★ 为什么用**黑名单**而不是白名单：
+#      ① 白名单会让"皇后新增了标签、映射表还没跟"变成**静默丢标签**
+#         （正是本次要修的病的形状）；
+#      ② 黑名单的失效方向是**多勾**，而多勾会在回读校验里**看得见**
+#         （`publish.py` 有 tags 回读比对）⇒ 失效可见 > 失效静默。
+#      ★ 黑名单不是"什么都不管"：它**只**排除上面这些**有明确理由**的，
+#        其余仍走 `map_tags` 的**名字映射**（映不上照样进 `unmapped`，不猜）。
+TAG_NEVER_FORWARD = {
+    "禁转": "语义相反：我们是转载方，勾「禁转」是假数据",
+    "首发": "语义相反：我们是转载方，勾「首发」是谎称本站首发",
+    "Redacted": "转发友站标签：我们来自 OpenCD，不是 Redacted",
+    "Orpheus": "转发友站标签：我们来自 OpenCD，不是 Orpheus",
+    "Jpopsuki": "转发友站标签：我们来自 OpenCD，不是 Jpopsuki",
+    "种子加速": "站内运营标记，由站点按运营规则打，转载方不自勾",
+    "完成加速": "站内运营标记，由站点按运营规则打，转载方不自勾",
+    "latin": "皇后三套标签体系里都没有此项（实测），无来源",
+}
+
+
+def filter_forward_tags(values, labels=None):
+    """
+    从要发出去的 tag value 列表里**剔除** `TAG_NEVER_FORWARD` 的项。
+
+    `values` 是 **Musopia 的 tag value 字符串**列表（如 `['6','10']`）。
+    返回 `(kept, dropped)`，`dropped` 是 `[(value, 名字, 理由), ...]`
+    —— ★ **显式返回被剔除的**，不静默丢（同 `map_tags` 的 unmapped 契约）。
+
+    ★ 判据：`filter_forward_tags(['6','10','1','2','30','31','44','47'])`
+      → kept 含 `31`（OpenCD）+ `6`/`10`（港台/流行），
+        dropped 含 `1`(禁转)/`2`(首发)/`30`(Redacted)/`44`/`47`。
+    """
+    labels = labels if labels is not None else TAGS_LABELS
+    kept, dropped = [], []
+    for v in values or []:
+        v = str(v)
+        name = _name_of_value(v, labels)
+        if name in TAG_NEVER_FORWARD:
+            dropped.append((v, name, TAG_NEVER_FORWARD[name]))
+            continue
+        if v not in kept:
+            kept.append(v)
+    return kept, dropped
+
+
+def _name_of_value(value, labels=None):
+    """tag value → 我们的短名（如 `'31'` → `'OpenCD'`）。查不到回 `''`。"""
+    labels = labels if labels is not None else TAGS_LABELS
+    for short, v in TAGS.items():
+        if v == str(value):
+            return short
+    return ""
+
+
 # 简介里日志过长会把页面撑爆，超过这个长度就折叠/截断
 LOG_MAX_CHARS = 12000
 
@@ -383,6 +463,19 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         fields["medium_sel[4]"] = detect_medium(title, raw)
         fields["audiocodec_sel[4]"] = detect_audiocodec(title, raw)
 
+        # ★★ 制作组 `team_sel[4]` —— 2026-09-21 接上（**按名字**映射，不搬数字）。
+        #    缺口本身：原先这一格**恒发 "0"**（请选择一项），即**从来没填过**。
+        #    这不是"取不到"，是"没做" —— 皇后页面明确写着 `其他(Other)`，
+        #    而乌托邦有 `Other = 5`，两边**对得上**。
+        #    ★ 危险点：皇后 `其他(Other)` 恰好也是 **5**，但那是**巧合**
+        #      ⇒ 必须按名字查（`opencd_map.map_team`），不能靠"值一样"。
+        #    ★ 优先用 `task["team_sel"]`（`opencd_map.map_all()` 的产出，来自
+        #      皇后页面的「製作組」字段）；取不到就**不动**（`_team_sel` 已在
+        #      fields 里初始化为 "0"）。**不从标题猜**。
+        declared_team = task.get("team_sel")
+        if declared_team:
+            fields["team_sel[4]"] = declared_team
+
         # ★★ 标签：必须真的发出去 —— 2026-09-21 修。
         #    缺口本身：`detect_tags()` 早已写好、`TAGS` 全表也在，
         #    但 `build_form_fields()` **从不调用它**，form 里连 `tags` 开头的 key
@@ -409,13 +502,37 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         #    空 list 会被 `urlencode` 整个丢掉（不带该键）—— 那是想要的语义。
         #    ★ 判据见 `tools/render_compare.py`：最终 form 里必须**有** `tags[4][]`。
         #    ★ 阴性对照：把这行删掉，该判据必须当场报 MISS。
+        #
+        #    ★★ 2026-09-21 新增：**转发方向白名单**（`TAG_NEVER_FORWARD`）。
+        #       「皇后有」≠「该在乌托邦勾上」：禁转/首发（语义相反）、
+        #       Redacted/Orpheus/Jpopsuki（转发友站）、种子加速/完成加速（站内运营）
+        #       都要**剔除**，理由逐条写在 `TAG_NEVER_FORWARD` 上。
+        #       ★ 剔除是**显式**的：返回的 dropped 会被打印出来，不静默丢。
         declared = task.get("tags")
         if declared:
-            fields["tags[4][]"] = list(declared)
+            picked = list(declared)
         else:
             picked = detect_tags(title, raw)
-            if picked:
-                fields["tags[4][]"] = picked
+        kept, dropped = filter_forward_tags(picked)
+        if dropped:
+            print("  ⏹️  转发白名单剔除 %d 个标签（不勾）:" % len(dropped))
+            for v, nm, why in dropped:
+                print("      %-10s(value=%s)  %s" % (nm, v, why))
+        if kept:
+            fields["tags[4][]"] = kept
+
+        # ★★ `OpenCD` 标签：**来源标记**，只要这条种子确实来自 OpenCD 就勾上。
+        #    （用户 2026-09-21 点名：「opencd 勾上」。）
+        #    ★ 判据是**"来源是不是 OpenCD"**，不是"标题里有没有 OpenCD 字样"
+        #      —— `opencd_map.map_all()` 产出的标题**不含** `OpenCD`
+        #      （如 `齐秦 - 我拿什么爱你 1998 - FLAC 分轨`），
+        #      所以**不能靠 `detect_tags()` 的字符串判据**（那正是它返 [] 的原因）。
+        #      这里认 `opencd_tid`：它由抓取阶段从皇后页面写入，是**可核的事实**。
+        if task.get("opencd_tid"):
+            ocd = TAGS["OpenCD"]
+            cur = fields.get("tags[4][]") or []
+            if ocd not in cur:
+                fields["tags[4][]"] = list(cur) + [ocd]
 
     if anonymous:
         fields["anonymous"] = "1"

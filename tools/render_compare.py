@@ -41,7 +41,7 @@ def main():
         print("    %-10s = %r" % (k, info.get(k)))
 
     print("\n【② 映射层 opencd_map.map_all() 产出】")
-    for k in ("title", "tags", "audiocodec_sel", "medium_sel", "source",
+    for k in ("title", "tags", "audiocodec_sel", "medium_sel", "team_sel", "source",
               "artist", "year"):
         print("    %-16s = %r" % (k, m.get(k)))
 
@@ -60,6 +60,9 @@ def main():
         #      说明判据是有效的：它不是"打印一遍看着像对"，而是真会失败。
         "artist": m["artist"],
         "year": m["year"],
+        # ★ 制作组（按名字映射的产物）与来源标记（决定要不要勾 OpenCD 标签）
+        "team_sel": m["team_sel"],
+        "opencd_tid": info.get("torrent_id") or "sample-has-opencd-tid",
     }
     f = descr.build_form_fields(task, autodetect=True)
 
@@ -76,6 +79,7 @@ def main():
         ("tags[4][]", m["tags"], got_tags),
         ("audiocodec_sel[4]", m["audiocodec_sel"], f.get("audiocodec_sel[4]")),
         ("medium_sel[4]", m["medium_sel"], f.get("medium_sel[4]")),
+        ("team_sel[4]", m["team_sel"], f.get("team_sel[4]")),
         ("custom_fields[4][1]", info.get("artist"), f.get("custom_fields[4][1]")),
         ("custom_fields[4][2]", info.get("year"), f.get("custom_fields[4][2]")),
         ("custom_fields[4][3]", info.get("log_content"), f.get("custom_fields[4][3]")),
@@ -147,6 +151,32 @@ def main():
             print("    ❌ 缺的标签（站点有、我们没编号）:")
             for v in missing:
                 print("        %-4s %s" % (v, real[v]))
+
+    print("\n【⑦ 转发白名单】★「皇后有」≠「该在乌托邦勾上」")
+    # ★★ 逐条判据（2026-09-21 用户拍板）：
+    #   禁转/首发 = 语义相反（我们是转载方）；Redacted/Orpheus/Jpopsuki = 转发友站；
+    #   种子加速/完成加速 = 站内运营标记 ⇒ **都必须不勾**。
+    #   OpenCD = 我们的真实来源 ⇒ **必须勾**。
+    #   ★ 判据同时验「不该有的没有」和「该有的有」—— 只验一边会漏掉另一半。
+    sent_now = sorted(str(x) for x in (f.get("tags[4][]") or []))
+    must_absent = {"1": "禁转", "2": "首发", "30": "Redacted", "36": "Orpheus",
+                   "37": "Jpopsuki", "44": "种子加速", "47": "完成加速", "33": "latin"}
+    must_present = {"31": "OpenCD"}
+    for v, nm in must_absent.items():
+        good = v not in sent_now
+        bad += 0 if good else 1
+        print("    %s 不勾 %-10s (value=%s)" % ("OK  " if good else "FAIL", nm, v))
+    for v, nm in must_present.items():
+        good = v in sent_now
+        bad += 0 if good else 1
+        print("    %s 勾上 %-10s (value=%s)" % ("OK  " if good else "FAIL", nm, v))
+    # ★ 阴性对照：把过滤函数喂一批"全是不该发的"，必须**全部**被剔除
+    all_bad = list(must_absent)
+    kept, dropped = descr.filter_forward_tags(all_bad)
+    good = not kept and len(dropped) == len(all_bad)
+    bad += 0 if good else 1
+    print("    %s 阴性对照：%d 个全禁的 value 喂进去 → 保留 %d 个（期望 0）"
+          % ("OK  " if good else "FAIL", len(all_bad), len(kept)))
 
     print("\n    ⇒ 缺口 %d 处" % bad)
     return 1 if bad else 0
