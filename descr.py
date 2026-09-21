@@ -267,41 +267,56 @@ def detect_tags(*sources):
 
 # ==================== 副标题 ====================
 #
-# ★★ 2026-09-21 用户拍板：**皇后 → 乌托邦 这条路，副标题直接用皇后主标题原文**。
+# ★★ 2026-09-21 用户拍板：**皇后 → 乌托邦 这条路的副标题用皇后的副标题**。
 #
-#   为什么（这条推翻了本文件早先的设计）：
-#     早先 `derive_small_descr()` 是自己造「全 N 曲」/「DCD · 全 N 曲」，
-#     理由是"主标题已含这些，副标题再抄一遍纯冗余"。
-#     ★ 但那个理由**只对自建(qB 本地抓轨)那条路成立** ——
-#       那条路的主标题是我们自己 `parse_title()` 拼的，我们知道它有什么。
-#     ★ 而**皇后转载**这条路：副标题是**站点页面上的一格**，
-#       填"全 N 曲"等于**我们替皇后编了一个它没写的值**。
-#       用户要的是「副标题也采用皇后的」⇒ 就是**主标题那一串原文**。
-#     ★ 皇后详情页里**没有「副標題」字段**（12 行信息表实测全列过，无此项）
-#       ⇒ "采用皇后的" 只能取**皇后的主标题**。
+#   ★★★ 我在这里犯过一个错，记下来防复发：
+#     我曾断言「皇后详情页**没有**副标题字段」—— **那是错的**。
+#     我当时只翻了**信息表格**的 12 行（`<td class="rowtitle">`），
+#     而皇后的副标题**不在那张表里**，它在页面标题区：
+#
+#         <div class="title">上官萍 - 怀念经典-1 2017 - FLAC 分轨 - Yuekui</div>
+#         <div class="smalltitle">WEB QQ [16Bit-44.1kHz] FLAC</div>
+#                                 ^^^^^^^^^^ 这**就是**副标题
+#
+#     ⇒ `opencd_parse.parse_detail()` **早就把它读出来了**
+#       （`info["small_descr"]` + `small_descr_present`，实测全部为 True）。
+#     ⇒ 我却在 `descr.build_form_fields()` 里用**主标题**当副标题，
+#       把解析层已经拿到的真值**扔掉了** —— 于是预览里主/副标题一模一样。
+#     ★ 教训（同 ERR-META-01 家族）：**"我没找到"不等于"不存在"**。
+#       证据不足时只能说"我在这些地方没找到"，**不能断言"没有"**；
+#       而本次更糟 —— 数据**本来就在手上**（解析层有），是我没去用它。
+#
+#   实测各页的 smalltitle（逐页读出，非推断）：
+#     · `WEB QQ [16Bit-44.1kHz] FLAC`          （好好系列 / 上官萍）
+#     · `WEB 网易 [24Bit-48kHz] FLAC`           （说唱巅峰对决）
+#     · `... (Hi-Res 24bit 96kHz FLAC)`         （Beethoven）
+#     · `YAMAHA CRW-F1E | 低速原抓 | Log100% | 高清扫描完整图册 |WAV|`（魂断乌江）
+#     · 齐秦那条**本来就是空的**（`small_descr_present=False`）⇒ 留空，不硬造
 #
 #   ★ 两条路**分开**，不再共用同一个函数的行为：
 #     · `run.py`（qB 本地抓轨）继续用 `build_small_descr()` 造「全 N 曲」——
-#       那条路的主标题是我们拼的，行为不变，**不受本次改动影响**。
-#     · 皇后转载路：`build_form_fields()` 优先用 `task["small_descr"]`
-#       （由 `opencd_parse` 从皇后页面读来的那一串）⇒ 见下面的取值顺序。
+#       那条路的主标题是我们自己拼的，行为不变，**不受本次改动影响**。
+#     · 皇后转载路：用 `opencd_small_descr()` = **解析层读到的皇后副标题原文**。
 
-def opencd_small_descr(title=""):
+def opencd_small_descr(parsed_subtitle=""):
     """
-    皇后转载路的副标题 = **皇后主标题原文**（用户 2026-09-21 拍板）。
+    皇后转载路的副标题 = **皇后的 `<div class="smalltitle">` 原文**。
 
-    ★ 取不到（标题为空）就返回 `""`，**不硬造**（同全项目纪律）。
-    ★ 判据：`opencd_small_descr("好好（张轩睿） - 宝宝 2020 - FLAC 分轨 - Yuekui")`
-      == 原样那串；`opencd_small_descr("")` == `""`。
+    ★ 取不到（皇后页面本来就没写副标题）就返回 `""`，**不硬造** ——
+      实测「齐秦 - 我拿什么爱你」那条的 smalltitle 就是空的。
+    ★ 判据：
+      · `opencd_small_descr("WEB QQ [16Bit-44.1kHz] FLAC")` == 原样那串
+      · `opencd_small_descr("")` == `""`
+      · ★ 阴性对照：它**不等于**主标题（这条判据防的正是我犯过的错）
     """
-    return (title or "").strip()
+    return (parsed_subtitle or "").strip()
 
 
 def derive_small_descr(tracklist="", disc_count=None, fallback=""):
     """
     副标题只放主标题里没有的客观信息：曲目数（多碟再带碟数）。
     ★ 本函数供 **qB 本地抓轨那条路**（`run.py`）用，行为**未变**。
-      皇后转载路的副标题走 `opencd_small_descr()`（= 皇后主标题原文）。
+      皇后转载路的副标题走 `opencd_small_descr()`（= 皇后的 smalltitle 原文）。
 
     - 有效曲目 = 非空、且不以「【」开头的行（「【CD1】」这类是分段表头，不计数）。
     - disc_count 缺省时按 tracklist 里的「【」表头数推断，仍无则按 1 碟。
@@ -419,16 +434,15 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
     # 副标题渲染时重算：已发布的老记录当初存的是「歌手-专辑(年)|格式」这种和主标题
     # 重复的旧值，只有在这里重算才能在下一次编辑时刷新成「全 N 曲 / DCD」。
     # 数不出曲目（老分轨记录 tracklist 为空）就退回库里旧值，不硬造。
-    # ★★ 副标题的取值顺序（2026-09-21 用户拍板：皇后转载路用**皇后主标题原文**）：
-    #    ① `task["small_descr"]` —— ★ 有值就用它（皇后转载路走这条）
-    #       ★ 但历史记录里存的是**旧版**造的「歌手-专辑(年)|格式」或「全 N 曲」，
-    #         两者都不是"皇后主标题原文"。⇒ 用 `is_opencd` 区分：
-    #         皇后转载路**一律**以主标题原文为准（`opencd_small_descr`），
-    #         不信任库里那个旧值 —— 否则旧记录改不回来。
-    #    ② qB 本地抓轨路（无 `opencd_tid`）：维持 `derive_small_descr()` 不变。
+    # ★★ 副标题的取值（2026-09-21 用户拍板：皇后转载路用**皇后的副标题**）：
+    #    · 皇后转载路（有 `opencd_tid`）→ `opencd_small_descr(task["small_descr"])`
+    #      = 解析层从皇后页面 `<div class="smalltitle">` 读到的**原文**。
+    #      ★ `task["small_descr"]` 就是它，**别再拿主标题顶替**（我犯过这个错）。
+    #      ★ 皇后本来就没写副标题时（实测「齐秦」那条）→ 空串，**留空不硬造**。
+    #    · qB 本地抓轨路 → 维持 `derive_small_descr()`「全 N 曲」不变。
     is_opencd = bool(task.get("opencd_tid"))
     if is_opencd:
-        small = opencd_small_descr(title)
+        small = opencd_small_descr(task.get("small_descr"))
     else:
         small = derive_small_descr(
             tracklist,
@@ -614,3 +628,82 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         fields["anonymous"] = "1"
 
     return fields
+
+
+# ==================== 自检（★ 防的是**我犯过的那类错**）====================
+#
+# ★ 为什么 descr.py 也需要自检：本轮最大的两个错**都出在这个文件**——
+#   ① 用主标题当副标题（把解析层已经拿到的真值扔掉）；
+#   ② 媒介子串误判（HQCD→CD 那条在 opencd_map，但同类）。
+#   它们都**不会让程序崩**，只会让发出去的内容**悄悄是错的**。
+#   ⇒ 必须用判据钉住，不能靠"看着像对"。
+
+def _check():
+    ok = fails = 0
+
+    def chk(label, good, extra=""):
+        nonlocal ok, fails
+        ok, fails = ok + bool(good), fails + (not bool(good))
+        print(f"  {'✅' if good else '❌'} {label}{('  ' + extra) if extra else ''}")
+
+    print("① 副标题（皇后转载路）—— ★ 必须是**皇后的 smalltitle**，不是主标题")
+    # ★ 用**真实页面实测到的**值当期望（不是从代码反填）
+    REAL = [
+        ("WEB QQ [16Bit-44.1kHz] FLAC", "老实测值"),
+        ("WEB 网易 [24Bit-48kHz] FLAC", "说唱巅峰对决实测值"),
+    ]
+    for val, note in REAL:
+        chk(f"原样保留 {val!r}（{note}）", opencd_small_descr(val) == val)
+    chk("空 → 空（齐秦那条本来就没副标题，**不硬造**）",
+        opencd_small_descr("") == "")
+    chk("None → 空（不炸）", opencd_small_descr(None) == "")
+    # ★★ 阴性对照 —— 这条**专门防我犯过的错**：
+    #   若哪天有人（或我）又把 title 传进来当副标题，这条**必须**报错。
+    TITLE = "上官萍 - 怀念经典-1 2017 - FLAC 分轨 - Yuekui"
+    SUB = "WEB QQ [16Bit-44.1kHz] FLAC"
+    chk("★ 阴性对照：副标题 **≠** 主标题",
+        opencd_small_descr(SUB) != TITLE, "(防「拿主标题顶替」复发)")
+
+    print("\n② qB 本地抓轨路（`derive_small_descr`）—— 行为**未变**")
+    chk("12 行曲目 → 「全 12 曲」",
+        derive_small_descr("\n".join(f"{i:02d}. x" for i in range(1, 13))) == "全 12 曲")
+    chk("多碟带碟数 → 「2CD · 全 4 曲」",
+        derive_small_descr("【CD1】\na\nb\n【CD2】\nc\nd") == "2CD · 全 4 曲")
+    chk("数不出曲目 → 回退 fallback",
+        derive_small_descr("", fallback="旧值") == "旧值")
+
+    print("\n③ 转发白名单 —— ★「皇后有」≠「该在乌托邦勾上」")
+    kept, dropped = filter_forward_tags(["1", "2", "30", "31", "44", "6"])
+    chk("禁转(1)/首发(2)/Redacted(30)/种子加速(44) 被剔除",
+        set(v for v, _, _ in dropped) == {"1", "2", "30", "44"})
+    chk("港台(6) 与 OpenCD(31) 保留", set(kept) == {"6", "31"})
+    chk("阴性对照：全禁的一批 → 一个不剩",
+        filter_forward_tags(["1", "2", "30"])[0] == [])
+
+    return ok, fails
+
+
+def main():
+    import argparse
+    import sys
+    sys.stdout.reconfigure(encoding="utf-8")
+    ap = argparse.ArgumentParser(description="decr 渲染层离线自检")
+    ap.add_argument("--selftest", action="store_true")
+    args = ap.parse_args()
+    if not args.selftest:
+        ap.error("加 --selftest 跑自检")
+    print("=" * 74)
+    print("descr 离线自检（纯离线，零请求）")
+    print("=" * 74)
+    ok, fails = _check()
+    print("\n" + "=" * 74)
+    if fails:
+        print(f"❌ 自检失败：{ok}/{ok + fails} 通过，{fails} 项不符")
+        return 1
+    print(f"✅ 自检通过：{ok}/{ok} 项全对")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())

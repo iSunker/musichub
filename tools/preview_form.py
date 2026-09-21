@@ -266,9 +266,29 @@ def main(argv):
         #    `detect_medium()` 从标题猜 —— 那会把皇后的 `Web` 猜成 `CD`。
         "medium_sel": m["medium_sel"],
         "audiocodec_sel": m["audiocodec_sel"],
+        # ★★ 副标题（皇后的 `<div class="smalltitle">`）：
+        #    **必须传进 task** —— 否则 `build_form_fields` 拿到的是空串，
+        #    预览里副标题就永远是空的。
+        #    ★ 这跟 artist/year/medium 是**同一个坑**：数据在 `info`/`m` 里有，
+        #      但**没传进 task** ⇒ 渲染层看不见 ⇒ 静默变空。
+        "small_descr": info.get("small_descr") or "",
         "opencd_tid": info.get("torrent_id") or "sample",
     }
     fields = descr.build_form_fields(task, autodetect=True)
+
+    # ★★ 传参完整性自检 —— 防的是**同一个坑反复踩**（2026-09-21 连踩三次）：
+    #   `render_compare` 漏传 artist/year、`preview_form` 漏传 small_descr，
+    #   两次都是"数据在手边、就是没传进 task"⇒ 渲染层看不见 ⇒ **静默变空**。
+    #   这里把「皇后页面有值、但 task 没传」的情形**当场喊出来**。
+    gap = []
+    for src_key, task_key, label in (
+            ("small_descr", "small_descr", "副标题"),
+            ("artist", "artist", "艺术家"),
+            ("year", "year", "发行年份")):
+        if (info.get(src_key) or "").strip() and not (task.get(task_key) or "").strip():
+            gap.append(label)
+    if gap:
+        print("  ⚠️  传参缺口（页面有值但没传进 task）：%s" % "、".join(gap))
 
     os.makedirs(OUT_DIR, exist_ok=True)
     base = re.sub(r"[^\w\-]+", "_", os.path.splitext(os.path.basename(path))[0])[:60]
