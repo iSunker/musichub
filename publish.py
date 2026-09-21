@@ -61,6 +61,32 @@ def readd_to_qb(qb, client, info_hash, torrent_id):
         print(f"    ❌ 回加 qB 出错: {e}")
 
 
+def merge_mapped(task):
+    """
+    把 `task["mapped_json"]`（`opencd_map.map_all()` 的**证据快照**）解回**顶层键**。
+
+    ★★ 为什么必须有这一步（这是最容易漏、且**漏了不报错**的一环）：
+      `descr.build_form_fields()` 读的是 `task["tags"] / ["medium_sel"] /
+      ["audiocodec_sel"] / ["team_sel"]` 这些**顶层键**，而
+      `db.get_pending_publish()` 只 SELECT `db.TASK_FIELDS`（没有这四列 ——
+      它们存在 `mapped_json` 里）。
+      ⇒ 不合并 ⇒ 那四个键是 `None` ⇒ `descr` 退回 `detect_medium()` /
+        `detect_tags()` **从标题猜** ⇒ 页面看着"有值"，**值是猜的**。
+        这正是 `SUMMARY #10` 那个 bug 的形状（静默、不报错）。
+
+    ★ 用**快照**而不是当场重算：`TAG_NAME_MAP` / `MEDIUM` 会变（44 项标签表刚改过、
+      WAV 编号未定）⇒ 发布要用的就是三天前抓页面时做的那个决定。
+    ★ 第一阶段（qB 本地抓轨）的行没有 `mapped_json` ⇒ `_load_mapped` 返回 `{}`，
+      这里**什么都不改**，行为与改动前完全一致。
+    ★ 解析失败会**抛出**（`db._load_mapped` 的契约）—— 响亮地坏，不静默当空。
+    """
+    mapped = db._load_mapped(task)
+    for key in ("tags", "medium_sel", "audiocodec_sel", "team_sel"):
+        if key in mapped and mapped[key] not in (None, ""):
+            task[key] = mapped[key]
+    return task
+
+
 def main():
     args = parse_args()
 
@@ -128,7 +154,9 @@ def main():
 
     if args.dry_run:
         print(f"\n🔍 dry-run：以下 {len(valid)} 条会被发布，简介预览（第一条）：")
-        fields = descr.build_form_fields(valid[0], anonymous=args.anonymous)
+        # ★ 与真实发布走**同一个 merge_mapped**，否则预览与实际不一致
+        fields = descr.build_form_fields(merge_mapped(valid[0]),
+                                         anonymous=args.anonymous)
 
         print("-" * 60)
         print(fields["descr"][:1200])
@@ -162,7 +190,8 @@ def main():
         title = task.get("formatted_title")
         print(f"\n[{i}/{len(valid)}] 🚀 发布: {title}")
 
-        fields = descr.build_form_fields(task, anonymous=args.anonymous)
+        fields = descr.build_form_fields(merge_mapped(task),
+                                         anonymous=args.anonymous)
         try:
             torrent_id, msg = client.upload_torrent(task["torrent_file"], fields)
         except (SiteError, LoginExpired) as e:

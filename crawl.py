@@ -44,10 +44,12 @@ import os
 import re
 import sys
 import time
+from datetime import datetime
 
 import requests
 
 import config
+import opencd_ingest
 import opencd_log as L
 import opencd_parse
 import opencd_rate
@@ -254,7 +256,10 @@ def qb_torrents(category=None):
 
 def run_from_qb(client, args):
     """
-    主路：扫 qB → 匹配皇后 → 抓新种子的详情页 → 入库（本步**只落盘**，不发 Musopia）。
+    主路：扫 qB → 匹配皇后 → 抓新种子的详情页 → **入库**（本步不发 Musopia）。
+
+    ★ 落库走 `opencd_ingest`（**纯本地、零请求**）—— 抓取与入库是两件事：
+      本函数负责出网，`opencd_ingest` 负责把解析结果写进 `tasks`。
     """
     log("=" * 62)
     log("📡 从 qB 反查皇后（主路）")
@@ -279,7 +284,9 @@ def run_from_qb(client, args):
         if os.path.isdir(RAW_DIR) else set()
     log(f"🗂️  本地已落盘 {len(known)} 个详情页（抓过就跳）")
 
-    stats = {"matched": 0, "fetched": 0, "cached": 0, "denied": 0, "nomatch": 0, "failed": 0}
+    stats = {"matched": 0, "fetched": 0, "cached": 0, "denied": 0, "nomatch": 0,
+             "failed": 0, "stored": 0, "not_seeded": 0, "no_log": 0,
+             "no_file": 0, "store_failed": 0}
     pending = []
 
     for t in torrents:
@@ -299,14 +306,16 @@ def run_from_qb(client, args):
         if tid in known:
             stats["cached"] += 1
             continue
-        pending.append((tid, name))
+        # ★ 带上整个 torrent 对象：入库要用 `hash`（upsert 主键）与
+        #   `torrent_file_path`（发布必需的 .torrent）。放这里比事后重查省事。
+        pending.append((tid, t))
 
     log(f"🔍 匹配完成：命中 {stats['matched']} · 未命中 {stats['nomatch']} · "
         f"已抓过 {stats['cached']} · 待抓 {len(pending)}")
 
     # 抓取待办
-    results = []
-    for tid, name in pending:
+    for tid, t in pending:
+        name = t.name or ""
         try:
             info, cached = fetch_detail(client, tid)
         except opencd_rate.DailyQuotaExceeded as e:
@@ -323,11 +332,42 @@ def run_from_qb(client, args):
             log(f"  🚫 id={tid} 禁止轉載 ⇒ DENY（永不发布）：{L.brief(info['name'])}")
         else:
             log(f"  ✅ id={tid} {info.rule}：{L.brief(info['name'])}")
-        results.append((tid, info))
+
+        # ★★ 入库（纯本地、零请求）—— 这一步此前**根本不存在**，
+        #    抓到的解析结果曾被直接丢掉（见 `opencd_ingest` 模块头）。
+        #    ★ `qb_seed_days` 本步传 `None` ⇒ 闸门①判「不满足」⇒ 落 `NOT_SEEDED`
+        #      不进发布队列。这是**刻意的**：查 qB 做种时长是独立的一步，
+        #      而闸门①的纪律是「宁可晚抓，不可早发」。
+        #      ⇒ 在真接上 `seeding_time` 之前，**不会有皇后行进入发布队列**。
+        #    ★ 入库失败**不改变抓取退出码**（两件事），但要显式打日志 + 计数。
+        if client.dry_run:
+            log(f"     [dry-run] 会入库 id={tid}")
+        else:
+            try:
+                st, why = opencd_ingest.ingest(
+                    info, raw_tid=tid, info_hash=(t.hash or "").lower(),
+                    torrent_file=getattr(t, "torrent_file_path", None),
+                    qb_seed_days=None, now=datetime.now(),
+                )
+                log("     " + opencd_ingest.explain(st, why))
+                if st == opencd_ingest.STATUS_OK:
+                    stats["stored"] += 1
+                elif st == opencd_ingest.STATUS_NOT_SEEDED:
+                    stats["not_seeded"] += 1
+                elif st == opencd_ingest.STATUS_NO_LOG:
+                    stats["no_log"] += 1
+                elif st == opencd_ingest.STATUS_NO_TORRENT_FILE:
+                    stats["no_file"] += 1
+            except Exception as e:
+                stats["store_failed"] += 1
+                log(f"     ❌ 入库失败（**不影响抓取结果**）：{L.brief(e)}")
 
     L.summary(log, "crawl",
               命中=stats["matched"], 待抓=len(pending), 已抓=stats["fetched"],
               禁转=stats["denied"], 未命中=stats["nomatch"], 失败=stats["failed"],
+              入库=stats["stored"], 未做种=stats["not_seeded"],
+              无log=stats["no_log"], 缺种子文件=stats["no_file"],
+              入库失败=stats["store_failed"],
               本轮请求=client.gate.used_round, 当日请求=client.gate.used_day)
     return 0
 
@@ -362,6 +402,30 @@ def run_manual(client, args):
     log(f"    可自动发布   = {info.may_auto_publish()}")
     log(f"    日志         = {info['log_lines']} 行")
     log(f"    曲目         = {info['tracklist_lines']} 行")
+
+    # ★★ 入库（手工路）
+    #   ★★ **必须显式给 `--info-hash` 才写库**：`save_task` 以 `info_hash` 为
+    #      upsert 主键，而手工跑时我们**无法核对**页面 Hash碼 与 qB 里那份是不是
+    #      同一条种子（本项目实测过「同名不同格式」：齐秦那份 2 个候选名字几乎一样）。
+    #      拿一条**没有独立见证**的 hash 去写主键，可能凭空多出一行、甚至覆盖
+    #      第一阶段的记录 ⇒ 所以**不给 hash 就只落盘、只打日志，不写库**。
+    #   ★ 这是「取不到就不写，绝不编」的具体落地。
+    if client.dry_run:
+        log("    [dry-run] 不写库")
+    elif not args.info_hash:
+        log("    ⏹️ 未入库：手工路必须显式传 --info-hash（不能凭空写主键）")
+        log("       若确认过它与 qB 里那条是同一个种子，重跑时加上该参数即可")
+        log(f"       （页面里写的 Hash碼 = {L.brief(extract_infohash(load_raw(tid) or '') or '取不到')}）")
+    else:
+        try:
+            st, why = opencd_ingest.ingest(
+                info, raw_tid=tid, info_hash=args.info_hash,
+                torrent_file=args.torrent_file,
+                qb_seed_days=None, now=datetime.now(),
+            )
+            log("    " + opencd_ingest.explain(st, why))
+        except Exception as e:
+            log(f"    ❌ 入库失败：{L.brief(e)}")
     return 0
 
 
@@ -372,6 +436,13 @@ def main():
     ap.add_argument("--url", help="主动抓：指定详情页 URL")
     ap.add_argument("--search", help="主动抓：按名字搜（只列候选）")
     ap.add_argument("--force", action="store_true", help="即使本地已有也重抓")
+    ap.add_argument("--info-hash", dest="info_hash",
+                    help="入库用（主键）。★ 手工路（--tid/--url）**必须显式给**，"
+                         "否则只落盘不入库 —— 见 run_manual 里的理由")
+    ap.add_argument("--torrent-file", dest="torrent_file",
+                    help="入库用的本地 .torrent 路径（发布必需；缺了会落 "
+                         "NO_TORRENT_FILE，**不会**自动生成 —— 生成会换 passkey "
+                         "导致 infohash 变）")
     ap.add_argument("--dry-run", action="store_true", help="只列会做什么，不发请求")
     ap.add_argument("--max-candidates", type=int, default=5, help="每个种子最多验几个候选")
     args = ap.parse_args()

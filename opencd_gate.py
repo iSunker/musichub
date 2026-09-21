@@ -27,6 +27,7 @@
 调用方从库里读出来的时间戳，必须先自己用 `datetime(..., 'localtime')` 转好再传进来。
 """
 from datetime import datetime, timedelta
+import math
 
 # 闸门天数。★ 用户 2026-09-19 定：两个都是 3 天。
 QB_SEED_DAYS_REQUIRED = 3
@@ -46,6 +47,12 @@ def fetch_gate_ok(qb_seed_days, required=QB_SEED_DAYS_REQUIRED):
     `qb_seed_days` 是在 qB 里的做种天数（float）。★ 用**天数**而不是绝对时间戳：
     做种时长由 qB 自己算，我们只关心「够了没有」，比较两个绝对时间更容易踩时区。
     ★ `None`（拿不到）按**不满足**处理 —— 宁可晚抓，不可早发。
+    ★★ 2026-09-21 补：**非有限值（NaN / inf）也必须按「不满足」处理**。
+      原先只判 `days < required`，而 `float('nan') < 3` 是 **False** ⇒
+      **NaN 会被判「满足」**（实测 `decide(nan)` → `READY_TO_FETCH`、
+      `decide(inf)` → `READY_TO_FETCH`）—— 这**违反**本函数自己的纪律
+      「宁可晚抓，不可早发」。`inf` 同理（一个坏掉的时长不该被当成"做种很久了"）。
+      ⇒ 用 `math.isfinite` 挡掉。★ 这条今天没炸只是因为**零调用方**。
     """
     if qb_seed_days is None:
         return False, "拿不到做种时长（qB 没这个种子？）"
@@ -53,6 +60,9 @@ def fetch_gate_ok(qb_seed_days, required=QB_SEED_DAYS_REQUIRED):
         days = float(qb_seed_days)
     except (TypeError, ValueError):
         return False, f"做种时长不是数字：{qb_seed_days!r}"
+    if not math.isfinite(days):
+        # ★ NaN / inf：**绝不能**因为"比较结果是 False"就被放行
+        return False, f"做种时长不是有限数字：{qb_seed_days!r}"
     if days < required:
         return False, f"做种 {days:.2f} 天 < {required} 天"
     return True, f"做种 {days:.2f} 天 ≥ {required} 天"
@@ -141,6 +151,16 @@ def _check():
     print("\n③ 拿不到做种时长（None）⇒ 按不满足处理（宁晚不早）")
     s, why = decide(qb_seed_days=None, now=T)
     case("qb_seed_days=None", GATE_NOT_SEEDED, s)
+
+    print("\n③b ★★ 非有限值（NaN / inf）也必须**不满足** —— 阴性对照")
+    # ★ 这条防的是「`nan < 3` 是 False ⇒ 被误判成满足」：
+    #   2026-09-21 实测过 `decide(nan)` → READY_TO_FETCH（**放行**），
+    #   违反本模块「宁可晚抓，不可早发」的纪律。删掉 `math.isfinite` 那行，
+    #   下面两条必须当场 ❌。
+    for bad, label in ((float("nan"), "NaN"), (float("inf"), "inf"),
+                       (float("-inf"), "-inf"), ("不是数字", "字符串")):
+        s, why = decide(qb_seed_days=bad, now=T)
+        case(f"{label} ⇒ 必须 NOT_SEEDED", GATE_NOT_SEEDED, s)
 
     print("\n④ 闸门①过了、还没抓 ⇒ READY_TO_FETCH")
     s, _ = decide(qb_seed_days=10, fetched_at=None, now=T)

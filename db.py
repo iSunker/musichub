@@ -5,6 +5,7 @@
 （publish.py 的建表语句里没有 log_content / log_filename）。谁先跑谁建表，于是
 update_metadata.py 查 log_content 时直接 OperationalError。schema 只能有一个来源。
 """
+import json
 import sqlite3
 
 import config
@@ -63,6 +64,19 @@ COLUMNS = [
     #     存原值才不会在入库时就把证据洗掉（要转就在发送前转，转法可回读校验）。
     ("artist", "TEXT"),
     ("year", "TEXT"),
+    # ★★ `map_all()` 的**证据快照**（2026-09-21 补，配套写入侧 `opencd_ingest.py`）。
+    #
+    #   为什么是**一个 JSON 列**而不是 4 个真列（`tags`/`medium_sel`/`audiocodec_sel`/`team_sel`）：
+    #   ① 这四个值**只在发布时被消费一次**，没有任何 SQL 查询价值
+    #      （不像 `publish_after` 要进 WHERE）⇒ 加真列就是"只写不读"的列；
+    #   ② `save_task` 是按 `COLUMNS` 白名单校验的，加 4 列 = 给白名单开 4 个口子；
+    #   ③ 一个 JSON 还**天然装下 `unmapped`**（映射不上的标签必须显式落盘、不许静默丢）。
+    #
+    #   ★ 它是**快照**不是缓存：`TAG_NAME_MAP` / `MEDIUM` / `TEAM_NAME_MAP` 都会变
+    #     （44 项标签表刚改过、WAV 编号未定），所以**发布时要用的就是三天前
+    #     抓页面时做的那个决定**，不能到时候重算（重算结果会漂）。
+    #   ★ 读它一律走 `_load_mapped()`：解析失败**抛出**（见那里的注释）。
+    ("mapped_json", "TEXT"),
 ]
 
 
@@ -109,7 +123,36 @@ def init_db():
 TASK_FIELDS = (
     "info_hash, torrent_name, formatted_title, small_descr, cover_url, "
     "tracklist, log_content, log_filename, logs_json, torrent_file, content_path, "
-    "site_status, site_torrent_id"
+    "site_status, site_torrent_id, "
+    # ★★ 以下 6 列 2026-09-21 补 —— **不补它们 = 写进库但发布时读不到**。
+    #    `get_pending_publish()` 只 SELECT 这个字符串，而 `descr.build_form_fields()`
+    #    要读 `opencd_tid`（决定皇后路分流）与 `artist`/`year`；
+    #    皇后行的 `tags`/`medium_sel`/… 则要从 `mapped_json` 解出来。
+    #    ★ 这个坑本项目**已经栽过三次**（"数据在手边、就是没传进 task"⇒ 静默变空），
+    #      所以这里逐列写明它给谁用：
+    "opencd_tid, artist, year, unmapped_json, mapped_json, publish_after"
+)
+
+# ── 「待发布」的口径（★ 唯一来源，别在别处再写一份）────────────────────────
+#
+# ★ 抽成模块常量的理由同 `STALE_CONDITION`：将来若有第二个查询要按同一口径
+#   **数**待办（比如 daemon 的探针），两处各写一份必然漂移，而漂移的表现是
+#   「探针说有活 → 一条都选不出来 → 探针还说有活」的**静默空转**，不报任何错。
+PENDING_PUBLISH_WHERE = (
+    "status = 'SUCCESS' AND (site_status IS NULL OR site_status != 'EXISTS') "
+    # ★★ 闸门②（抓取时刻 + 3 天 = 可发布时刻）—— 2026-09-21 补。
+    #    ★ 它此前是个**死列**：`publish_after` 写进去也没人查 ⇒ 皇后行一旦
+    #      `status='SUCCESS'` 就会**当轮立刻进发布队列**，3 天反悔窗口
+    #      **被完全绕过**，而且**不报错**。这条过滤就是让闸门②真的生效。
+    #    ★ `IS NULL` / `= ''` 这一支是**给第一阶段（qB 本地抓轨）用的**：
+    #      那批行的 `publish_after` 本来就是 NULL，语义是「没有反悔窗口、照旧发」
+    #      ⇒ 加这条**不改变第一阶段行为**（可用现存 SUCCESS 行回归验证）。
+    #    ★ 时区：写入侧（`opencd_ingest`）刻意用 **UTC** 生成 `publish_after`，
+    #      与 `datetime('now')` **同源同时区**，所以这里能直接字符串比较。
+    #      ⚠️ 本机 `TZ=UTC` 而生产容器是 CST(+8) ⇒ 这个坑**本机测不出来**，
+    #         只能靠 `opencd_ingest --selftest` 的「恰好 3 天」判据钉住。
+    "AND (publish_after IS NULL OR publish_after = '' "
+    "     OR publish_after <= datetime('now'))"
 )
 
 
@@ -118,14 +161,39 @@ def _rows_to_dicts(cur):
     return [dict(zip(names, row)) for row in cur.fetchall()]
 
 
+def _load_mapped(task):
+    """
+    把 `task["mapped_json"]` 解回 dict（`opencd_map.map_all()` 的产出快照）。
+
+    ★ **解析失败就抛出，不静默返回空 dict**：
+      否则「JSON 坏了」会长得和「这个字段本来就没有」一模一样 ⇒ 渲染层会
+      退回 `detect_*()` 从标题猜，页面看着"有值"而值是猜的
+      （正是 `SUMMARY #10` 那个 bug 的形状）。
+    ★ 没有 `mapped_json`（第一阶段的行）⇒ 返回 `{}`，那是**正常的**，
+      调用方据此走原有的 `detect_*` 兜底，不是错误。
+    """
+    raw = (task or {}).get("mapped_json")
+    if not raw or not str(raw).strip():
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError) as e:
+        raise ValueError(
+            f"mapped_json 不是合法 JSON（info_hash={task.get('info_hash')!r}）: {e}"
+        ) from e
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"mapped_json 必须是 JSON 对象，实得 {type(data).__name__}"
+            f"（info_hash={task.get('info_hash')!r}）"
+        )
+    return data
+
+
 def get_pending_publish():
-    """待发布：本地处理成功，但站点上还没有。"""
+    """待发布：本地处理成功、站点上还没有、**且过了闸门②的反悔窗口**。"""
     conn = connect()
     cur = conn.cursor()
-    cur.execute(
-        f"SELECT {TASK_FIELDS} FROM tasks "
-        "WHERE status = 'SUCCESS' AND (site_status IS NULL OR site_status != 'EXISTS')"
-    )
+    cur.execute(f"SELECT {TASK_FIELDS} FROM tasks WHERE {PENDING_PUBLISH_WHERE}")
     rows = _rows_to_dicts(cur)
     conn.close()
     return rows
@@ -211,6 +279,24 @@ def count_stale():
     conn = connect()
     n = conn.execute(
         f"SELECT count(*) FROM tasks WHERE {' AND '.join(where)}", params
+    ).fetchone()[0]
+    conn.close()
+    return n
+
+
+def count_pending_publish():
+    """
+    现在有多少条会进发布队列。给 daemon 探针 + `opencd_ingest --selftest` 用。
+
+    只数不取（同 `count_stale()` 的理由：待发布里有 `log_content`/`mapped_json`
+    这些大文本，而调度 tick 会频繁问）。
+
+    ★★ 口径与 `get_pending_publish()` **严格同源**（共用 `PENDING_PUBLISH_WHERE`）
+      —— 两处各写一份必然漂移，而漂移**不报错**，只表现为反复空转。
+    """
+    conn = connect()
+    n = conn.execute(
+        f"SELECT count(*) FROM tasks WHERE {PENDING_PUBLISH_WHERE}"
     ).fetchone()[0]
     conn.close()
     return n
