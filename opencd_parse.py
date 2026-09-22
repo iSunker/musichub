@@ -272,24 +272,82 @@ def _extract_tracklist(soup):
     return "\n".join(lines)
 
 
+# 频谱图/非封面的排除词（★ 小写后比，两侧都要覆盖）
+# ★★ 2026-09-21 实测依据：`divdescr` 里的图**不一定是封面**，实测见过
+#    `频谱图.JPG`、`xxx-spectrogram.png`、`01. 孩兒.flac-full.png`、`01. 孩兒.flac-zoom.png`
+#    （谭咏麟那页的 `divdescr` 里全是频谱图）。不排除就会**把频谱图当封面传上图床**。
+_COVER_EXCLUDE = ("频谱", "頻譜", "spectrogram", ".flac-full", ".flac-zoom", "spectrum")
+
+
+def _cover_src_of(img):
+    """
+    从一个 `<img>` 里取**原图**地址（相对或绝对），并剥掉尾随 `.thumb.jpg`。
+
+    ★★ 为什么不能直接用 `src`（实测的「缩略图陷阱」）：
+        <img alt="cover.jpg"
+             src="attachments/…/…04.jpg.thumb.jpg"              ← 缩略图
+             onclick="Previewurl('attachments/…/…04.jpg')" />   ← ★ 原图在这
+      ⇒ 实测规律：`src` **带** `.thumb.jpg` 的（cover.jpg / Folder.jpg / disc.jpg /
+        back.jpg）原图在 `onclick` 里；`src` **不带**的（folder.jpg 那两条）
+        本身就是原图，`Previewurl` 与它相同；**外站图没有 onclick**，`src` 即原图。
+      ⇒ 取值顺序：**先 `Previewurl(...)`，没有才用 `src`**；最后统一剥 `.thumb.jpg`。
+    """
+    onclick = img.get("onclick") or ""
+    m = re.search(r"Previewurl\(\s*['\"]([^'\"]+)['\"]\s*\)", onclick)
+    url = (m.group(1) if m else "") or (img.get("src") or "")
+    url = url.strip()
+    # 剥尾随 `.thumb.jpg`（大小写不敏感）；`folder.jpg` 这种没有则原样
+    url = re.sub(r"\.thumb\.jpg$", "", url, flags=re.I)
+    return url
+
+
 def _extract_cover_candidates(soup):
     """
-    封面候选：`divdescr` 里 `alt="folder.jpg"` 之类的附件图。
-    ★ 实测（2026-09-19）：alt 有 folder.jpg / disc.jpg / back.jpg / CD.jpg 等，
-      **folder 优先**（那是通行封面名）。返回 [(alt, src)]，已按优先级排。
-    注意 src 是**相对路径**，要拼站点前缀才能下载 —— 拼 URL 是抓取层的事，
-    这里只给原始 src（保持纯函数、不掺站点知识）。
-    """
-    div = soup.find(id="divdescr")
-    if div is None:
-        return []
-    out = []
-    for img in div.find_all("img"):
-        src = img.get("src") or ""
-        if "attachments/" not in src:
-            continue
-        out.append((img.get("alt") or "", src))
+    封面候选，返回 `[(alt, src)]`，**已按优先级排**。
 
+    ★★ 2026-09-21 **订正**（此前只看 `divdescr`，那是**错的**）：
+      实测 10 个真实详情页——
+        · `<div class="cover" title="点击查看原图">`（**站点的封面位**）：**10/10 都有**
+        · `divdescr`（旧代码**唯一**看的区块）：只有 **2/10** 有图，
+          且那 2 个恰好都是**禁止轉載**页
+      ⇒ 旧代码把**真封面漏掉了 9/10**（`cover_candidates` 几乎恒为空）。
+      ⇒ 现在**优先看 `div.cover`**，`divdescr` 降为**备选**（并排除频谱图）。
+
+    ★ `alt` 常见：`cover.jpg` / `Folder.jpg` / `folder.jpg` / `disc.jpg` / `back.jpg`
+      ⇒ **folder/cover/front 优先**（那是通行封面名）。
+    ★ 地址可能是**相对路径**（`attachments/…`，要拼站点前缀）**或绝对 URL**
+      （`https://y.gtimg.cn/…` 这类**外站图**，实测占比约一半）。
+      拼 URL 是抓取层的事，这里只给原始地址（保持纯函数、不掺站点知识）。
+    """
+    out = []
+
+    def collect(div, *, allow_excluded):
+        if div is None:
+            return
+        for img in div.find_all("img"):
+            src = _cover_src_of(img)
+            if not src:
+                continue
+            alt = img.get("alt") or ""
+            blob = (alt + " " + src).lower()
+            if not allow_excluded and any(k in blob for k in _COVER_EXCLUDE):
+                continue          # ★ 频谱图等——不是封面
+            out.append((alt, src))
+
+    # ① 站点的**封面位**（真封面在这里）
+    collect(soup.find(class_="cover"), allow_excluded=False)
+    if out:
+        # ★ `div.cover` 命中就**不再**看 `divdescr` —— 那个区块里常混着频谱图，
+        #   而且"页面封面上"比"描述里的某张图"更权威。
+        return _rank_covers(out)
+
+    # ② 备选：描述区里的图（**要排除频谱图**）
+    collect(soup.find(id="divdescr"), allow_excluded=False)
+    return _rank_covers(out)
+
+
+def _rank_covers(items):
+    """按 alt 分级排序：folder/cover/front < cd/disc < 其它。稳定排序，同级保序。"""
     def rank(item):
         alt = (item[0] or "").lower()
         if "folder" in alt or "cover" in alt or "front" in alt:
@@ -298,8 +356,9 @@ def _extract_cover_candidates(soup):
             return 1
         return 2
 
-    out.sort(key=rank)
-    return out
+    items = list(items)
+    items.sort(key=rank)
+    return items
 
 
 # ==================== 列表页（torrents.php）解析 ====================
@@ -548,6 +607,114 @@ def _check_searchpages():
     return len(checks), fails
 
 
+def _check_cover_extraction():
+    """
+    封面抽取的判据（★ 2026-09-21 新增）—— 防的是**两个真实错误**：
+
+      ① **看错区块**：旧代码只看 `divdescr`，而真封面在 `<div class="cover">`
+         ⇒ 实测 10 个详情页里**真封面被漏掉 9 个**（`cover_candidates` 几乎恒为空）。
+      ② **把频谱图当封面**：`divdescr` 里常有 `频谱图.JPG` / `-spectrogram.png` /
+         `01.xxx.flac-full.png` / `-zoom.png` ⇒ 不排除就会**传错图**上图床。
+
+    ★ 判据用**手造的极小 HTML**（不依赖外部样本），这样"改坏了"必然当场响；
+      再用真实样本补一条端到端的。
+    """
+    from bs4 import BeautifulSoup
+    ok = fails = 0
+
+    def case(label, want, got):
+        nonlocal ok, fails
+        good = want == got
+        ok, fails = ok + good, fails + (not good)
+        print(f"  {'✅' if good else '❌'} {label:<46} 期望={want!r:<34} 实得={got!r}")
+
+    # ---------- ① div.cover 优先于 divdescr ----------
+    # ★ 阴性对照：把实现改回"只看 divdescr"，这条必 ❌
+    html = """<html><body>
+      <div class="cover" title="点击查看原图">
+        <img alt="Folder.jpg"
+             src="attachments/a/FOLDER.jpg.thumb.jpg"
+             onclick="Previewurl('attachments/a/FOLDER.jpg')" />
+      </div>
+      <div id="divdescr"><img alt="cover.jpg" src="attachments/b/IN_DESCR.jpg" /></div>
+    </body></html>"""
+    got = _extract_cover_candidates(BeautifulSoup(html, "html.parser"))
+    case("div.cover 优先（不看 divdescr）", [("Folder.jpg", "attachments/a/FOLDER.jpg")], got)
+
+    # ---------- ② 缩略图纠正：原图在 Previewurl 里 ----------
+    html = """<html><body>
+      <div class="cover"><img alt="d.jpg"
+        src="attachments/x/d.jpg.thumb.jpg"
+        onclick="Previewurl('attachments/x/d.jpg')" /></div>
+    </body></html>"""
+    got = _extract_cover_candidates(BeautifulSoup(html, "html.parser"))
+    case("剥掉 .thumb.jpg（取 Previewurl 的原图）",
+         [("d.jpg", "attachments/x/d.jpg")], got)
+
+    # ---------- ③ 无 Previewurl 时用 src，且仍剥 .thumb ----------
+    html = """<html><body>
+      <div class="cover"><img alt="d.jpg" src="attachments/x/e.jpg.thumb.jpg" /></div>
+    </body></html>"""
+    got = _extract_cover_candidates(BeautifulSoup(html, "html.parser"))
+    case("无 Previewurl 时用 src，仍剥 .thumb",
+         [("d.jpg", "attachments/x/e.jpg")], got)
+
+    # ---------- ④ 外站绝对 URL 要接住（实测占一半）----------
+    html = """<html><body>
+      <div class="cover"><img src="https://y.gtimg.cn/music/photo_new/T002M0009_1.jpg" /></div>
+    </body></html>"""
+    got = _extract_cover_candidates(BeautifulSoup(html, "html.parser"))
+    case("外站绝对 URL 原样保留",
+         [("", "https://y.gtimg.cn/music/photo_new/T002M0009_1.jpg")], got)
+
+    # ---------- ⑤ ★ 频谱图必须排除（无 div.cover 时才走 divdescr）----------
+    # ★ 阴性对照：删掉 `_COVER_EXCLUDE` 那几行，这条必 ❌
+    html = """<html><body><div id="divdescr">
+      <img alt="01. 孩兒.flac-full.png" src="attachments/x/full.png.thumb.jpg" />
+      <img alt="01. 孩兒.flac-zoom.png" src="attachments/x/zoom.png.thumb.jpg" />
+      <img alt="频谱图.JPG"             src="attachments/x/spec.jpg" />
+      <img src="attachments/x/spec2-spectrogram.png" />
+    </div></body></html>"""
+    got = _extract_cover_candidates(BeautifulSoup(html, "html.parser"))
+    case("★ 频谱图全部被排除（divdescr 备选路）", [], got)
+
+    # ---------- ⑥ divdescr 里的**真**封面仍要捞得到 ----------
+    html = """<html><body><div id="divdescr">
+      <img alt="频谱图.JPG" src="attachments/x/spec.jpg" />
+      <img alt="folder.jpg"  src="attachments/x/real.jpg" />
+    </div></body></html>"""
+    got = _extract_cover_candidates(BeautifulSoup(html, "html.parser"))
+    case("divdescr 里排除频谱图后仍捞出真封面",
+         [("folder.jpg", "attachments/x/real.jpg")], got)
+
+    # ---------- ⑦ 优先级排序：folder/cover/front 在最前 ----------
+    html = """<html><body><div class="cover">
+      <img alt="back.jpg"   src="attachments/x/3.jpg" />
+      <img alt="disc.jpg"   src="attachments/x/2.jpg" />
+      <img alt="cover.jpg"  src="attachments/x/1.jpg" />
+    </div></body></html>"""
+    got = _extract_cover_candidates(BeautifulSoup(html, "html.parser"))
+    case("按 alt 分级排序（cover 排第一）",
+         ["attachments/x/1.jpg", "attachments/x/2.jpg", "attachments/x/3.jpg"],
+         [s for _, s in got])
+
+    # ---------- ⑧ 真样本端到端（有就验，没有跳过）----------
+    for fname, want_first_alt in (("sample-zhuanzai-jinyong.html", "folder.jpg"),):
+        p = os.path.join(SAMPLE_DIR, fname)
+        if not os.path.exists(p):
+            print(f"  ⚠️  缺样本 {fname}，跳过该条")
+            continue
+        with open(p, encoding="utf-8") as fh:
+            info = parse_detail(fh.read(), source_file=fname)
+        cc = info.get("cover_candidates") or []
+        case(f"{fname} 首个候选 alt", want_first_alt,
+             (cc[0][0] if cc else None))
+        case(f"{fname} 首个候选**不含** .thumb", True,
+             bool(cc) and ".thumb" not in cc[0][1])
+
+    return ok, fails
+
+
 def _check_listpage():
     """
     列表页自检。★ 判据分两层：
@@ -636,6 +803,12 @@ def cmd_selftest():
     kc, kf = _rule_no_keyword_fallback()
     total_checked += kc
     total_fails += kf
+
+    print(f"\n{'─' * 72}")
+    print("封面抽取 · ★ 防「看错区块」与「频谱图当封面」（2026-09-21 订正）")
+    cc, cf = _check_cover_extraction()
+    total_checked += cc
+    total_fails += cf
 
     print(f"\n{'─' * 72}")
     print("列表页解析（torrents.php）· 抓取层的入口（★ 第 3 步用）")

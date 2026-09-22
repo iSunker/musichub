@@ -40,13 +40,22 @@ def bbcode_to_html(text):
 
     ★ 刻意保持"浅"：预览的作用是让人**看出结构**（封面/曲目/折叠日志），
       不是做一个完整 BBCode 引擎。转不了的原文照显，不做花哨兜底。
+
+    ★★ 2026-09-21 修一个**顺序 bug**（这是封面在预览里恒为空的原因）：
+      原先把 `[img]` 转换放在**去标签之后**，而那条去标签正则写的是
+      `\\[/?(center|quote|b|…)[^\\]]*\\]` —— `[^\\]]*` 会匹配 `[` 之后的**任意非 `]` 字符**，
+      于是 **`[img]` 与 `[/img]` 自己也被它吃掉了**（实测：`[img]` 拼出的
+      `img` 正好落进 `[^\\]]*`）⇒ 后面的 `[img]` 正则再也匹配不到 ⇒ 封面永远不显示。
+      ⇒ 修法：**先换 `[img]`（此时标签还在），再去多余标签**。
     """
     if not text:
         return ""
     s = html.escape(text)
-    s = re.sub(r"\[/?(center|quote|b|i|u|code|spoiler)[^\]]*\]", "", s)
+    # ① **先**把 [img] 换成 <img>（必须在去标签之前，否则 [img] 会被一起去掉）
     s = re.sub(r"\[img\]\s*(\S+?)\s*\[/img\]",
                r'<img src="\1" style="max-width:320px">', s)
+    # ② 再去掉展示性的 BBCode 外壳（不含 img —— 上一步已经处理掉了）
+    s = re.sub(r"\[/?(center|quote|b|i|u|code|spoiler)[^\]]*\]", "", s)
     return "<br>".join(s.splitlines())
 
 
@@ -226,22 +235,40 @@ def build_html(info, m, fields):
 
 def _first_cover(info):
     """
-    取第一个封面 URL。
+    取第一个封面地址。
 
     ★ `cover_candidates` 实测是**元组列表**（不是字符串列表）——
       我第一版直接 `[0]` 当字符串用，第二个样本上当场 `AttributeError:
       'tuple' object has no attribute 'strip'`。
       ⇒ 这里显式拆开两种形态，并**只取 URL 那一段**，不让类型猜。
+
+    ★★ 2026-09-21 订正（第二个真 bug）：此前要求候选 `startswith("http")`
+      ⇒ **所有站内 `attachments/…` 候选都被丢掉** ⇒ 预览里封面**恒为空**。
+      而实测**一半以上**的封面正是站内相对路径。
+      ⇒ 现在**相对地址也接受**：相对的要拼站点前缀才能当图片 URL，
+        预览时拼 `OPENCD_URL`（默认 `https://open.cd`）—— 只为看得见，
+        真正下载由 `cover_fetch` 负责。
     """
     cands = info.get("cover_candidates") or []
+    url = ""
     for c in cands:
         if isinstance(c, str) and c.strip():
-            return c.strip()
-        if isinstance(c, (tuple, list)) and c:
-            for part in c:
-                if isinstance(part, str) and part.strip().startswith("http"):
-                    return part.strip()
-    return ""
+            url = c.strip()
+            break
+        if isinstance(c, (tuple, list)) and len(c) >= 2:
+            # (alt, src) —— ★ 取**第二个**（src），不是第一个（alt）
+            cand = str(c[1] or "").strip()
+            if cand:
+                url = cand
+                break
+    if not url:
+        return ""
+    if url.startswith("//"):
+        return "https:" + url
+    if not url.startswith("http"):
+        base = os.getenv("OPENCD_URL", "https://open.cd").rstrip("/")
+        return f"{base}/{url.lstrip('/')}"
+    return url
 
 
 def _write_with_cache_bust(base, html_text, keep_stale=False):
