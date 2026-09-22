@@ -2,11 +2,11 @@
 OpenCD（皇后）字段 → Musopia 表单字段的映射。**纯离线、零请求。**
 
 ★ 为什么单独一个模块：这是第 4 步里**最容易出静默错误**的地方，而静默错误
-  在本项目已经栽过多次（`SUMMARY §6` 那一族）。集中一处才好审计、才好写判据。
+  在本项目已经栽过多次（`ERRATA.md` 的 `ERR-META-01` 一族）。集中一处才好审计、才好写判据。
 
 ═══ 这个模块存在的唯一理由：两套标签编号完全错位 ═══
 
-实测对照（`SUMMARY §12` 第 4 步）：
+实测对照（下表是唯一事实源，别再按"看起来对应"去推）：
 
     | 标签名   | 皇后值 | Musopia 值 |
     |---------|-------|-----------|
@@ -28,9 +28,10 @@ OpenCD（皇后）字段 → Musopia 表单字段的映射。**纯离线、零�
    ★ 但**只在精确名查不到时才剥** —— 否则将来若有标签名本身带括号，
      会被误剥（先精确、后宽松，跟解码判据「先严后宽」同一个思路）。
 3. **映射不上的必须显式列出，绝不静默丢。** 返回 `unmapped` 列表，
-   调用方要把它写进每日邮件（`SUMMARY §12` 决定 9）。
+   调用方要把它写进每日邮件。
    ★ 静默丢 = 种子发上去少几个标签，**没有任何报错**，只能靠人眼发现。
 """
+import json
 import re
 
 import descr                       # Musopia 侧的唯一真值来源（TAGS / MEDIUM / AUDIOCODEC）
@@ -56,7 +57,7 @@ def _strip_suffix(name):
 # ★★ 2026-09-21 订正：原先这里写着「剩下 5 项故意不映射（Musopia 没有对应标签）」
 #    —— **那句话是错的**，是我在手上没有真实表单时的旧判断。
 #    真实证据：乌托邦 `takeupload.php` 的 `tags[4][]` **实测 44 项**（逐行读出，
-#    见 `descr.TAGS` 与 `SUMMARY #16`）。皇后那 27 项**全都能在乌托邦找到对应**，
+#    见 `descr.TAGS`）。皇后那 27 项**全都能在乌托邦找到对应**，
 #    只是当初写映射表时手上没有这张表单。
 #    ⇒ 现在把「有实测依据」的补进来；仍无依据的**留作 unmapped**（不静默丢、不硬凑）。
 #
@@ -98,7 +99,7 @@ TAG_NAME_MAP = {
     # ★★ 「贝斯」这一项是**用字差异**，不是缺标签 —— 最容易看漏的一格：
     #    皇后写 `贝斯(Drum Bass)`（空格），乌托邦写 `贝斯(Drum&Bass)`（&）。
     #    `_strip_suffix()` 会把两边括号都剥掉 ⇒ 剥完都叫「贝斯」，正好接上。
-    #    （这是 `SUMMARY §12` 里那个「贝斯没有对应」旧结论的订正。）
+    #    （这是早先那条「贝斯没有对应」旧结论的订正。）
     "贝斯": "贝斯",              # 14 Drum&Bass
 }
 
@@ -301,7 +302,7 @@ def map_all(info):
         #   （`custom_fields[4][1]` / `[4][2]`）。取不到就是 ""，调用方原样发空。
         "artist": info.get("artist") or "",
         "year": info.get("year") or "",
-        # 原样保留，不改写、不渲染成「转载自 OpenCD」（SUMMARY §12 决定 2）
+        # 原样保留，不改写、不渲染成「转载自 OpenCD」（来源行照原样透传）
         "source": info.get("source") or "",
     }
 
@@ -463,9 +464,18 @@ def main():
     ap = argparse.ArgumentParser(description="OpenCD → Musopia 字段映射")
     ap.add_argument("--selftest", action="store_true", help="跑离线自检")
     ap.add_argument("file", nargs="?", help="详情页 HTML（打印映射结果）")
+    # ★ --json：机读出口，给 tools/gen_counts.py 读。别去正则解析人读的 ✅/❌ 行 —— 分母口径不统一。
+    ap.add_argument("--json", action="store_true",
+                    help="与 --selftest 合用：只把结果以 JSON 打到末行")
     args = ap.parse_args()
 
     if args.selftest:
+        if args.json:
+            ok, fails = _check()
+            print(json.dumps({"script": "opencd_map.py --selftest", "ok": ok,
+                              "total": ok + fails, "exit": 1 if fails else 0},
+                             ensure_ascii=False))
+            return 1 if fails else 0
         print("=" * 74)
         print("opencd_map 离线自检（纯离线，零请求）")
         print("=" * 74)

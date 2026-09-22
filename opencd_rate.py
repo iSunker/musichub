@@ -13,7 +13,7 @@ OpenCD（皇后）访问闸门 —— **所有**对皇后的请求都必须过�
     ② **每轮预算**  —— 防单轮爆量
     ③ **最小间隔**  —— 只防瞬时连击（★ 它不是节奏控制）
     ★ **节奏控制是"多久跑一轮"**（阶段周期），那是 `daemon.py` 的事，不在这里。
-    这正是本项目 `SUMMARY §3.11` 那条教训：**一个种子发 2~3 个请求，
+    这正是本项目那条教训：**一个种子发 2~3 个请求，
     所以"按请求计的间隔"算不准"每分钟处理几个"** —— 两件事必须分开表达。
 
 ★★★ 2026-09-19 起：**这三道闸门全是「请求」量纲，而用户要的是「种子」量纲** ——
@@ -43,8 +43,8 @@ OpenCD（皇后）访问闸门 —— **所有**对皇后的请求都必须过�
 
 ★★ 用**绝对时间基准**，不是每轮 `sleep(固定值)`：
     第 N 个请求在 `起点 + (N-1)×间隔` 才发。
-    后者在站点变慢时会把延迟**累积**上去，实际速率越跑越慢 ——
-    `SUMMARY §3.11` 实测踩过（"限速用每轮 sleep，站点一慢速率就衰减"）。
+    后者在站点变慢时会把延迟**累积**上去，实际速率越跑越慢 —— 实测踩过
+    （"限速用每轮 sleep，站点一慢速率就衰减"）。
     ★ 这条在 120s 这种大间隔下更明显：每轮多等一截，速率就衰减得更快。
     ★★ **`_origin` 每进程重置，但 `_count_day` 不重置** —— 这两个必须分开看：
        `min_interval` 管的是"本进程内两个请求之间别贴太近"，跨进程没有意义
@@ -58,6 +58,7 @@ OpenCD（皇后）访问闸门 —— **所有**对皇后的请求都必须过�
       真正的适配器放 `crawl.py` 里。**别在这里 import db** —— 那会把
       `config.require_env(...)` 的副作用（缺 .env 直接 sys.exit）带进来。
 """
+import json
 import sys
 import time
 
@@ -270,7 +271,7 @@ class _StubLedger:
         return self.data[k]
 
 
-def cmd_selftest():
+def cmd_selftest(as_json=False):
     # ★ 自检会打 ✅/❌ 这类非 GBK 字符，而 Windows 控制台默认 GBK
     #   ⇒ 不加这行会在**第一行输出**就 UnicodeEncodeError（实测）。
     #   与 `crawl.py` 同款守卫；失败也不该影响逻辑，故吞掉异常。
@@ -380,7 +381,7 @@ def cmd_selftest():
         why2 = str(e)
     chk("每日上限触发（消息含「当日」）", "当日请求已达上限" in why2, f"{why2!r}")
 
-    # ---------- ⑧ 绝对时间基准（防 SUMMARY §3.11 回归） ----------
+    # ---------- ⑧ 绝对时间基准（防"每轮 sleep 累积"那条退化回归） ----------
     print("\n⑧ min_interval 用绝对时间基准（不是每轮 sleep 累积）")
     # ★ 用**假时钟**而不是真 sleep：真 sleep 会让自检变慢，而这里要验的是
     #   "第 N 个的到期时刻 = 起点 + (N-1)×间隔"，那是纯算术，不需要真的等。
@@ -415,6 +416,11 @@ def cmd_selftest():
         time.sleep = orig_sleep
 
     print(f"\n{'=' * 66}")
+    if as_json:
+        print(json.dumps({"script": "opencd_rate.py --selftest", "ok": ok,
+                          "total": ok + fails, "exit": 1 if fails else 0},
+                         ensure_ascii=False))
+        return 1 if fails else 0
     if fails:
         print(f"❌ 自检失败：{ok}/{ok + fails} 项通过，{fails} 项不符")
         return 1
@@ -431,10 +437,13 @@ def main():
     ap.add_argument("--max-per-round", type=int, default=20)
     ap.add_argument("--min-interval", type=float, default=120.0)
     ap.add_argument("--max-per-day", type=int, default=50)
+    # ★ --json：机读出口，给 tools/gen_counts.py 读（与 --selftest 合用）。
+    ap.add_argument("--json", action="store_true",
+                    help="与 --selftest 合用：只把结果以 JSON 打到末行")
     args = ap.parse_args()
 
     if args.selftest:
-        return cmd_selftest()
+        return cmd_selftest(as_json=args.json)
 
     # 不带参数时只报一遍当前配置 —— 本模块是库，不是命令；真正驱动它在 crawl.py。
     g = RateGate(max_per_round=args.max_per_round, min_interval=args.min_interval,

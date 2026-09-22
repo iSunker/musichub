@@ -133,7 +133,7 @@ def main():
     print("     判据：`tools/render_compare.py` ④ 逐 key 比对，MISS 数必须为 0。")
     print()
     print("  ⇒ 「來自」那行标 ⏹️ 是**设计上不发**（乌托邦表单里搜 來源/原抓/轉載 = 0 处），")
-    print("     不是缺口。见 SUMMARY §12 决定 2。")
+    print("     不是缺口（设计上不发「來源」那行）。")
     return 0
 
 

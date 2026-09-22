@@ -60,9 +60,25 @@ FILES=(
   crawl.py opencd_parse.py opencd_rate.py opencd_log.py
   opencd_map.py opencd_gate.py opencd_ingest.py cover_fetch.py
   Dockerfile docker-compose.yml
+  .dockerignore
   README.md
   .env.example
 )
+
+# ★ 为什么 `.dockerignore` **必须**在白名单里（2026-09-22 加）：
+#   它只对**构建上下文**生效，而上下文是在 **NAS 的 compose 目录**里算的
+#   ⇒ 它在生产目录里不存在的话，等于没有。本机有、NAS 没有是最容易漏的一格
+#   （和 Dockerfile 被漏是同一个形状）。
+#   ★ 它排除掉**全部 `.env*` 历史备份**（那些里面有真凭据，没有它就会被传进
+#     构建上下文）与 `data.db` 等运行时状态 —— 实测上下文 174.35kB → 724B。
+#     **凭据外溢**才是它存在的理由。
+#   ★ 它**不**负责消那行 `buildx: git was not found` WARN —— 那条归因
+#     （"`context` 里有 `.git`"）**已被实测推翻**：`.git` 排掉之后上下文从
+#     174kB 掉到 724B，WARN 一字不变 ⇒ 它是 buildx 在没装 git 的机器上的固有
+#     行为，只影响"镜像少几条 commit 标签"这类元数据。**接受它**，别再去改代码
+#     或加开关。（详见 `.dockerignore` 文件头 ① 与 ERRATA.md 的 ERR-DOCKER-07。）
+#   ★ 注意它**不是**白名单文件（不进镜像）—— 它是给构建引擎读的元数据，
+#     与 Dockerfile / docker-compose.yml 同类。
 
 # 生产独有，绝不同步。写在这里是为了把"动不到"变成一条**可检查的断言**，
 # 而不是靠每次读代码时自己想起来。
@@ -174,13 +190,11 @@ for s in "${CHANGED[@]}"; do
 done
 if [[ ${#crlf[@]} -gt 0 ]]; then
   echo
-  echo "⚠ 待推送文件里有 ${#crlf[@]} 个是 CRLF 行尾，但 .gitattributes 声明了"
-  echo "  \`* text=auto eol=lf\`，并注明后果："
-  echo "  「Dockerfile 带 CRLF 的 RUN 指令会报 /bin/sh^M 找不到」。"
-  echo "  这是仓库声明与工作区实际不符（SMB 往返 + Windows 编辑器造成），"
-  echo "  不是本次改动引入的。脚本不擅自改你的文件，要统一就跑："
-  echo "      git add --renormalize . && git commit -m '统一行尾为 LF'"
-  echo "      git checkout -- .        # 让工作区也落成 LF"
+  echo "⚠ 待推送文件里有 ${#crlf[@]} 个是 CRLF 行尾。"
+  echo "  行尾符必须是 LF：**Dockerfile 带 CRLF 的 RUN 指令会报 /bin/sh^M 找不到**，"
+  echo "  而且那个报错很难看出是行尾引起的。"
+  echo "  这是工作区实际状态（SMB 往返 + Windows 编辑器造成），不是本次改动引入的。"
+  echo "  脚本不擅自改你的文件 —— 请自行把行尾落成 LF 后重新部署。"
   echo "  涉及: ${crlf[*]}"
 fi
 
@@ -221,17 +235,12 @@ if [[ "$MODE" != "--apply" ]]; then
   exit 0
 fi
 
-# ---------- 未提交改动提示 ----------
-# 部署的是**工作区**的文件，不是 HEAD。有未提交改动时，推上去的东西
-# 和仓库里记的不一致 —— 说清楚，别让一次部署变成一次没记录的发布。
-if command -v git >/dev/null 2>&1 && [[ -d "$SRC/.git" ]]; then
-  DIRTY="$(cd "$SRC" && git status --porcelain -- "${CHANGED[@]}" 2>/dev/null || true)"
-  if [[ -n "$DIRTY" ]]; then
-    echo
-    echo "⚠ 以下待部署文件有未提交改动（部署的是工作区内容，不是 HEAD）："
-    echo "$DIRTY" | sed 's/^/    /'
-  fi
-fi
+# ---------- 行尾符 / 未提交改动 的说明 ----------
+# ★ 2026-09-22：本脚本原先还会（①）提示未提交改动、（②）给出 `git add --renormalize`
+#   之类的修复命令。**已去掉** —— 生产 NAS 上没装 git，而 deploy.sh 是开发机工具，
+#   它给出的 git 命令在那台机器上跑不了、只会误导。现在只保留**行尾符检测本身**：
+#   那是 ERR-OS-01 一族（"检测方法失效比不检测更危险"）里真救过场的一条判据，
+#   且它的修法是通用的（把行尾落成 LF），不依赖 git。
 
 # ---------- 备份 ----------
 STAMP="$(date +%Y%m%d-%H%M%S)"

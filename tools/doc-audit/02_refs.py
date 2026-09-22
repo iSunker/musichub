@@ -2,20 +2,25 @@
 # -*- coding: utf-8 -*-
 """引用对账：扫所有跨文档锚点，查目标是否真的存在。
 
-管的锚点家族（**五族** —— 比姊妹项目少一族，见下）：
-  1) §N / §N.M / §N.M.K / §N.M.K.L      → SUMMARY 的编号标题（## 6. / ### 3.16 都算）
-  2) ERR-XX-NN                          → ENVIRONMENT.md 的 H3 条目
-  3) README「…」 / ENVIRONMENT「…」      → 对应文档的标题（子串命中，必须唯一）
-  4) A.N / B.N                          → ENVIRONMENT.md 自己的 H2
-  5) （围栏内的引用不算——代码示例里的 §N 是示例，不是引用）
+管的锚点家族（**两族**，见下为什么只剩两族）：
+  1) ERR-XX-NN                          → ERRATA.md 的 H3 条目
+  2) README「…」                        → README 的标题（子串命中，必须唯一）
 
-★ **为什么没有「弯路 #N」那一族**：姊妹项目 reseed-toolkit 有，本项目**没有** ——
-  本项目的 `走过的弯路.md` 在并入 **SUMMARY §6** 之后就删掉了，
-  而且全仓库**没有任何 `弯路 #N` 形状的引用**（并入时统一改写成了 `§N`）。
-  少一族就少一类假警报：那边这一族是靠 ENVIRONMENT.md 顶部的 grep 解析的 LEGACY，
-  **永远不会命中标题**，只能在统计里单独拎出来不计。
-  本项目直接不认这个形状 —— 若将来真写出 `弯路 #N`，它会**静默漏检**，
-  这是刻意选的：宁可漏一个不存在的形状，也不让常驻的假警报把真警报淹掉。
+★★ 2026-09-22 重构：原先还有三族，**随 SUMMARY.md / ENVIRONMENT.md 一起退役**：
+  · `§N / §N.M`      → 目标是 SUMMARY 的编号标题（该文件已删）
+  · `A.N / B.N`      → 目标是 ENVIRONMENT.md 的 H2（该文件已删）
+  · `ENVIRONMENT「…」` → 目标是 ENVIRONMENT.md 的标题（该文件已删）
+  退役时**不是**把正则悄悄删掉，而是：先把代码/配置里 30 处 `§N` 等引用真正清干净
+  （见 `ERRATA.md` 的 `ERR-DEPLOY-01` 一族那次记载），再让这三族失去目标集合。
+  ★ 现在若有人重新写出 `§N` 或 `` `A.5` ``，**不会**报 DANGLING（没有目标集合可比），
+    但会被下面 code-scope 那趟的 **LEGACY 状态**抓出来 —— 见 `_scan_code`。
+
+★★ 为什么必须有 code-scope 那趟（本次重构踩出来的最大盲点）：
+  原先只扫 `*.md`（`root.glob("*.md")`），**从不扫 `.py` / `.sh` / `.env.example`**。
+  而全项目有 30 处 `§N` / `ERR-*` 引用散在 15 个**代码**文件里 ——
+  于是"删文档"时，这个**专门用来抓悬空引用**的工具**一声都不会响**。
+  ★ 教训：**投影的扫描面窄于引用面，就等于没有投影**（ERR-META-04：投影必须覆盖它声称覆盖的范围）。
+  ⇒ 现在多跑一趟代码扫描，`refs.tsv` 加一列 `scope`（`md` / `code`）。
 
 用法：python 02_refs.py <文档目录>
 输出：<脚本目录>/out/refs.tsv
@@ -34,11 +39,16 @@ OUT = TOOLS / "out"
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from mdwalk import iter_lines as walk, scan_defects  # noqa: E402
 
+# ★ 代码扫描面：这些后缀的文件也参与对账（原先一条都不扫）
+CODE_GLOBS = ("*.py", "*.sh", "*.example")
+
+# ★ 已退役家族：出现在代码里就是"引用了一个不再存在的目标" ⇒ 报 LEGACY
 REF_SEC = re.compile(r"§\s?(\d+(?:\.\d+){0,3})")
-REF_ERR = re.compile(r"\bERR-([A-Z]+)-(\d{2})\b")
 REF_AB = re.compile(r"`([AB]\.\d+)")
-REF_README = re.compile(r"README「([^」]+)」")
 REF_ENV = re.compile(r"ENVIRONMENT(?:\.md)?「([^」]+)」")
+
+REF_ERR = re.compile(r"\bERR-([A-Z]+)-(\d{2})\b")
+REF_README = re.compile(r"README「([^」]+)」")
 
 HEAD_SEC = re.compile(r"^#{2,5}\s+§?\s*(\d+(?:\.\d+)*)\b")
 HEAD_ERR = re.compile(r"^#{2,5}\s+(ERR-[A-Z]+-\d{2})\b")
@@ -62,13 +72,47 @@ def collect(root):
     return secs, errs, abs_, heads
 
 
-def resolve(n, secs):
-    """从最具体往最粗找，返回 OK / WEAK / DANGLING。"""
-    parts = n.split(".")
-    for i in range(len(parts), 0, -1):
-        if ".".join(parts[:i]) in secs:
-            return "OK" if i == len(parts) else "WEAK"
-    return "DANGLING"
+def _iter_code(root):
+    """遍历代码/配置文件。★ 跳过 .git 与部署备份（前者是海量噪声，
+    后者是历史快照 —— 审历史快照的引用没有意义）。"""
+    for glob in CODE_GLOBS:
+        for f in sorted(root.rglob(glob)):
+            parts = set(f.parts)
+            if ".git" in parts or ".deploy-backup" in parts:
+                continue
+            if f.name == "02_refs.py":
+                continue          # 本文件的重正则定义**不是引用**（自指噪声）
+            yield f
+
+
+def _scan_code(root, secs, errs, abs_, heads):
+    """★ 代码声明式扫描：对账代码里的引用，并把**已退役家族**报成 LEGACY。
+
+    LEGACY 的含义：引用了一个**目标集合已不存在**的东西（`§N` / `A.N` /
+    `ENVIRONMENT「…」`）。它天然是"悬空"，只是没有目标可比 —— 所以单独一个状态，
+    免得混进 DANGLING 的计数里假装成"查过了没问题"。
+    """
+    rows = []
+    for f in _iter_code(root):
+        rel = f.relative_to(root).as_posix()
+        for lineno, line in enumerate(
+                f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            hint = line.strip()[:80]
+            for m in REF_ERR.finditer(line):
+                k = "ERR-%s-%s" % (m.group(1), m.group(2))
+                rows.append((rel, lineno, k, "OK" if k in errs else "DANGLING",
+                             "ERRATA", hint, "code"))
+            for m in REF_README.finditer(line):
+                st, extra = anchor(m.group(1), heads, "README.md")
+                rows.append((rel, lineno, "README「%s」" % m.group(1), st, extra,
+                             hint, "code"))
+            for m, why in ((REF_SEC, "SUMMARY 已删"),
+                           (REF_AB, "ENVIRONMENT.md 已删"),
+                           (REF_ENV, "ENVIRONMENT.md 已删")):
+                for mm in m.finditer(line):
+                    rows.append((rel, lineno, mm.group(0), "LEGACY", why,
+                                 hint, "code"))
+    return rows
 
 
 def anchor(title, heads, doc):
@@ -87,50 +131,46 @@ def main():
         print("[!!] %s 下没有 .md —— 文档目录传对了吗？" % DOCS)
         return
     scan_defects(sorted(DOCS.glob("*.md")))
-    print("目标集合：编号标题 %d · ERR 条目 %d · A/B 条 %d · README 标题 %d · ENV 标题 %d\n"
-          % (len(secs), len(errs), len(abs_),
-             len(heads.get("README.md", ())), len(heads.get("ENVIRONMENT.md", ()))))
+    print("目标集合：ERR 条目 %d · README 标题 %d · （已退役：编号标题 %d · A/B 条 %d）\n"
+          % (len(errs), len(heads.get("README.md", ())), len(secs), len(abs_)))
 
     rows = []
     for f in sorted(DOCS.glob("*.md")):
         for lineno, line in walk(f):
             hint = line.strip()[:80]
-            for m in REF_SEC.finditer(line):
-                n = m.group(1)
-                rows.append((f.name, lineno, "§" + n, resolve(n, secs),
-                             "SUMMARY", hint))
             for m in REF_ERR.finditer(line):
                 k = "ERR-%s-%s" % (m.group(1), m.group(2))
                 rows.append((f.name, lineno, k,
-                             "OK" if k in errs else "DANGLING", "ENVIRONMENT", hint))
-            for m in REF_AB.finditer(line):
-                k = m.group(1)
-                rows.append((f.name, lineno, k,
-                             "OK" if k in abs_ else "DANGLING", "ENVIRONMENT", hint))
+                             "OK" if k in errs else "DANGLING", "ERRATA", hint, "md"))
             for m in REF_README.finditer(line):
                 st, extra = anchor(m.group(1), heads, "README.md")
-                rows.append((f.name, lineno, "README「%s」" % m.group(1), st, extra, hint))
-            for m in REF_ENV.finditer(line):
-                st, extra = anchor(m.group(1), heads, "ENVIRONMENT.md")
-                rows.append((f.name, lineno, "ENVIRONMENT「%s」" % m.group(1), st, extra, hint))
+                rows.append((f.name, lineno, "README「%s」" % m.group(1), st, extra,
+                             hint, "md"))
+
+    # ★ code-scope 那趟（见文件头：原先的扫描盲点）
+    code_rows = _scan_code(DOCS, secs, errs, abs_, heads)
+    rows.extend(code_rows)
 
     with (OUT / "refs.tsv").open("w", encoding="utf-8") as fp:
-        fp.write("src\tline\tref\tstatus\ttarget\thint\n")
+        fp.write("src\tline\tref\tstatus\ttarget\thint\tscope\n")
         for r in rows:
             fp.write("\t".join(map(str, r)) + "\n")
 
     def tally(st):
         return [r for r in rows if r[3] == st]
 
-    print("[ok] 共 %d 条引用 → %s\n" % (len(rows), OUT / "refs.tsv"))
+    n_md = sum(1 for r in rows if r[6] == "md")
+    print("[ok] 共 %d 条引用（md %d · code %d） → %s\n"
+          % (len(rows), n_md, len(rows) - n_md, OUT / "refs.tsv"))
     for st, label in (("DANGLING", "★ 悬空（目标根本不存在）"),
                       ("WEAK", "△ 半悬空（父节点在、这一层不在）"),
+                      ("LEGACY", "★ LEGACY（引用了已删文档的家族：§N / A.N / ENVIRONMENT「…」）"),
                       ("ANCHOR-MISS", "★ 锚点无命中"),
                       ("ANCHOR-AMBIG", "★ 锚点命中多于一")):
         hit = tally(st)
         print("%s：%d 条" % (label, len(hit)))
         for r in hit[:15]:
-            print("   %s:%d  %s" % (r[0], r[1], r[2]))
+            print("   [%s] %s:%d  %s" % (r[6], r[0], r[1], r[2]))
             print("        %s" % r[5])
         if len(hit) > 15:
             print("   ...（共 %d，其余见 refs.tsv）" % len(hit))

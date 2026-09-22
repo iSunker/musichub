@@ -40,16 +40,15 @@ qBittorrent(:3020, 分类 opencd)
 | 我卡住了（页面没图 / 记录被跳过 / 容器 unhealthy） | **排障** |
 | 搞清调度为什么是单容器 | **为什么是单容器 + 自研调度** |
 | **下一步该做什么** | **当前状态与下一步** |
-| 想看完整决策理由和踩过的坑 | **SUMMARY.md** |
-| 想看踩过哪些坑、根因是什么 | **SUMMARY §6 坑与归因总表**（27 项） |
-| **新会话开局 / 环境前提 / 按症状找环境坑** | **ENVIRONMENT.md**（检索层：A 部分前提 · B 部分 `ERR-*` 条目）|
+| 想看踩过哪些坑、根因是什么 | **ERRATA.md**（`ERR-*` 表：一句话教训 + 根因） |
+| **想知道各种数现在是多少** | **`counts.json`**（自动生成，别手改；`python tools/gen_counts.py` 重新生成）|
 
-> **三份文档怎么分工**：
-> **README = INFO 层**（操作手册：命令、步骤、症状→解法）；
-> **SUMMARY = DEBUG 层**（完整过程、踩坑、决策理由；**§6 = 坑与归因总表**，只记「错在哪、根因是什么」）；
-> **ENVIRONMENT.md = 检索层**（**环境前提** A 部分 + 每条坑一个 `ERR-*` 可检索 ID 的 B 部分，**不承担事实源**）。
-> 同一事实**只在一处维护**，跨层用「详见 SUMMARY §N」单向指路 —— 防止两边漂移。
-> （原 `走过的弯路.md` 已**并入 SUMMARY §6** 后删除，不再单独维护一份。）
+> **两份文档 + 一份生成物怎么分工**：
+> **README = 操作手册**（唯一事实源：命令、步骤、症状→解法、为什么这么做）；
+> **ERRATA.md = 教训索引**（每条坑一个 `ERR-*` 可检索 ID + 根因，**只有表、不含日期进度数字**）；
+> **`counts.json` = 会动的量的真值**（自检项数、库条数、各阶段周期、白名单…全部自动采集）。
+> ★ **会动的数字一律不进散文** —— 它就住在 `counts.json` 里，由 `python tools/gen_counts.py` 生成。
+> 这条纪律的由来见 `ERRATA.md` 的 `ERR-META-03`（"投影重抄了事实源的口径"）。
 
 ---
 
@@ -57,27 +56,34 @@ qBittorrent(:3020, 分类 opencd)
 
 ```
 musopia_script2/                    # NAS 部署目录（compose 就放这里，./ 即指它）
-├─ docker-compose.yml        86 行  # opencd2musopia 常驻 + tools/once 一次性任务
-├─ Dockerfile                32 行  # 代码 COPY 进镜像（不是 bind mount）
+├─ docker-compose.yml               # opencd2musopia 常驻 + tools/once 一次性任务
+├─ Dockerfile                       # 代码 COPY 进镜像（不是 bind mount）
 ├─ .env                             # 站点 Cookie / qB 密码 / 图床 Key（唯一密钥来源，绝不进仓库）
 ├─ .env.example                     # 占位符模板（全是 changeme）
-├─ config.py                 60 行  # 统一配置；密钥缺失直接终止，不留"看起来能跑"的默认值
-├─ db.py                    300 行  # ★唯一 schema 来源 + 自动迁移 + 所有查询
-├─ descr.py                 255 行  # ★副标题 / BBCode 简介 / 站点下拉项推断（发布与编辑共用）
-├─ assets.py                508 行  # 封面查找、图床上传、日志与 CUE 解析
-├─ musopia.py               370 行  # 站点客户端（登录检查、上传列表、读改写式编辑）
-├─ run.py                   233 行  # 扫描 qB → 提元数据 → 生成种子 → 入库
-├─ publish.py               176 行  # 发布新种子 + 回加 qB 做种
-├─ update_metadata.py       264 行  # ★批量编辑已发布页面
-├─ sync_site.py             119 行  # 回填 site_torrent_id（编辑的前置条件）
-├─ backfill_covers.py       144 行  # 补历史缺失的封面
-├─ daemon.py                      # ★单容器串行调度六个阶段
-├─ check_db.py               53 行  # 状态速览，排查问题先跑这个
-├─ healthcheck.py            55 行  # 容器健康检查（读写心跳文件）
+├─ config.py                        # 统一配置；密钥缺失直接终止，不留"看起来能跑"的默认值
+├─ db.py                            # ★唯一 schema 来源 + 自动迁移 + 所有查询
+├─ descr.py                         # ★副标题 / BBCode 简介 / 站点下拉项推断（发布与编辑共用）
+├─ assets.py                        # 封面查找、图床上传、日志与 CUE 解析
+├─ musopia.py                       # 站点客户端（登录检查、上传列表、读改写式编辑）
+├─ run.py                           # 扫描 qB → 提元数据 → 生成种子 → 入库
+├─ publish.py                       # 发布新种子 + 回加 qB 做种
+├─ update_metadata.py               # ★批量编辑已发布页面
+├─ sync_site.py                     # 回填 site_torrent_id（编辑的前置条件）
+├─ backfill_covers.py               # 补历史缺失的封面
+├─ daemon.py                        # ★单容器串行调度六个阶段
+├─ check_db.py                      # 状态速览，排查问题先跑这个
+├─ healthcheck.py                   # 容器健康检查（读写心跳文件）
 ├─ deploy.sh                        # ★本地→NAS 白名单同步（开发工具，不上 NAS）
-├─ tools/doc-audit/                 # 三份文档的只读投影（headings / refs / terms / probes）
-└─ README.md / SUMMARY.md / ENVIRONMENT.md   # INFO 层 / DEBUG 层 / 检索层
+├─ tools/                           # 开发工具：nas_health.py 巡检 / gen_counts.py 生成真值 /
+│                                   #   doc-audit/ 文档只读投影（headings / refs / terms / probes）
+├─ README.md                        # ← 本文件：操作手册（唯一事实源，**会上生产**）
+├─ ERRATA.md                        # 教训索引（`ERR-*` 表；不上生产）
+└─ counts.json                      # ★自动生成：会动的量的真值（不上生产，**永不手改**）
 ```
+
+> ★ **每份文件多少行、有多少条记录、自检过多少项** —— 这些是**每天都动的量**，
+> 一律**不写在这份手册里**（写死等于制造一个必然过时的"事实"）。真值看 `counts.json`：
+> `python tools/gen_counts.py` 重新生成；只想看某个数用 `python -c "import json;..."` 取。
 
 **运行时状态**（`.gitignore` 覆盖，不随代码走）：
 
@@ -86,13 +92,53 @@ data.db                     # SQLite：种子记录 + 发布状态 + 站点 ID
 output_torrents/            # 生成的 .torrent
 daemon_state.json           # 各阶段 last_run / last_ok（调度进度）
 daemon_heartbeat            # 纯 unix 时间戳，daemon 每轮刷新
+daemon_env.json             # ★ 容器内**生效的**白名单开关快照（daemon 每轮写）
 ```
 
 > 这些**放在脚本目录**而不是命名卷，是因为 compose 里是 `${STATE_DIR:-.}:/data`：
 > SMB 上直接看得到、能备份、出问题能直接查库。那份**站点 ID 已回填**的
 > `data.db` 就在这里，**不需要任何迁移**。
 > ★ 具体条数**不写死在文档里** —— 它是每天都在动的量，写死等于制造一个必然过时的"事实"。
-> 要看现在的数：`python tools/doc-audit/04_probes.py`。
+> 要看现在的数：`python tools/gen_counts.py`（生成 `counts.json`，含库条数/自检项数/各阶段周期）。
+> 只想深挖某一个探针：`python tools/doc-audit/04_probes.py`。
+
+> ★★ **`daemon_env.json` 是什么、为什么要有它**：真正决定"哪些阶段关着"的是
+> **容器内的环境变量**。本机的两个替代来源都拿不到：NAS 那份 `.env` 在 `deploy.sh`
+> 的 NEVER 名单里（`ERR-ENV-02`），容器也进不去（SSH 未开）；而 `.env.example` 只是
+> **模板**，实测它与生产**不一致**。
+> ⇒ 让 **daemon 自己**把生效值落成这个文件（见 `daemon.save_env_snapshot()`），
+> 本机巡检脚本读它。**只有一个来源，且是"生效值"而不是"配置文件里写的值"**。
+> · 它是**白名单**（`ENV_SNAPSHOT_KEYS`），**不存在**凭据键 ——
+>   整个倒 `os.environ` 会把 Cookie / qB 密码写到共享盘上。
+> · 新鲜度由它自己的 `generated_at` 与 mtime 说清；**超过 1 小时没刷新就不再当判据**
+>   （停在上个月的快照是"传说"，见 `ERR-META-04`）。
+> · 按 `.gitignore` 忽略，**不进版本库**（它是运行时产物，不是事实源）。
+
+★★★ **`WARN[0000] buildx: git was not found`**（2026-09-22 **订正：接受它，不修**）：
+那行 WARN **不是我们的代码在调 git** —— 它是 **buildx 自己**打的字。
+★ 本条**曾经写错**：原先记的是"buildx 算构建上下文时看到 NAS 构建目录里有一份 `.git`，
+就去读提交信息，而 NAS 上没装 git ⇒ 加 `.dockerignore` 把 `.git` 排除掉，WARN 即消失"。
+**这个归因已被实测推翻**：实测加了 `.dockerignore` 之后构建上下文从 `174.35kB` 掉到 `724B`、
+`.git` **确实**不在上下文里了 —— **而那行 WARN 一字不变**。
+⇒ `.git` 在不在上下文里与它**无关**。真因是：**本机有 git、NAS 没有**，buildx 在没有 git 的
+机器上拿不到 commit 信息，就 WARN 一句。
+⇒ **处置：接受它。** 它不是错误、不影响构建结果（构建成功、镜像生成、容器运行都正常），
+后果仅止于"镜像里少几条 commit 标签"这类元数据。**别再为它改代码或加开关。**
+（教训见 `ERRATA.md` 的 `ERR-DOCKER-07`。★ 这条比那行 WARN 更值钱的是**过程**：
+"读起来很像原因"的东西被当成了原因，写进了三处注释和文档 —— `ERR-META-01` 那一族，
+**判据要拿已知样本校验一次**。）
+
+> ★ `.dockerignore` **仍然要留**，但理由是**下面这一条**（与那行 WARN 无关）：
+> **没有它时，构建上下文 = 整个目录**，而生产目录里有 `data.db`（生产库）、
+> `daemon_state.json`、`output_torrents/`、`__pycache__/`，
+> 以及**一堆 `.env*` 历史备份**（`.env` / `.env.old` / `.env.pre-fix` /
+> `.env.pre-dollar-fix-*` …）—— 它们**全都会被传给 Docker daemon**。
+> `.env` 有真凭据（Cookie / qB 密码 / 图床 key）⇒ 那是**凭据外溢**。
+> 实测加了它之后上下文 `174.35kB → 724B`，7 份 `.env*` 与 `data.db` 都不再上传。
+> ⇒ `.dockerignore` 里凭据按**形状**排除（`.env` + `.env.*`），
+> **不枚举具体文件名** —— 枚举就会漏掉下一个备份（实测 NAS 上有 7 个 `.env*`，逐个核过全被盖住）。
+
+
 
 ---
 
@@ -221,7 +267,7 @@ docker compose up -d --build
   阈值 `MOJIBAKE_RATIO = 0.25`。实证 4 张日本专辑（`14619` / `14640` / `14740` / `14824`）。
 
 三条判据都是**按每份 CUE** 判定的，坏哪一碟就回退哪一碟，整份回退到音频文件名。
-详见 **SUMMARY §11**。
+（兜底细节见「曲目列表兜底」一节。）
 
 > 简介不再写「专辑名称/副标题/原始名称」这类与页面顶部表格重复的信息，
 > 也不再追加「由自动化发布程序生成。」署名。
@@ -269,7 +315,7 @@ python publish.py --no-anonymous
 > **漏传** `anonymous`，于是参数解析出来了却根本没生效。★ 渲染逻辑共用一处（见下节）
 > 只保证**函数**一致，**参数仍由每个调用方各传各的** —— 共用不会自动带来一致。
 
-详见 **SUMMARY §3.3**。
+详见上文「匿名开关」。
 
 ### 增量编辑
 
@@ -419,7 +465,7 @@ docker compose --profile tools run --rm tools \
 > ★ **判据不是「还有没有待办」，是「待办有没有减少」。** 14749 那种永远失败
 > （`找不到 takeedit 表单`）的记录会一直挂在待办里；只看「还有活」就变成每 60s 敲一次站点，
 > **比改动前更糟**。所以每轮比较跑前/跑后的待办数，没减少就退回长周期，
-> 日志留下 `⏸️ [edit] 本轮未推进（待办 N → N）`。详见 **SUMMARY §3.16**。
+> 日志留下 `⏸️ [edit] 本轮未推进（待办 N → N）`。判据与实现见上文「有变更就连续跑」。
 
 ### 四个必须知道的保护机制
 
@@ -511,14 +557,17 @@ bash deploy.sh --rollback          # 回滚到最近一次备份
 
 设计要点：
 
-- **白名单 = `Dockerfile` 的 `COPY` 行** + `Dockerfile`/`docker-compose.yml` 本身。
-  脚本还会**反向自检**：从 `Dockerfile` 解出实际要 `COPY` 的文件逐个核对，漏一个就拒绝部署。
+- **白名单 = `deploy.sh` 里的 `FILES=(...)` 数组**。它含全部 `.py`，**另外还含**
+  `Dockerfile` / `docker-compose.yml` / `README.md` / `.env.example`
+  —— 所以它**不等于** `Dockerfile` 的 `COPY` 行（旧描述就是这么写错的，2026-09-22 订正）。
+  脚本还会**反向自检**：从 `Dockerfile` 解出实际要 `COPY` 的 `.py` 逐个核对，漏一个就拒绝部署。
+  ★ 真值（白名单全集 / Dockerfile COPY 全集 / 双向差集）见 `counts.json` 的 `offline.deploy`。
 - ★★ **白名单 ≠ 容器内可见 —— 这是两条独立的路，别混（2026-09-19 踩过）**：
 
   | | 决定 |
   |---|---|
-  | `deploy.sh` 白名单 = `Dockerfile` 的 `COPY` 行 | 文件**能不能被部署过去** |
-  | `Dockerfile` 的 `COPY` / compose 的 `volumes` | 跑起来**容器里看不看得见** |
+  | `deploy.sh` 的 `FILES` 白名单 | 文件**能不能被部署过去**（`deploy.sh` 读它）|
+  | `Dockerfile` 的 `COPY` 行 / compose 的 `volumes` | 跑起来**容器里看不看得见** |
 
   白名单里有它，只说明「部署会成功」；**不说明容器跑起来找得到它**。
   实测翻车形状：脚本放 `tools/` → 在 NAS 上跑 → 容器报
@@ -527,7 +576,7 @@ bash deploy.sh --rollback          # 回滚到最近一次备份
   **compose 根目录**（`${STATE_DIR:-.}` bind mount 成 `/data`，容器里看得见）。
   ★ 连带：`python /data/x.py` 时 Python 只把**脚本所在目录**加进 `sys.path`、**不加 cwd**
   （容器 `WORKDIR` 是 `/app`）⇒ `import config` 直接 `ModuleNotFoundError`，
-  脚本得自己 `sys.path.insert(0, "/app")`。详见 `SUMMARY §12` 断点存档。
+  脚本得自己 `sys.path.insert(0, "/app")`。
 - **`.env` / `data.db` / `daemon_state.json` / `daemon_heartbeat` / `output_torrents` 永不在白名单里**，
   脚本开头有显式断言（混进去直接退出）。
 - 写入走「临时文件 + `mv`」**原子替换**。
@@ -589,8 +638,8 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 | 容器 unhealthy | 心跳停了。`docker compose logs opencd2musopia` 看卡在哪个阶段 |
 | 想立刻重跑某阶段 | 删掉 `daemon_state.json` 里对应的 `last_run`，或整个文件删掉重启 |
 | 改了代码但行为没变 | `restart` 不重新构建镜像。用 `docker compose up -d --build` |
-| **站点打回「請更正曲目列表，使其易於閱讀」** | 源 CUE 被**西欧单页码页**写坏（非 ASCII 字符整体变成 `.`），或码页不在 `LOG_ENCODINGS` 里、被兜底解成**私用区乱码**。先看本地 `tracklist` 是不是整片点号/乱码。`read_tracklist()` 已按**每份 CUE** 判退化并回退到音频文件名，见 **SUMMARY §11** |
-| **多碟页面出现两个同名 `CDx` 折叠块** | 有张碟的目录名不符合 `CD/DISC/DISK+数字`，补号与已有碟号撞了。已修（补号避开已占用编号），见 **SUMMARY §11.6** |
+| **站点打回「請更正曲目列表，使其易於閱讀」** | 源 CUE 被**西欧单页码页**写坏（非 ASCII 字符整体变成 `.`），或码页不在 `LOG_ENCODINGS` 里、被兜底解成**私用区乱码**。先看本地 `tracklist` 是不是整片点号/乱码。`read_tracklist()` 已按**每份 CUE** 判退化并回退到音频文件名（见「曲目列表兜底」）|
+| **多碟页面出现两个同名 `CDx` 折叠块** | 有张碟的目录名不符合 `CD/DISC/DISK+数字`，补号与已有碟号撞了。已修（补号避开已占用编号），见上文「多碟日志的存储」 |
 | `database is locked` | 有别的进程在并发写库。检查是否有孤儿容器（`docker ps`），见「清理孤儿容器」 |
 | `docker logs` 报 requires exactly 1 argument | 后面要跟容器名：`docker logs -f opencd2musopia` |
 
@@ -616,7 +665,7 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 > ✅ **2026-09-17/18 那笔积压已清（2026-09-19 10:21 部署）**：`publish.py` 匿名默认值、
 > `config.py` 两处订正、OpenCD 第 3/4 步全部文件，共 **9 个文件**已随
 > `deploy.sh --apply` 写入 NAS，并已 `up -d --build` 重建镜像、
-> **实测确认新代码生效**（库列数 17 → 22）。详见 **SUMMARY §5.4 / §5.5 / §5.6**。
+> **实测确认新代码生效**（库列数 17 → 22）。
 > ★ 两点仍不成立，别读成"什么都跟上了"：① `ENABLE_PUBLISH=false` **未恢复**；
 > ② `OPENCD_COOKIE` 的状态**以 NAS 上那份 `.env` 为准**（crawl 已接调度，
 >    2026-09-22 起 `ENABLE_CRAWL=false` 默认关 ⇒ 不填也不会白跑一轮）。
@@ -633,14 +682,31 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
   git ls-files -z | xargs -0 rm -f && git checkout -- .
   ```
   索引里本来就是 LF，所以这一步**不产生 commit**。未跟踪的 `.env` / `data.db` 不受影响。
-- **2026-09-14 文档机制建成**：`README`（INFO）/ `SUMMARY`（DEBUG）/ `ENVIRONMENT.md`
-  （检索层：A 部分环境前提 + B 部分 `ERR-*` 条目）。同一事实只在一处维护，跨层单向指路。
+- **2026-09-14 文档机制建成**：`README`（操作手册）+ `ERRATA.md`（`ERR-*` 教训表）。
+  ★ **2026-09-22 重构**：原 `SUMMARY.md`（DEBUG 层）/ `ENVIRONMENT.md`（检索层）**已删除** ——
+  它们的维护成本全在「同一事实抄好几份且互不联动」（见 `ERRATA.md` 的 `ERR-META-03`）。
+  现在：**会动的数字 → `counts.json`**（`python tools/gen_counts.py` 生成，**永不手改**）；
+  **教训 → `ERRATA.md`**；**操作事实 → 本文件**。同一事实仍然只在一处维护。
 - **2026-09-14 `tools/doc-audit/` 只读投影建成**（headings / refs / terms / probes + 基线快照）。
   ★ **投影只读事实源，事实源不读投影** —— 方向由结构强制（事实源是 `.md`，不是可导入模块）。
-- **2026-09-14 调度改动已上生产**（见「有变更就连续跑」与 **SUMMARY §3.16**）。
+- **2026-09-22 巡检的"关着"判据改成读容器快照**（`daemon_env.json`，见上「运行时状态」）。
+  ★ 起因是一次**真实误报**：`nas_health.py` 曾硬编码 `DISABLED_STAGES={"publish"}`，
+  后来改成"默认空集 + `--disabled` 手传"，但`ENABLE_PUBLISH` 的真值**本机根本读不到**，
+  于是巡检把「publish 停在 67h」当成了**真异常**报出来 —— 而它其实是
+  **`ENABLE_PUBLISH=false`，不动是预期内的**。
+  ⇒ 现在由 daemon 落盘、巡检读盘，**判据与真值同源**。判据来源会打在报告里
+  （`「关着」的判据来源：容器快照 …（NNNs 前；ENABLE_PUBLISH=False）`），
+  快照过期则退回空集并**显式说明**，不静默猜。
+- **2026-09-22 订正过的一处错误口径（记下来防复发）**：
+  曾有巡检提示词写着「`ENABLE_PUBLISH=**true**`，publish 是开着的、每 30 分钟一跑，
+  早期说"publish 已禁用"是**错的**」。**那句本身是错的** —— 实测
+  `docker exec opencd2musopia env` 给出 `ENABLE_PUBLISH=false`。
+  ★ 教训：**把开关值写死进提示词**，隔一天就会变成反的，
+  且它会像真的一样被下游引用。要判开关，**去问容器**，别抄结论。
+- **2026-09-14 调度改动已上生产**（见「有变更就连续跑」）。
 - **2026-09-14 `publish` 已关闭**（NAS `.env` 的 `ENABLE_PUBLISH=false`，`18:55` 生效），
   止住「权限抖动时每 30 分钟一轮无效 POST」。三个时刻与复核判据见
-  **`ENVIRONMENT.md` `ERR-SITE-01` 边界**。
+  **`ERRATA.md` 的 `ERR-SITE-01`**。
 
 **🔴 下一步**（2026-09-14 定稿 · 2026-09-18 销掉第 1 条）：
 
@@ -649,10 +715,10 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
    实测 `n_fail=1..4` 分别等 `60 / 120 / 240 / 360` 分钟（上限 `MAX_BACKOFF`），
    原先卡死的那一行是 `30` 分钟 —— 「一天 240 次无效 POST」降到约 **8 次**。
    ★ **已部署（2026-09-19）**：`publish.py` 在白名单里，已随那次 `deploy.sh --apply`
-   上线并重建镜像，见 **SUMMARY §5.5**。
+   上线并重建镜像。
    ★ 但**功能尚未启用**：`ENABLE_PUBLISH=false` 还没恢复 ⇒ 这个退避语义
    **要等 publish 重新启用才真正起作用** ⇒ **恢复正常发种仍要看第 3 条**。
-   完整归因见 **`ENVIRONMENT.md` `ERR-SITE-01` 边界**（已同步订正）。
+   完整归因见 **`ERRATA.md` 的 `ERR-SITE-01`**（已同步订正）。
 2. **★ 把提交前的凭据扫描落成 `tools/` 里的脚本。**
    同一个扫描**已经手写过两次**，2026-09-14 那次还被 `ERR-OS-01`（GBK 控制台编不出某些字符）
    当场打断。本项目对这类东西有现成原则：**不做会各自漂的拷贝**
@@ -667,41 +733,53 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
    ```
    ★ **时机有讲究**：第 1 条修好之后，发布失败会**指数退避**（最长 6 小时一轮）。
    恢复 `publish` 前先确认站方权限确实通了，否则会白等一轮退避。
-   恢复条件见 **`ENVIRONMENT.md` `ERR-SITE-01` 边界**。
+   ★ **先确认站方权限确实通了**再恢复 `publish`，否则会白等一轮退避。
+   恢复条件见 **`ERRATA.md` 的 `ERR-SITE-01`**。
 4. **✅ 已了结（2026-09-19）：NAS 上的 `README.md` 已对齐。**
    原条目写的是「`deploy.sh` **不带**它（白名单 = `Dockerfile` 的 `COPY` 行）」——
    ★ **这句是错的**：实测 `deploy.sh` 的 `FILES` 白名单里**有** `README.md` 与
    `.env.example`（自 `ebbffcc` 起就有），本次 `deploy.sh --apply` 已把 README
    一起同步过去（`cmp` 逐字节核过）。该条目的两条断言**都不成立**，故销掉。
-   ★ 待修：那三处「白名单 = `Dockerfile` 的 `COPY` 行」的描述仍不准确
-   （本文件 `:508`、`SUMMARY.md §10.2`）—— 归入第 5 条一并处理。
+   ★ **已修（2026-09-22）**：那三处「白名单 = `Dockerfile` 的 `COPY` 行」的描述**不准确**，
+   已在本文档内就地订正 —— `deploy.sh` 的 `FILES` 白名单**除了** `.py` 还含
+   `Dockerfile` / `docker-compose.yml` / `README.md` / `.env.example`，
+   而 `Dockerfile` 的 `COPY` 行**只**决定「镜像里有什么」。**两者是两条独立的路**
+   （见 `ERRATA.md` 的 `ERR-DOCKER-05`：在白名单里 ≠ 容器里看得见）。
+   现在真值由 `counts.json` 采集（`offline.deploy.files` 与
+   `offline.deploy.dockerfile_copy_py`，含**双向**差集）。
 5. **🟢 OpenCD 转载流水线（第 1~3 步已了结 · 抓取层**已接调度 + 已入库**）。**
    定时从 OpenCD（皇后）爬种子详情页 → 解析 → **合规裁决** → 映射字段 →
    渲染简介（★ 抓轨日志要转成折叠代码）→ 发布到 Musopia。
-   ★ **计划与进度全在 `SUMMARY.md §12` 顶部**（九条决定 + 四个步骤 + 每步验收判据）。
-   - **已完成**：`opencd_parse.py` 解析 + 三态裁决，`--selftest` **71/71 通过**（纯离线）。
-     就地验：`python opencd_parse.py --selftest`
-   - **第 3 步（抓取层）已接进调度（2026-09-22）**：`crawl.py` / `opencd_rate.py` /
-     `opencd_log.py`，离线自检 `python tools/opencd-crawl-selftest.py` **41/41**
-     （本地 mock 皇后，不碰外网）。★ **已入库**（`opencd_ingest`），
-     且 daemon 里多了 `crawl` 阶段（`ENABLE_CRAWL`，★ **默认 false**）。
-   - ★★ **但它**不会**产生任何新发布**（刻意的，不是没做完）：`crawl.py` 传
+   ★ **剩余工作与验收判据（就地写清，别再指向别处）**：
+   - **第 4 步：字段映射 → 渲染 → 发布**（`opencd_map.py` → 渲染 → 站点）。
+     验收：① 映射层有 `--selftest`（本地样本，不碰外网）；
+     ② 全链路默认 **dry-run**，要显式开才会真的写站点；
+     ③ dry-run 下**详情页/发布请求数必须为 0**（这条已有回归判据，见
+     `tools/opencd-crawl-selftest.py` 判据⑧ —— 它抓到过一次真 bug）。
+   - ★★ **当前它**不会**产生任何新发布**（刻意的，不是没做完）：`crawl.py` 传
      `qb_seed_days=None` ⇒ 每行落 `NOT_SEEDED` ⇒ 而发布队列要求 `status='SUCCESS'`
      ⇒ 一条都进不去。闸门①纪律：**宁可晚抓，不可早发**。
+   - **打通闸门①**（读 qB 的做种时长）：验收 = 在 NAS 上实测 `qbittorrent-api`
+     返回的字段名，并写成一条断言（**不许靠"看起来对"**）。
+   - **已完成**：`opencd_parse.py` 解析 + 三态裁决，`--selftest` 通过（纯离线）。
+     就地验：`python opencd_parse.py --selftest`  ★ 项数见 `counts.json`，**不在此处手维护**。
+   - **第 3 步（抓取层）已接进调度（2026-09-22）**：`crawl.py` / `opencd_rate.py` /
+     `opencd_log.py`，离线自检 `python tools/opencd-crawl-selftest.py`
+     （本地 mock 皇后，不碰外网；★ 项数见 `counts.json`）。★ **已入库**（`opencd_ingest`），
+     且 daemon 里多了 `crawl` 阶段（`ENABLE_CRAWL`，★ **默认 false**）。
    - **限速（2026-09-19 调）**：每请求最小间隔 **120s**、每日上限 **50**（见 `.env.example`）。
      ⚠️ **两个旋钮都是「请求」量纲，不是「种子」** —— 用户要的「每天 50 个种子」
      目前只能**近似**成「每天 50 个请求」（一种子 ≈ 2~3 请求 ⇒ 实际约 17~25 种子/天，偏保守）。
      ✅ **2026-09-22 修**：`RateGate` 原先每轮新建 ⇒ 「每日」上限**退化成每轮上限**；
      现在计数落在 `data.db` 的 `opencd_quota` 表（跨轮持久）⇒ 是**真的每日 50**。
-     ⚠️ 但量纲仍是**请求** —— 按种子卡要在入库那步记 `kind='seed'`，见 `SUMMARY §12`。
+     ⚠️ 但量纲仍是**请求** —— 按种子卡要在入库那步记 `kind='seed'`（表结构已留位置，**还没做**）。
    - **cookie 失效不会静默**：探活失败 ⇒ crawl 退出码 1 ⇒ daemon 指数退避；
      `daemon_state.json` 里 `crawl.last_ok=false`，每小时巡检会报出来。
-     ★「发邮件告警」并入每日邮件待办（`SUMMARY §12` 决定 9），**本期不实现 SMTP**。
+     ★「发邮件告警」并入每日邮件待办，**本期不实现 SMTP**。
    - **下一步**：**第 4 步**（字段映射 → 渲染 → 发布，**全部默认 dry-run**）+
      打通闸门①（读 qB 的做种时长，需要先在 NAS 上实测 `qbittorrent-api` 的字段名）。
    - ★ 动手前必读：**转载规则是三态**（只有明确 ALLOW 才自动发布；
-     ★ 且裁决**只认字段、不靠关键词兜底** —— 见 `SUMMARY §12` 第 2 步）、
+     ★ 且裁决**只认字段、不靠关键词兜底**）、
      样本脱敏（`opencdhtml/` 默认忽略，只放行 `sanitized/`）。
-   ★ 顺带修上面提到的白名单描述（三处，`README:508` / `SUMMARY §10.2`）。
 
-详见 **SUMMARY.md**；**环境的坑与检索入口见 `ENVIRONMENT.md`**（A 部分前提 · B 部分 `ERR-*`）。
+详见本文档上文各节；**教训与检索入口见 `ERRATA.md`**（每条一个 `ERR-*` ID）。

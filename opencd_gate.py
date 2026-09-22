@@ -1,5 +1,5 @@
 """
-两个 3 天闸门（`SUMMARY §12` 决定 5）—— **纯逻辑、零请求、零数据库。**
+两个 3 天闸门 —— **纯逻辑、零请求、零数据库。**
 
 ═══ 闸门长什么样 ═══
 
@@ -26,6 +26,7 @@
 **不自己查库** —— 这样它能被单测穷举，且不可能踩时区坑：
 调用方从库里读出来的时间戳，必须先自己用 `datetime(..., 'localtime')` 转好再传进来。
 """
+import json
 from datetime import datetime, timedelta
 import math
 
@@ -215,10 +216,20 @@ def main():
 
     ap = argparse.ArgumentParser(description="OpenCD 转载的两个 3 天闸门")
     ap.add_argument("--selftest", action="store_true", help="跑离线自检")
+    # ★ --json：机读出口，给 tools/gen_counts.py 读。别去正则解析人读的 ✅/❌ 行 —— 分母口径不统一。
+    ap.add_argument("--json", action="store_true",
+                    help="只把结果以 JSON 打到末行（给 gen_counts.py 读）")
     args = ap.parse_args()
 
     if not args.selftest:
         ap.error("加 --selftest")
+
+    if args.json:
+        ok, fails = _check()
+        print(json.dumps({"script": "opencd_gate.py --selftest", "ok": ok,
+                          "total": ok + fails, "exit": 1 if fails else 0},
+                         ensure_ascii=False))
+        return 1 if fails else 0
 
     print("=" * 74)
     print("opencd_gate 离线自检（纯逻辑，零请求、零数据库）")

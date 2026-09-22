@@ -484,10 +484,29 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
     fields = {
         "name": title,
         "small_descr": small,
+        # ★★ `nfoaction` —— **必须留**，值只能是 `release` 或 `keep`
+        #    （NexusPHP 的 `takeupload.php`：`nfoaction = $_POST['nfoaction']=='release' ?
+        #     'release' : 'keep'`；我们不发就是 `keep`，等价）。
+        #    ★ 为什么要有这一行：**对称性**。`musopia.edit_torrent()` 里有一份
+        #      同样的 `fields.setdefault("nfoaction", "keep")`（那里的注释解释了原因：
+        #      `takeedit.php` 是**整表覆盖**语义，不发就可能被当"未选择"处理掉已有 nfo）。
+        #      发布路径原本**没有**这一行 ⇒ 同一个语义"发布时隐式提供、编辑时显式提供"，
+        #      将来谁改编辑那份，会以为发布那份也管着 nfo —— 这是会静默漂移的形状。
+        #    ★ 它**不在**乌托邦的表单里（`takeupload.php` 的 95 个 `name=` 里没有它），
+        #      所以 `gen_field_table.py` 的对账会报"表单里没有这个 name" —— 这是已知的、
+        #      有据可查的豁免，不是漏登记（见那张表的 `nfoaction` 行）。
         "nfoaction": "keep",
-        "color": "0",
-        "font": "0",
-        "size": "0",
+        # ★★ `color` / `font` / `size` —— **不在任何表单里，是残留**。
+        #    2026-09-22 实测：乌托邦 `takeupload.php` 的真实表单里 95 个 `name=` 属性
+        #    一个都不叫这三个名字；`takeedit.php` 读回来的表单里也没有。
+        #    `grep -rn` 全仓库，除了这里这一处赋值**没有任何地方读它们**；
+        #    git 历史可追到最初的 `419b6db`，当时是一整块从别处抄来的字段表，
+        #    没有任何注释说明它们干什么。
+        #    ⇒ 它们**不会出错**（NexusPHP 忽略未知 POST 键），但这正是本项目的纪律
+        #      要防的东西：**不留看起来能跑的默认值** —— "发出去没事"会被读成"站点要它"。
+        #    ⇒ 已删除。若将来实测它们真的有必要，那时候再加回来，并**当场写明理由**；
+        #      在那之前，`gen_field_table.py` 第一节不再登记它们（登记了就是"声明了
+        #      一个表单里没有的 key"，会变成常驻假警报，把真警报淹掉）。
         "descr": descr,
         "type": "408",
         "medium_sel[4]": "0",
@@ -521,7 +540,7 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
     #     用户看到的「页面缺东西」是同一族的症状。
     #   ★ `rip_score`（日志得分）站点表单里是独立字段（`input name="rip_score"`），
     #     不是 `custom_fields[4][5]`；`[4][5]` 实测标签就是「抓轨日志得分」，
-    #     两者**待确认关系** ⇒ **先不发**，不猜（见 SUMMARY #15）。
+    #     两者**待确认关系** ⇒ **先不发**，不猜（同 `ERR-META-01`：拿不到就不编）。
     log_for_field = (task.get("log_content") or "").strip()
     if log_for_field:
         fields["custom_fields[4][3]"] = log_for_field
@@ -689,9 +708,21 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description="decr 渲染层离线自检")
     ap.add_argument("--selftest", action="store_true")
+    # ★ --json：给 tools/gen_counts.py 读的机读出口。
+    #   为什么不让它去正则解析上面的 ✅/❌ 人读行：各脚本的分母口径并不统一
+    #   （这里是 ok+fails，opencd_parse 是 total_checked，opencd_rate 是 ok+fails），
+    #   拿一个正则去套多种分母 = 制造一个"看起来很正常的"错数字（ERR-META-01 一族）。
+    ap.add_argument("--json", action="store_true",
+                    help="只把结果以 JSON 打到末行（给 gen_counts.py 读）")
     args = ap.parse_args()
     if not args.selftest:
         ap.error("加 --selftest 跑自检")
+    if args.json:
+        ok, fails = _check()
+        print(json.dumps({"script": "descr.py --selftest", "ok": ok,
+                          "total": ok + fails, "exit": 1 if fails else 0},
+                         ensure_ascii=False))
+        return 1 if fails else 0
     print("=" * 74)
     print("descr 离线自检（纯离线，零请求）")
     print("=" * 74)

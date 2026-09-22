@@ -191,7 +191,7 @@ def main():
         #    `audiocodec_sel`/`team_sel`）—— 否则那四格会退回 `detect_*()` **从标题猜**，
         #    而**编辑动作会把猜出来的值写回站点**（比发布路径更危险：编辑是覆盖）。
         #    ★ 复用 `publish.py` 的 `merge_mapped` —— **同一件事只维护一份**，
-        #      免得两处漂移（`SUMMARY` 那条「两处各写一份必然漂移」的纪律）。
+        #      免得两处漂移（「同一事实散在多处必然漂移」是本项目的成文纪律）。
         #    ★ 第一阶段的行没有 `mapped_json` ⇒ 什么都不改，行为与改动前一致。
         import publish as _pub
         _pub.merge_mapped(task)

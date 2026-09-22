@@ -271,6 +271,60 @@ def save_state(state):
         log(f"⚠️  写状态文件失败: {e}")
 
 
+# ★★ 容器内**生效的**开关快照 —— 给本机的巡检脚本读。
+#
+# 为什么需要它：真正决定"哪些阶段关着"的是**容器内的环境变量**，而本机
+# 既读不到 NAS 上那份 `.env`（它在 deploy.sh 的 NEVER 名单里，ERR-ENV-02），
+# 也进不去容器（SSH 未开）。于是本机只能**猜** —— 而猜错的代价已经实测过：
+# 2026-09-22 的巡检把 `ENABLE_PUBLISH=false` 当成了 `true`，
+# 于是「publish 停在 67h」这个**预期内**的现象被报成了「真异常」。
+#
+# ★ 为什么要由**容器自己**写：手抄一份值到 NAS 目录，就是又做了一个"投影"，
+#   它必然会漂（ERR-META-03）。让容器把 `os.environ` 原样落盘 ⇒
+#   **只有一个来源**，且它天然是"生效值"而不是"配置文件里写的值"
+#   （两者可以不一致：比如 compose 的 ${VAR} 插值、或 `.env` 被漏挂）。
+# ★ 为什么写 `/data`（bind mount 到宿主机 compose 目录）：那是**唯一**
+#   本机能看到的容器内产物落点。写镜像里的 `/app` 本机看不到。
+# ★ 为什么只挑这几个键：只写**判据要用的**，不把 `os.environ` 整个倒出去 ——
+#   环境里有 `MUSOPIA_COOKIE` / `QB_PASS` / 图床 key 这类凭据，
+#   整个 dump 到 SMB 上等于把生产密钥写在共享盘里（本项目 `.env` 都还没上过盘）。
+#   ★★ 这是**白名单**，不是黑名单：新加开关要**显式**加进来。
+#      选白名单的理由：漏加一个键 = 那个键在快照里"不存在"（看得见、会被当成空），
+#      而黑名单漏屏蔽一个键 = **凭据静默泄漏**。两害相权，宁可见地缺。
+ENV_SNAPSHOT_FILE = os.path.join(config.DATA_DIR, "daemon_env.json")
+ENV_SNAPSHOT_KEYS = (
+    "DRY_RUN",
+    "ENABLE_SCAN", "ENABLE_PUBLISH", "ENABLE_SYNC",
+    "ENABLE_COVERS", "ENABLE_EDIT", "ENABLE_CRAWL",
+    "OPENCD_CRAWL_DRY_RUN", "ALLOW_EMPTY_DB",
+)
+
+
+def save_env_snapshot():
+    """把容器内**生效的**白名单开关写成 JSON（原子替换）。
+
+    ★ 每次都带 `generated_at` 与 `pid`：快照的**新鲜度**是它自己要说清的事
+      （一份停在月前的快照就是 ERR-META-04 说的"传说"）。
+    ★ 值一律存**字符串原样**，不在这里转 bool ——
+      转义规则在 `env_bool()`，抄一份到这里就会漂（ERR-META-03）。
+      读的人要判真假就自己按同一套规则判，或者只看"缺键 vs 有键"。
+    """
+    snap = {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "pid": os.getpid(),
+        "keys": sorted(ENV_SNAPSHOT_KEYS),
+        "values": {k: os.environ[k] for k in ENV_SNAPSHOT_KEYS
+                   if k in os.environ},
+    }
+    try:
+        tmp = ENV_SNAPSHOT_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(snap, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, ENV_SNAPSHOT_FILE)
+    except OSError as e:
+        log(f"⚠️  写开关快照失败: {e}")
+
+
 def beat():
     """心跳文件给 docker healthcheck 用。"""
     try:
@@ -405,6 +459,9 @@ def main():
     import db
     db.init_db()
 
+    # ★ 落一份**容器内生效的**开关快照，给本机巡检脚本读（见 save_env_snapshot）
+    save_env_snapshot()
+
     # 空库 + 启用发布 = 可能重复发布几百个种子，必须拦在跑起来之前
     if not preflight(stages):
         sys.exit(2)
@@ -466,6 +523,11 @@ def main():
                 nxt = min(stage["interval"] * (2 ** min(fails[name], 6)), max_backoff)
                 log(f"↩️  [{name}] 连续失败 {fails[name]} 次，下次至少等 {nxt}s")
             save_state(state)
+            # ★ 开关快照**每轮重写一次**（不是只在启动时写一次）：这样它的 mtime
+            #   本身就是一个"daemon 还在跑"的旁证，而且万一有人在运行时改了
+            #   容器环境变量（`docker exec` 改不了，但换 `.env` 后重建容器会），
+            #   快照会在重建后的第一轮就跟着变 —— 不必等下一次重启才对上。
+            save_env_snapshot()
             beat()
 
         if _shutdown:

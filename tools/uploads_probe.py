@@ -35,13 +35,28 @@ def main():
     uid = client.check_login()
     print("user_id =", uid)
     print("关键词 =", repr(KEYWORD))
+    print()
+
+    # ★★ 第一步：先看**翻页原始回执**，再谈"站点上有几条"。
+    #    2026-09-22 定性：`iter_my_uploads()` 本身没有翻页 bug（本地用假响应
+    #    喂过三种模型验证过）；当前只产出 2 条的真因在站点那一侧，
+    #    需要这份逐页观测来定（见 `musopia.iter_my_uploads` 的 docstring）。
+    #    ★ 判据怎么看这三行：
+    #      · body=0 字节            → 端点干脆没回内容（同 ERR-SITE-01 那个形状）
+    #      · 解析=N 但新增=0         → 站点忽略了 page（每页返同一批）或分页错位
+    #      · 解析=0 / 新增=0 于首页  → 回执不是我们认得的列表格式（正则没命中）
+    print("=" * 62)
+    print("【第一步】逐页原始回执（stderr）")
+    print("=" * 62)
 
     rows = []
-    for tid, title in client.iter_my_uploads():
+    for tid, title in client.iter_my_uploads(debug=True):
         rows.append((int(tid), tid, title))
 
+    print()
     print("=" * 62)
-    print(f"站点上「我的发布」共 {len(rows)} 条")
+    print(f"站点上「我的发布」共 {len(rows)} 条（★ 若远小于库里 site_torrent_id 的条数，"
+          f"见上面三行回执定性）")
 
     hits = [r for r in rows if KEYWORD in r[2]]
     print(f"标题含 {KEYWORD!r} 的：★ {len(hits)} 条")

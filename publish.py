@@ -72,7 +72,7 @@ def merge_mapped(task):
       它们存在 `mapped_json` 里）。
       ⇒ 不合并 ⇒ 那四个键是 `None` ⇒ `descr` 退回 `detect_medium()` /
         `detect_tags()` **从标题猜** ⇒ 页面看着"有值"，**值是猜的**。
-        这正是 `SUMMARY #10` 那个 bug 的形状（静默、不报错）。
+        这正是 `ERR-META-01` 那个 bug 的形状（静默、不报错）。
 
     ★ 用**快照**而不是当场重算：`TAG_NAME_MAP` / `MEDIUM` 会变（44 项标签表刚改过、
       WAV 编号未定）⇒ 发布要用的就是三天前抓页面时做的那个决定。
@@ -245,14 +245,14 @@ def main():
                     if sent != back:
                         print(f"    ⚠️  {label}回读不一致：发出 {sent} / 站点 {back}")
 
-            # ★ 已知缺口（见 SUMMARY #10）：custom_fields[4][*] 我们目前一律发空，
-            #   所以这里**刻意只提示、不判失败** —— 一旦开始填它们，就该升级成硬校验。
+            # ★ 已知缺口：custom_fields[4][*] 的 `[4][4]`（唱片厂牌）**皇后页面没有**
+            #   ⇒ 留空是**无来源**，不是没做（见 `unmatched` 与 `ERR-META-01`）。
             empties = [k for k in ("custom_fields[4][1]", "custom_fields[4][2]",
                                   "custom_fields[4][3]", "custom_fields[4][4]")
                        if not (fields.get(k) or "").strip()]
             if len(empties) == 4:
-                print("    ℹ️  自定义字段（艺术家/发行年份等）仍为空 —— 已知缺口，"
-                      "见 SUMMARY #10（修完这条提示应消失）")
+                print("    ℹ️  自定义字段（艺术家/发行年份等）仍为空 —— "
+                      "见 `python publish.py` 的字段来源说明")
         except SiteError as e:
             print(f"    ⚠️  回读校验失败: {e}")
 
@@ -270,7 +270,7 @@ def main():
     #
     # 后果不是"保险没生效"，是**反向**的：`daemon.py:14-15` 明写「Cookie 过期这类
     # 问题会让每个阶段都失败，不退避就是每 30 分钟无意义地敲站点一次」，
-    # 而实测发种权限是**会抖**的（`ENVIRONMENT.md` `ERR-SITE-01`：16:19 全败、
+    # 而实测发种权限是**会抖**的（`ERRATA.md` 的 `ERR-SITE-01`：16:19 全败、
     # 18:50 全成）⇒ 这个「一天 240 次无效 POST」的窗口会**反复**出现。
     #
     # ★ 判据分层，别混成一个数：

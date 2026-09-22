@@ -1,0 +1,92 @@
+# 构建上下文白名单/黑名单（Docker 只认**黑名单**语法，所以这里是"排除清单"）。
+#
+# ★★ 为什么必须有这个文件（2026-09-22 实测踩到两个后果）：
+#
+#   ① ★★ **它不去掉那行 `WARN[0000] buildx: git was not found`。
+#      不要再试图用"排除 `.git`"去消掉那个 WARN —— 那条归因已被实测推翻。**
+#      实测（2026-09-22）：加上本文件后构建上下文从 174.35kB 掉到 724B，
+#      `.git` 确实被排除了 —— **而那行 WARN 一字不变**。
+#      ⇒ `.git` 在不在上下文里，与那行 WARN **无关**。它是 buildx 自己的行为
+#        （在没有 git 的机器上它拿不到 commit 信息，于是 WARN 一句）。
+#      ⇒ 处置：**接受**它。它不是错误、不影响构建结果（构建成功、镜像生成、
+#        容器运行都正常），后果仅止于"镜像里少了几条 commit 标签"这类元数据。
+#      ⇒ ★ 教训进 `ERRATA.md` 的 `ERR-DOCKER-07`（那一条已按实测订正）。
+#        **别再把"读起来很像原因"的东西当成原因写进注释**（ERR-META-01 一族）。
+#
+#   ② ★★ **没有这个文件时，构建上下文 = 整个目录** ——
+#      而生产目录里有：`data.db`（生产库，5.5MB）、`daemon_state.json`、
+#      `output_torrents/`、`__pycache__/`、以及**一堆 `.env*` 备份**
+#      （`.env` / `.env.old` / `.env.pre-fix` / `.env.pre-dollar-fix-*` …）。
+#      ⇒ 这些**全都会被传给 Docker daemon**。
+#      ★ `.env` 里有真凭据（站点 Cookie / qB 密码 / 图床 key），
+#        一旦进了上下文就可能留在构建缓存里 —— 那是**凭据外溢**，
+#        比"构建慢一点"严重得多。下面按**形状**排除（不按某个具体文件名）。
+#      ★★ **这一条才是本文件继续存在的理由** —— 与那行 WARN 无关：
+#         实测上下文 174.35kB → 724B，7 份 `.env*` 备份与 `data.db` 都不再上传。
+#
+# ★ 纪律：这份清单是**排除**语义（Docker 只支持这个方向），
+#   所以"漏掉一条"的后果是**收得不够干净**，不会把该有的文件挡掉。
+#   宁可多排除，不可少排除 —— 少一条 = 可能漏一个 `.env*`。
+
+# —— 版本控制与构建元数据 ——
+# ★ 排除 `.git` 的理由是**它不该进上下文**（与镜像无关的 13MB+、且含历史），
+#   **不是**为了消那行 git WARN —— 那条归因已被实测推翻，见文件头 ①。
+.git
+.gitignore
+.gitattributes
+.dockerignore
+Dockerfile
+docker-compose.yml
+
+# —— 凭据：按**形状**排除，不枚举具体文件名 ——
+#   `.env`、`.env.old`、`.env.pre-fix`、`.env.pre-publish-off-*`、
+#   `.env.pre-dollar-fix-*`、`.env.bak.*` 全被这两条盖住。
+#   ★ 别改成 `.env`（只一条）—— 那样所有历史备份都会被传进上下文。
+.env
+.env.*
+*.pem
+*.key
+
+# —— 运行时状态（生产独有，绝不进镜像）——
+#   ★ `config.py` 从 `/data` 读它们，镜像里**不该**有影子副本：
+#     多一份就迟早有人读错那一份（ERR-META-03 那一族）。
+data.db
+data.db-journal
+data.db-wal
+data.db-shm
+daemon_state.json
+daemon_heartbeat
+daemon_env.json
+tools/.nas_health_last.json
+output_torrents
+
+# —— 一次性诊断脚本（按需 `docker compose run` 挂进 /data，不打进镜像）——
+_probe_*.py
+_probe_*.pyc
+
+# —— 本地开发/审计产物 ——
+.deploy-backup
+__pycache__
+*.pyc
+*.pyo
+repos
+opencdhtml
+raw_html
+tools
+out.baseline-*
+counts.json
+ERRATA.md
+SESSION-NOTES.md
+.deploy.nasrc
+
+# —— 音乐媒体（compose 里是只读挂载，不该随上下文走）——
+downloads
+*.flac
+*.wav
+*.ape
+*.mp3
+*.log
+*.cue
+*.jpg
+*.jpeg
+*.png

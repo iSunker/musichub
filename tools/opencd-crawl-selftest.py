@@ -170,7 +170,7 @@ def _clear_raw_dir():
     os.makedirs(d, exist_ok=True)
 
 
-def main():
+def main(json_mode=False):
     srv, base = start_server()
     os.environ["OPENCD_URL"] = base
     print("=" * 74)
@@ -456,7 +456,7 @@ def main():
             0, crawl._exit_code({"search_err": 5, "matched": 0}, quota_hit=True))
     #   "配额用尽 + 有入库失败" ⇒ 1（真失败与配额无关，**必须**报出来）
     #   ★ 这条是自检抓到的顺序 bug 的回归判据：我第一版把 quota_hit 短路在最前，
-    #     于是这一支会返 0 —— **把真失败静默掉**（§3.17 的形状）。
+    #     于是这一支会返 0 —— **把真失败静默掉**（"判据失效"那个形状）。
     c.check("★★ 配额用尽**不能**吞掉入库失败 ⇒ 1",
             1, crawl._exit_code({"store_failed": 2, "search_err": 5},
                                 quota_hit=True))
@@ -465,6 +465,12 @@ def main():
 
     srv.shutdown()
     print("\n" + "=" * 74)
+    if json_mode:
+        # ★ 机读出口，给 tools/gen_counts.py 读。别去正则解析上面的人读 ✅/❌ 行。
+        print(json.dumps({"script": "tools/opencd-crawl-selftest.py", "ok": c.ok,
+                          "total": c.ok + c.fail, "exit": 1 if c.fail else 0},
+                         ensure_ascii=False))
+        return 1 if c.fail else 0
     if c.fail:
         print(f"❌ 自检失败：{c.ok}/{c.ok + c.fail} 通过，{c.fail} 项不符")
         return 1
@@ -473,8 +479,9 @@ def main():
 
 
 if __name__ == "__main__":
+    _json_mode = "--json" in sys.argv
     try:
-        rc = main()
+        rc = main(json_mode=_json_mode)
     finally:
         shutil.rmtree(_TMP, ignore_errors=True)
     sys.exit(rc)

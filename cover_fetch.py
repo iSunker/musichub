@@ -57,6 +57,7 @@
 （实测 `folder.jpg` 那张图出现在多个页面里），按 tid 存会重复下载、白烧配额。
 """
 import hashlib
+import json
 import os
 import re
 import sys
@@ -442,9 +443,19 @@ def main():
     sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description="皇后封面取回（本地优先 → 页面 → 下载）")
     ap.add_argument("--selftest", action="store_true", help="跑离线自检")
+    # ★ --json：机读出口，给 tools/gen_counts.py 读。别去正则解析人读的 ✅/❌ 行 —— 分母口径不统一。
+    ap.add_argument("--json", action="store_true",
+                    help="只把结果以 JSON 打到末行（给 gen_counts.py 读）")
     args = ap.parse_args()
     if not args.selftest:
         ap.error("加 --selftest（实际取封面由 backfill_covers_opencd.py 驱动）")
+
+    if args.json:
+        ok, fails = _check()
+        print(json.dumps({"script": "cover_fetch.py --selftest", "ok": ok,
+                          "total": ok + fails, "exit": 1 if fails else 0},
+                         ensure_ascii=False))
+        return 1 if fails else 0
 
     print("=" * 74)
     print("cover_fetch 离线自检（纯本地，零请求）")

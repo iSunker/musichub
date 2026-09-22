@@ -42,7 +42,7 @@ COLUMNS = [
     # 皇后侧的 tid（页面 id）。★ 与 `site_torrent_id` 是**两件事**：
     #   同一个 infohash 在皇后和 Musopia 上是两个不同的页面编号，别混成一列。
     ("opencd_tid", "TEXT"),
-    # 两个 3 天闸门（SUMMARY §12 决定 5）：
+    # 两个 3 天闸门（闸门①=做种时长，闸门②=抓页面后 3 天）：
     #   闸门① `qb_seed_days` —— 在 qB 做种满几天（★ 它证明种子真的下完可用，
     #          不只是"延迟了"）。没满 3 天**根本不抓**，更省请求。
     #   闸门② `fetched_at`  →  `publish_after`
@@ -51,7 +51,7 @@ COLUMNS = [
     ("qb_seed_days", "REAL"),
     ("fetched_at", "TIMESTAMP"),
     ("publish_after", "TIMESTAMP"),
-    # 映射不上的标签等 —— 要显式列出、进每日邮件，**不许静默丢**（SUMMARY §12 决定 9）
+    # 映射不上的标签等 —— 要显式列出、进每日邮件，**不许静默丢**
     ("unmapped_json", "TEXT"),
     # ★★ 艺术家 / 发行年份（2026-09-21 补）—— 皇后的「藝術家名」/「發行年份」。
     #   ★ 为什么必须**落库**、不能在发布那一刻现取：
@@ -213,7 +213,7 @@ def _load_mapped(task):
     ★ **解析失败就抛出，不静默返回空 dict**：
       否则「JSON 坏了」会长得和「这个字段本来就没有」一模一样 ⇒ 渲染层会
       退回 `detect_*()` 从标题猜，页面看着"有值"而值是猜的
-      （正是 `SUMMARY #10` 那个 bug 的形状）。
+      （正是 `ERR-META-01` 那个 bug 的形状：判据只覆盖了一部分，于是"全绿"是假的）。
     ★ 没有 `mapped_json`（第一阶段的行）⇒ 返回 `{}`，那是**正常的**，
       调用方据此走原有的 `detect_*` 兜底，不是错误。
     """
@@ -477,7 +477,7 @@ def ledger_get(day_key, kind=LEDGER_KIND_REQUEST):
       直接当 `_count_day` 用。若返回 None，`_count_day` 就成了 None ⇒
       `None >= max_per_day` 在 py3 里**抛 TypeError**（不是静默放假，算走运），
       但更糟的是有的调用点写成 `used or 0`，那就把"查不到"和"真的是 0"混成一坨
-      （`SUMMARY §3.15`：缺值不留默认值，但**这里是"确实没有"= 0** 的正当语义）。
+      （"缺值不留默认值"是 `config.py` 的纪律，但**这里是"确实没有"= 0** 的正当语义）。
     """
     conn = connect()
     row = conn.execute(

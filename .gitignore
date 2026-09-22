@@ -51,7 +51,7 @@ tools/doc-audit/out.baseline-*/
 # ★ 为什么默认忽略（2026-09-19 实测）：从皇后下载的**详情页 HTML 里带真凭据** ——
 #   实测两份样本各有 2 处 passkey（download.php?id=…&passkey=<32位十六进制>），
 #   另有登录用户名与魔力值。与 .env 同级的泄露面，绝不能进仓库。
-#   ENVIRONMENT.md A.5「凭据住在哪」那条纪律同样适用于这里。
+#   见 README「安全」：凭据住在哪。
 # ★ 注意不能写成「忽略整个目录 + !反忽略某文件」：git **不会进入被忽略的目录**，
 #   那条反忽略**永远不生效**（本项目的 mdwalk.py 就是为这类"静默失效"而生的）。
 #   所以：忽略目录、只反忽略脱敏后的样本 —— 脱敏样本放 opencdhtml/sanitized/。
@@ -69,3 +69,8 @@ repos/
 
 # 本地页面预览（tools/fetch_page.py 的产物）
 _preview/
+
+# ★ 容器内生效开关的快照（daemon.save_env_snapshot() 每轮写）。
+#   它是**运行时产物**、不是事实源：进版本库会让"某天的开关"升级成"事实"，
+#   而且本机那份会跟 NAS 上的真值漂开（同 tools/.nas_health_last.json 的理由）。
+daemon_env.json

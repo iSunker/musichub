@@ -758,7 +758,7 @@ def _check_listpage():
     return len(checks), fails
 
 
-def cmd_selftest():
+def cmd_selftest(as_json=False):
     files = sorted(glob.glob(os.path.join(SAMPLE_DIR, "*.html")))
     if not files:
         print(f"❌ 没找到样本：{SAMPLE_DIR}")
@@ -823,6 +823,15 @@ def cmd_selftest():
     total_fails += sf
 
     print(f"\n{'=' * 72}")
+    if as_json:
+        # ★ 本文件的分母是 total_checked（= 通过数 + 不符数），与别的脚本同义但变量名不同。
+        print(json.dumps({"script": "opencd_parse.py --selftest",
+                          "ok": total_checked - total_fails,
+                          "total": total_checked,
+                          "exit": 1 if total_fails else 0},
+                         ensure_ascii=False))
+        return 1 if total_fails else 0
+
     if total_fails:
         print(f"❌ 自检失败：{total_checked - total_fails}/{total_checked} 项通过，"
               f"{total_fails} 项不符")
@@ -844,9 +853,9 @@ RULE_MUTATIONS = [
     ("简体欢迎转载", "set:欢迎转载", "欢迎转载", RULE_ALLOW, True),
 ]
 
-# ★★ 「不靠关键词反推」的护栏 —— 对应 SUMMARY §12 第 2 步那条**销掉的假声称**。
+# ★★ 「不靠关键词反推」的护栏 —— 曾有过一条**已销掉的假声称**（说计划要用关键词兜底）。
 #   计划里写过「关键词兜底抄 easy-upload 的 FORBIDDEN_KEYWORDS」，但代码里从来没有；
-#   核对后**决定不补**（够不着 + 会误杀，理由见 SUMMARY）。这里把「不靠关键词」
+#   核对后**决定不补**（够不着 + 会误杀）。这里把「不靠关键词」
 #   从一句注释钉成**可跑的判据**：正文里塞满禁转关键词，裁决必须**只由字段决定**。
 #
 #   方向很要紧：写反了就成了「塞关键词 ⇒ 更保守」，那样这条判据会**奖励**
@@ -959,10 +968,13 @@ def main():
     ap.add_argument("html_file", nargs="?", help="要解析的 HTML 文件")
     ap.add_argument("--selftest", action="store_true", help="跑样本自检")
     ap.add_argument("--brief", action="store_true", help="只打关键字段（不 dump 全文）")
+    # ★ --json：机读出口，给 tools/gen_counts.py 读（与 --selftest 合用）。
+    ap.add_argument("--json", action="store_true",
+                    help="与 --selftest 合用：只把结果以 JSON 打到末行")
     args = ap.parse_args()
 
     if args.selftest:
-        return cmd_selftest()
+        return cmd_selftest(as_json=args.json)
     if not args.html_file:
         ap.error("给个 HTML 文件，或加 --selftest")
 

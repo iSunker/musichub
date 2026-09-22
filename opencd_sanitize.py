@@ -7,7 +7,7 @@ OpenCD（皇后）详情页 HTML 脱敏 —— 让页面样本可以安全进仓
       · 登录用户名（会员态横幅 + 感谢按钮）
       · 会员隐私读数（分享率 / 上传量 / 下载量 / 魔力值 / 邀请 / H&R）
     `opencdhtml/` 因此在 `.gitignore` 里默认忽略，只有**脱敏后**的样本才进仓库
-    （`opencdhtml/sanitized/`，那是反忽略的例外）。纪律同 `ENVIRONMENT.md` A.5。
+    （`opencdhtml/sanitized/`，那是反忽略的例外）。纪律同 README「安全」。
 
 用法:
     python opencd_sanitize.py                  # 脱敏 opencdhtml/*.html → opencdhtml/sanitized/
@@ -19,7 +19,7 @@ OpenCD（皇后）详情页 HTML 脱敏 —— 让页面样本可以安全进仓
      按 key 名匹配会漏掉「嵌在 URL / 文本里的」凭据（passkey 就是这样：它出现在
      `download.php` 的 query 里，不在任何叫 passkey 的字段里）。
   2. **脱敏必须可验证，且要验两个方向。** 一个「永远说没问题」的检查器比没有更危险
-     （`ENVIRONMENT.md` `ERR-META-01`）。所以：
+     （`ERRATA.md` 的 `ERR-META-01`）。所以：
        · `--check` 与脱敏后自检**共用同一份模式表**（不重抄一份会漂的）；
        · 另配 `--selftest`，**先拿一个确知含凭据的样本证明它抓得到**，
          再拿脱敏结果证明它抓不到 —— 两个方向都验过才算数。

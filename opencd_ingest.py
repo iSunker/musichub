@@ -225,7 +225,7 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
         "qb_seed_days": _finite_days(qb_seed_days),
         "fetched_at": fetched_at_s,
         "publish_after": publish_after_s,
-        # ★ 映射不上的**显式落盘**，不许静默丢（SUMMARY §12 决定 9）
+        # ★ 映射不上的**显式落盘**，不许静默丢
         "unmapped_json": json.dumps(m.get("unmapped") or [], ensure_ascii=False),
         # ★ `map_all()` 的**证据快照** —— 发布时读它，不重算（重算会随映射表漂移）
         "mapped_json": json.dumps(m, ensure_ascii=False, default=str),
@@ -459,10 +459,20 @@ def main():
 
     ap = argparse.ArgumentParser(description="OpenCD 页面 → tasks 表的写入侧")
     ap.add_argument("--selftest", action="store_true", help="跑离线自检")
+    # ★ --json：机读出口，给 tools/gen_counts.py 读。别去正则解析人读的 ✅/❌ 行 —— 分母口径不统一。
+    ap.add_argument("--json", action="store_true",
+                    help="只把结果以 JSON 打到末行（给 gen_counts.py 读）")
     args = ap.parse_args()
 
     if not args.selftest:
         ap.error("加 --selftest（本模块由 crawl.py 调用，不单独出网）")
+
+    if args.json:
+        ok, fails = _check()
+        print(json.dumps({"script": "opencd_ingest.py --selftest", "ok": ok,
+                          "total": ok + fails, "exit": 1 if fails else 0},
+                         ensure_ascii=False))
+        return 1 if fails else 0
 
     print("=" * 74)
     print("opencd_ingest 离线自检（纯本地，零请求）")

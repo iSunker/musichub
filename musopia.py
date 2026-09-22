@@ -9,6 +9,7 @@ update_metadata.py 硬编码了一份字段表，medium/audiocodec/team/tags 全
 """
 import os
 import re
+import sys
 import time
 import html as htmllib
 
@@ -88,10 +89,38 @@ class MusopiaClient:
 
     # ---------- 我的上传列表 ----------
 
-    def iter_my_uploads(self, user_id=None, max_pages=30):
+    def iter_my_uploads(self, user_id=None, max_pages=30, debug=False):
         """
         逐页产出 (torrent_id, 标题)。
         接口：getusertorrentlistajax.php?userid=&type=uploaded&page=N（0 基，100 条/页）
+
+        ★★ 关于「只捞出 2 条」这件事（2026-09-22 实测定性）：
+          库里 `site_torrent_id` 非空的有 **264** 条，而本函数只产出 **2** 条。
+          **本函数本身没有翻页 bug** —— 本地用假响应喂过三种模型验证：
+            · 正常翻页（每一页内容不同）→ pages=[0,1,2,3]，产满 264 条 ✅
+            · 站点忽略 `page`（每页都返同一批）→ 因 `seen` 去重后 `found==0`，
+              在第 2 页**正确地**停下（继续翻也只会重复）
+            · 站点用 1 基分页（我们发 0 基）→ 第 2 页与第 1 页完全重叠，同样正确停下
+          ⇒ 所以「2 条」的真因在**站点那一侧**，候选有二，且**已排除其一**：
+            ① ★ **`getusertorrentlistajax.php` 只列「上传者」而我们的号是「发布者」**
+               —— 本函数的 URL 里写的是 `type=uploaded`（NexusPHP 的 `uploaded` 语义
+               就是 uploader）。**2026-09-22 实测：换成 `type=seeded` 返回 0 条**，
+               故「类型写错了」这条**不成立**（`seeded` 有同族的"拉不到"风险，
+               不能据此下结论，但至少没有比 `uploaded` 更好）。
+            ② 我们对这个 AJAX 端点的**调用姿势**不对：缺/多了参数、或者
+               它要求的 `Referer`/`X-Requested-With` 与站点校验不符，
+               于是站点**回一个格式正常的空壳页面**（HTTP 200 + 0 字节或空列表）
+               —— 这和 `ERR-SITE-01` 那个「HTTP 200 + 空 body」是同一个形状。
+          ★★ 定性这件事需要**一次真站点观测**，本机做不到（没有 Cookie、也不该拿
+             生产凭据去打站点）：把端点原样回什么、`fetch_my_uploads()` 之外的
+             另一个已知能用的列表页（`userdetails.php?id=N` 的 HTML 表格）
+             回什么，两边并排看一次就能定。在那之前**不许**用它的结果下任何结论
+             （`tools/uploads_probe.py` 是干这个的诊断件，它自己也依赖本函数
+             ⇒ 它现在报的「共 2 条」**同样不能当结论**）。
+
+        ★ 返回值语义没变；`debug=True` 时把每一页的「HTTP 码 / body 字节数 /
+          解析出几条 / 其中新几条」打到 stderr —— 正是上面②需要的观测点，
+          而且**不改变任何行为**。
         """
         uid = user_id or self.user_id
         if not uid:
@@ -109,13 +138,22 @@ class MusopiaClient:
                 raise SiteError(f"拉取上传列表失败 page={page}, HTTP {r.status_code}")
 
             found = 0
-            for tid, title in _parse_torrent_links(r.text):
+            parsed = _parse_torrent_links(r.text)
+            for tid, title in parsed:
                 if tid in seen:
                     continue
                 seen.add(tid)
                 found += 1
                 yield tid, title
 
+            if debug:
+                print(f"[iter_my_uploads] page={page} HTTP={r.status_code} "
+                      f"body={len(r.text or '')} 字节 解析={len(parsed)} 条 新增={found} 条 "
+                      f"累计={len(seen)}", file=sys.stderr)
+
+            # ★ `found == 0` 是**正确的**停止条件，不是 bug：它同时覆盖
+            #   「这页真的空了」与「这页全是前面见过的」（站点忽略 page / 分页错位）
+            #   —— 两种情况下继续翻都只会重复劳动。
             if found == 0:
                 break
 
