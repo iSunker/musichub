@@ -95,8 +95,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         HITS.append(self.path)
         if self.path.startswith("/torrents.php"):
+            # ★★ 2026-09-22：可按 search= 关键词造三种结果，用来测
+            #   「搜到候选 / 0 候选 / 请求失败」三态（判据⑭⑮）。
+            #   ★ 这是个**测试开关**，不是生产逻辑 —— 用参数把 mock 的
+            #     世界切到指定状态，好让每条判据只测一件事。
             if "search=" in self.path:
-                # 搜索结果：**两个候选，名字几乎相同**（照实测的齐秦样本）
+                if "ZEROCAND" in self.path:
+                    # 搜索成功、但结果页**一条都没有**（模拟"皇后上没这条"）
+                    self._send("<html><body><table><tr><td>没有找到</td></tr></table></body></html>")
+                    return
+                if "HTTPFAIL" in self.path:
+                    # 搜索请求**失败**（模拟 cookie 失效/限流/站点 5xx）
+                    self._send("<html><body>server busy</body></html>", 503)
+                    return
+                # 默认：**两个候选，名字几乎相同**（照实测的齐秦样本）
                 self._send(_sample("sample-search-qinqin.html"))
             else:
                 self._send(_sample("sample-listpage.html"))
@@ -172,9 +184,11 @@ def main():
     HITS.clear()
     gate = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
     client = crawl.Client(gate=gate)
-    tid, checked = crawl.match_by_name(client, "齐秦 - 我拿什么爱你", "778c337572b855b7f2f72cc8d43aa4564311e5a4")
+    tid, checked, mstat = crawl.match_by_name(
+        client, "齐秦 - 我拿什么爱你", "778c337572b855b7f2f72cc8d43aa4564311e5a4")
     c.check("命中正确的 tid（不是第一个候选）", "30167", tid)
     c.check("验了 2 个候选才对", 2, checked)
+    c.check("★ 状态 = MATCH_OK（搜索成功）", crawl.MATCH_OK, mstat)
     infohash = crawl.extract_infohash(crawl.load_raw("30167") or "")
     c.check("从详情页取到 infohash（40 hex）", "778c337572b855b7f2f72cc8d43aa4564311e5a4", infohash)
 
@@ -258,7 +272,7 @@ def main():
     HITS.clear()
     gate8 = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
     client8 = crawl.Client(gate=gate8, dry_run=True)
-    crawl.match_by_name(client8, "齐秦", "deadbeef" * 5, max_candidates=2)
+    _tid8, _chk8, _st8 = crawl.match_by_name(client8, "齐秦", "deadbeef" * 5, max_candidates=2)
     details = [h for h in HITS if "plugin_details" in h]
     searches = [h for h in HITS if "search=" in h]
     c.check("匹配环节：dry-run 下没有详情页请求", 0, len(details))
@@ -353,6 +367,101 @@ def main():
     c.check("确实删掉了东西（removed > 0）", True, removed > 0)
     c.check("★ 当天的值没被误删", 2, db.ledger_get(D1))
     print(f"        （prune 删了 {removed} 行；老的 2026-01-01 原是 {before_old}）")
+
+    # ==================== 判据⑭-⑯：三态区分 + 0 命中熔断 ====================
+    #
+    # ★★ 这一组是 2026-09-22 **真跑一次生产才暴露**的缺陷（用户实测）：
+    #   541 个 qB 种子、每轮 20 请求上限，日志里一串
+    #   「未匹配到皇后条目：（验了 0 个候选）」——
+    #   而 `验收了 0 个候选` **同时**意味着三件事：
+    #     ① 搜索成功但 0 候选（皇后上没这条）
+    #     ② 搜索请求失败（HTP 503 / 网络）
+    #     ③ 第一个候选的详情页抓失败
+    #   三者的处置**完全不同**（①熔断省配额 / ②③重试），混成一个数就**没法运维**。
+    #   ★ 为什么离线自检原来没抓到它：原判据只用「齐秦」这种**干净关键词**搜，
+    #     必然命中 ⇒ 永远走不到 0 候选那条路（"判据覆盖不到真实输入"，`ERR-META-02`）。
+    #     现在用 mock 的 ZEROCAND / HTTPFAIL 开关把这两态**造出来**。
+
+    print("\n【判据⑭】三态区分：0 候选 ⇒ MATCH_ZERO；请求失败 ⇒ MATCH_ERROR")
+    _clear_raw_dir()
+    g14 = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
+    cl14 = crawl.Client(gate=g14)
+    # ① 搜索成功但 0 候选
+    t_z, n_z, st_z = crawl.match_by_name(cl14, "ZEROCAND 某专辑", "deadbeef" * 5)
+    c.check("① 0 候选 ⇒ tid 为 None", None, t_z)
+    c.check("① 0 候选 ⇒ 状态 MATCH_ZERO（★ 可熔断）", crawl.MATCH_ZERO, st_z)
+    # ② 搜索请求失败（HTTP 503）
+    errors = []
+    t_e, n_e, st_e = crawl.match_by_name(
+        cl14, "HTTPFAIL 某专辑", "deadbeef" * 5,
+        on_error=lambda k, d: errors.append((k, d)))
+    c.check("② 请求失败 ⇒ 状态 MATCH_ERROR（★ 不可熔断）", crawl.MATCH_ERROR, st_e)
+    c.check("② 错误回调收到 kind='http'", "http", errors[0][0] if errors else None)
+    c.check("② 错误详情里带状态码 503", True, "503" in (errors[0][1] if errors else ""))
+    # ③ 阴性对照：正常命中仍是 MATCH_OK（证明上面两个不是"永远返同一态"）
+    _t3, _n3, st3 = crawl.match_by_name(
+        cl14, "齐秦 - 我拿什么爱你", "778c337572b855b7f2f72cc8d43aa4564311e5a4")
+    c.check("⛔阴性对照：正常命中 ⇒ MATCH_OK", crawl.MATCH_OK, st3)
+    # ④ 阴性对照：搜到候选但 infohash 不匹配 ⇒ MATCH_OK（**不是** ZERO！）
+    #    ★ 这条很要紧：它和"0 候选"处置相同（别再搜），但**原因不同**
+    #      （后者是"皇后上没这条"，这里是"有同名的别的版本"）—— 日志要能分开。
+    _t4, _n4, st4 = crawl.match_by_name(cl14, "齐秦 - 我拿什么爱你", "ffff" * 10)
+    c.check("⛔阴性对照：有候选但都不匹配 ⇒ MATCH_OK（不是 ZERO）",
+            crawl.MATCH_OK, st4)
+
+    print("\n【判据⑮】0 命中熔断：ZERO 的**不再发详情页请求**，ERROR 的**仍重试**")
+    # ★★ 熔断的方向必须是"只对 ZERO"：对 ERROR 也熔断 = 把"今天网络抖一下"
+    #    变成"这条种子永远漏抓"，而**不漏抓**正是熔断想保护的东西。
+    _clear_raw_dir()
+    HITS.clear()
+    g15 = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
+    cl15 = crawl.Client(gate=g15)
+    _t, _n, _s = crawl.match_by_name(cl15, "ZEROCAND x", "a" * 40)
+    z_detail = [h for h in HITS if "plugin_details" in h]
+    c.check("① ZERO：0 候选 ⇒ 详情页请求 0 次（本来也没候选可抓）",
+            0, len(z_detail))
+    # 熔断的真正含义：`run_from_qb` 收到 ZERO 后不再为它花任何请求。
+    #   ★ 这里按 `run_from_qb` 的分支**照抄**那段决策，断言同一个条件。
+    HITS.clear()
+    _clear_raw_dir()
+    stats15 = {"zero_cand": 0, "search_err": 0, "nomatch": 0}
+    for nm in ("ZEROCAND x", "HTTPFAIL y"):
+        try:
+            _tid, _chk, st = crawl.match_by_name(cl15, nm, "b" * 40)
+        except Exception:
+            st = crawl.MATCH_ERROR
+        if st == crawl.MATCH_ERROR:
+            stats15["search_err"] += 1      # ← 不熔断
+        elif st == crawl.MATCH_ZERO:
+            stats15["zero_cand"] += 1      # ← 熔断
+    c.check("② 两种失败分别计数（ZERO 1 条 / ERROR 1 条）",
+            {"zero_cand": 1, "search_err": 1, "nomatch": 0}, stats15)
+    c.check("③ ★ ERROR 那条**没有**被熔断（计进 search_err 而非 zero_cand）",
+            1, stats15["search_err"])
+
+    print("\n【判据⑯】`_exit_code` 对 search_err 的**条件**判失败")
+    # ★ 条件 = `search_err > 0 且 matched == 0`。
+    #   单向不够：必须同时断言"部分失败但**有命中**时**不**算失败"，
+    #   否则写成"只要 search_err>0 就返 1"也能过，而那会让一次网络抖动
+    #   把 daemon 打进退避（把偶发放大成"整轮干得更少"）。
+    c.check("全fail（search_err>0, matched=0）⇒ 1",
+            1, crawl._exit_code({"search_err": 3, "matched": 0}))
+    c.check("★ 有命中时的部分失败 ⇒ 0（抖动不该触发退避）",
+            0, crawl._exit_code({"search_err": 3, "matched": 1}))
+    c.check("⛔阴性对照：无 search_err ⇒ 0",
+            0, crawl._exit_code({"search_err": 0, "matched": 0}))
+    # ★★ 配额豁免**只豁免搜索失败**，不许吞掉真失败：
+    #   "配额用尽 + 全部搜索失败" ⇒ 0（搜索失败是配额的后果，不是故障）
+    c.check("★ 配额用尽豁免 search_err ⇒ 0",
+            0, crawl._exit_code({"search_err": 5, "matched": 0}, quota_hit=True))
+    #   "配额用尽 + 有入库失败" ⇒ 1（真失败与配额无关，**必须**报出来）
+    #   ★ 这条是自检抓到的顺序 bug 的回归判据：我第一版把 quota_hit 短路在最前，
+    #     于是这一支会返 0 —— **把真失败静默掉**（§3.17 的形状）。
+    c.check("★★ 配额用尽**不能**吞掉入库失败 ⇒ 1",
+            1, crawl._exit_code({"store_failed": 2, "search_err": 5},
+                                quota_hit=True))
+    c.check("★★ 配额用尽**不能**吞掉抓取失败 ⇒ 1",
+            1, crawl._exit_code({"failed": 1}, quota_hit=True))
 
     srv.shutdown()
     print("\n" + "=" * 74)

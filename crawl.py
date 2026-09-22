@@ -50,6 +50,29 @@ OpenCD（皇后）抓取层 —— ★ **本项目唯一主动访问别人站点
           一轮的量在预算内（1 次探活），且量纲仍走 `RateGate`。
       ★ 判据见 `tools/opencd-crawl-selftest.py` 判据⑧（dry-run 下详情页命中 **0**、
         而匹配阶段命中 **> 0**）。
+
+★★ 匹配的三态与「0 命中熔断」（2026-09-22 加，★ 真跑一次生产才暴露的缺陷）：
+    用户实测（541 个 qB 种子）日志里一串「未匹配到皇后条目（验了 0 个候选）」，
+    而 `验了 0 个候选` **同时**意味着三件事，处置完全不同：
+
+    | 情况 | `match_by_name` 返回 | 处置 |
+    |---|---|---|
+    | 搜索成功、**0 个候选** | `MATCH_ZERO` | **熔断**：皇后上没这条，别再花配额 |
+    | 搜索**请求失败**（HTTP/网络） | `MATCH_ERROR` | **不熔断**：下轮要重试 |
+    | 搜到候选但 infohash 都不匹配 | `MATCH_OK`（tid=None） | 别再搜（有同名的别的版本） |
+
+    · ★ 熔断**只对 ZERO**。对 ERROR 熔断 = 把"今天网络抖一下"变成"这条种子永远漏抓"，
+      而"不漏抓"正是熔断要保护的东西。
+    · ★ 根因：`search_candidates()` 原先 `if status != 200: return []`
+      —— **把请求失败和真的搜不到混成同一个空列表**（本项目最忌讳的形状）。
+      现在失败一律**抛异常**（空列表是合法结果，不能兼职表示失败）。
+    · ★★ 熔断**不等于**问题解决 —— 真实命中率低的原因是**qB 名字 ≠ 皇后标题**：
+      qB 里是第一阶段为 Musopia 生成的名字（带 `[FLAC]` / `(2001)` / `{EU・…}`），
+      而皇后标题是 `艺人 - 专辑 年份 - 格式 分軌/整軌`，搜索是**子串匹配** ⇒
+      整串拿去搜几乎必然 0 命中。**提高命中率要改搜索策略**（提关键词），
+      那是独立的一步 —— 本次只做"把事实报出来 + 别浪费配额"。
+    · ★ 「饿死」也在摘要里可见：遍历顺序固定 + 每轮请求预算有限 ⇒
+      靠后的种子永远轮不到。`run_from_qb` 结尾会在预算用尽时显式提示。
 """
 import argparse
 import json
@@ -119,6 +142,7 @@ def _exit_code(stats, *, quota_hit=False):
     | `store_failed > 0`（入库失败）| **1** | 重试有意义；静默就是 §3.17 那个形状 |
     | `failed > 0`（详情页抓取失败）| **1** | 网络/HTTP 失败，下轮还会 pending |
     | 配额用尽（`quota_hit`）| **0** | ★ **闸门在保护，不是错误** |
+    | `search_err > 0` 且**命中 0** | **1** | ★ 见下：搜索**全fail**是故障，不是"没活" |
     | 其余（没活 / 全部 NOT_SEEDED）| **0** | "没事干" ≠ "失败" |
 
     ★★ `quota_hit` 判 0 是本函数最要紧的一条：配额用尽时返回 1 会让 daemon 记
@@ -127,10 +151,36 @@ def _exit_code(stats, *, quota_hit=False):
       方向正好反了。
     ★ 登录失败 / qB 不可达：调用方**直接 return 1**（不经过本函数）—— 那两条
       在 `run_from_qb` 里是 `check_login()` / `qb_torrents()` 的早退，与 stats 无关。
+
+    ★★ `search_err` 为什么**有条件**地算失败（2026-09-22 加，★ 这个"条件"是关键）：
+      · 单条搜索失败 ⇒ **不算**失败：那是"这一条没验成"，下轮自然重试；
+        算失败会让 daemon 退避，把偶然一次网络抖动放大成"整轮干得更少"。
+      · **全部搜索都失败且一条都没命中** ⇒ **算**失败：那不是抖动，是系统性故障
+        （cookie 失效 / 被限流 / 站点改版）。此时若返回 0，daemon 会**按常规周期
+        一直空转**，而日志摘要里只有"搜不到 N 条"，**没有任何错误** ——
+        正是本项目最忌讳的静默形状（cookie 失效告警就靠这个信号，见 SUMMARY §12 决定 9）。
+      判据：`search_err > 0 and matched == 0` —— 用"命中 0"兜住"抖动"那一支
+      （有命中的话说明搜索链路是通的，那几条失败就只是个别）。
+
+    ★★ 顺序（2026-09-22 自检判据⑯ 抓到过一次顺序 bug）：
+      · `store_failed` / `failed`（**真失败**）**先判** —— 它们是"这轮真出了问题"，
+        与配额无关，任何情况下都要如实返回 1（否则静默 = §3.17 那个形状）。
+      · `quota_hit` **只**用来豁免它自己引起的那些情况（见下），
+        所以它**不能**写在最前面把真失败一起吞掉 ——
+        我第一版把它短路在最前，那会让"3 条入库失败 + 随后配额用尽"返 0，
+        **把真失败静默掉**，方向正好和这条规则的初衷相反。
+      · ★ 教训：**优先级必须在代码里体现**，且"豁免"只该豁免它该豁免的东西。
     """
+    # ★ 真失败优先 —— 与配额无关，不许被豁免。
     if stats.get("store_failed", 0) > 0:
         return 1
     if stats.get("failed", 0) > 0:
+        return 1
+    # ★ 配额用尽 ⇒ 0（**只豁免"搜索失败"这一条**，因为配额用尽时
+    #   搜索失败往往是"配额刚好吃在搜索上"的直接后果，不是故障）。
+    if quota_hit:
+        return 0
+    if stats.get("search_err", 0) > 0 and stats.get("matched", 0) == 0:
         return 1
     return 0
 
@@ -254,29 +304,82 @@ def extract_infohash(html):
     return m.group(1).lower() if m else ""
 
 
-def search_candidates(client, name, limit=5):
+def search_candidates(client, name, limit=5, *, on_error=None):
     """
     按名字搜皇后，返回候选 [ListRow, ...]（最多 limit 条）。
     URL 形态抄自参考实现 `repos/auto_feed_js/auto_feed.user.js:4395`。
+
+    ★★ 2026-09-22 订正：**不再把"请求失败"和"真的搜不到"混成同一个空列表**。
+      原先的实现是：
+          if r.status_code != 200: return []      # ← 失败也返回 []
+          ...
+          return rows[:limit]                     # ← 搜不到也返回 []
+      两者都返回 `[]` ⇒ 调用方只能报「验了 0 个候选」，
+      **分不清是"皇后上没这条"还是"我们被拒了"**（本项目最忌讳的形状：
+      把失败当成功/把两种事混成一种，见 `SUMMARY §6`）。
+      ★ 而这两件事的**处置完全相反**：搜不到 ⇒ 这条种子**别再来搜了**（熔断，
+        省配额）；请求失败 ⇒ **下轮还要重试**（熔断会让漏抓永久化）。
+
+    ★ 失败一律用**异常**表达（`RuntimeError`），让调用方**无法**默默忽略：
+      · HTTP != 200  ⇒ 抛（带状态码）
+      · 网络异常      ⇒ 由 `client.get()` 抛出（`requests` 的异常直接冒上来）
+      ★ 不用返回值表达失败，是因为空列表是个**合法**结果（真的没搜到），
+        用同一个值表示两种含义就必然重演上面那个 bug。
+
+    `on_error`：可选的诊断回调 `on_error(kind, detail)`，`kind` 取
+      `"http"` / `"net"`。★ 加上它是为了让**调用方**能按普通流程记日志+计数，
+      而不必"抛了再抓"（异常用于强制注意，回调用于记录，两者不冲突）。
     """
-    r = client.get("/torrents.php", **{
-        "incldead": 0, "spstate": 0, "inclbookmarked": 0,
-        "search": name, "search_area": 0, "search_mode": 0,
-    })
+    try:
+        r = client.get("/torrents.php", **{
+            "incldead": 0, "spstate": 0, "inclbookmarked": 0,
+            "search": name, "search_area": 0, "search_mode": 0,
+        })
+    except Exception as e:                       # 网络层失败（超时/连接被拒/TLS…）
+        if on_error:
+            on_error("net", L.brief(e))
+        raise RuntimeError(f"搜索请求失败（网络）: {L.brief(e)}") from e
+
     if r.status_code != 200:
-        return []
+        if on_error:
+            on_error("http", f"HTTP {r.status_code}")
+        raise RuntimeError(f"搜索请求失败（HTTP {r.status_code}）")
+
     rows = opencd_parse.parse_list(r.text)
     return rows[:limit]
 
 
-def match_by_name(client, qb_name, want_hash, *, max_candidates=5):
+# 匹配结果的三态 —— ★ 与"0 命中熔断"配对使用，别把后两个混起来：
+#   MATCH_OK     找到并验过 infohash（tid 非空）
+#   MATCH_ZERO   搜索**成功**、但皇后上**没有**候选 ⇒ 这条别再搜了（熔断）
+#   MATCH_ERROR  搜索**失败**（HTTP/网络）⇒ 下轮**该重试**，不许熔断
+MATCH_OK = "ok"
+MATCH_ZERO = "zero"
+MATCH_ERROR = "error"
+
+
+def match_by_name(client, qb_name, want_hash, *, max_candidates=5, on_error=None):
     """
     用名字搜候选、逐个进详情页验 infohash，直到命中。
-    返回 (tid, rows_checked) 或 (None, rows_checked)。
+    返回 `(tid, rows_checked, status)`：
+
+      · 命中          ⇒ `(tid, n, MATCH_OK)`
+      · 搜到但都没命中 ⇒ `(None, n, MATCH_OK)`  ★ 注意：状态是 OK（搜索本身成功）
+      · 搜索返回 0 候选 ⇒ `(None, 0, MATCH_ZERO)` ← 可熔断
+      · 搜索请求失败    ⇒ `(None, 0, MATCH_ERROR)` ← **不可**熔断，要重试
 
     ★ **绝不取第一条** —— 同名不同格式的种子很常见（实测）。
+    ★★ 三态是 2026-09-22 加的：此前只有 `(tid, checked)`，调用方从
+      `checked == 0` 推断"没搜到"，但 `checked == 0` 同时意味着
+      「0 候选」和「第一个候选的详情页抓失败」和「搜索失败」——
+      三种情况的处置完全不同（熔断 / 重试 / 重试）。见 `search_candidates` 的注释。
     """
-    cands = search_candidates(client, qb_name, limit=max_candidates)
+    try:
+        cands = search_candidates(client, qb_name, limit=max_candidates,
+                                  on_error=on_error)
+    except RuntimeError:
+        return None, 0, MATCH_ERROR
+
     checked = 0
     for row in cands:
         tid = row["torrent_id"]
@@ -294,8 +397,13 @@ def match_by_name(client, qb_name, want_hash, *, max_candidates=5):
         checked += 1
         got = extract_infohash(html)
         if got and got == want_hash.lower():
-            return tid, checked
-    return None, checked
+            return tid, checked, MATCH_OK
+
+    # 走到这里：搜索成功（没抛异常），但没命中。
+    # ★ 区分「0 个候选」与「验了 n 个都没中」—— 前者是"皇后上没这条"，
+    #   后者是"有同名的但不是我们的 infohash"，处置都是"这条别再搜"，
+    #   但**日志和计数要分得开**（前者往往是 qB 名字格式不对，后者是真有同名版）。
+    return None, checked, (MATCH_ZERO if not cands else MATCH_OK)
 
 
 # ==================== 抓取 ====================
@@ -362,7 +470,10 @@ def run_from_qb(client, args):
 
     stats = {"matched": 0, "fetched": 0, "cached": 0, "denied": 0, "nomatch": 0,
              "failed": 0, "stored": 0, "not_seeded": 0, "no_log": 0,
-             "no_file": 0, "store_failed": 0}
+             "no_file": 0, "store_failed": 0,
+             # ★ 2026-09-22 新增：把"没命中"拆成两类（此前它们都是 nomatch）
+             "zero_cand": 0,      # 搜索成功但 0 候选 ⇒ 皇后上没这条 ⇒ 熔断
+             "search_err": 0}     # 搜索请求失败 ⇒ 下轮要重试 ⇒ **不**熔断
     pending = []
     # ★ 配额闸门提前收工（匹配阶段 或 抓取阶段）—— 与"没活了"必须分开计。
     #   不加这个的话，摘要里"本轮请求 20"与"待抓 0"看起来像"没事干"，
@@ -373,14 +484,29 @@ def run_from_qb(client, args):
         h = (t.hash or "").lower()
         name = t.name or ""
         try:
-            tid, checked = match_by_name(client, name, h, max_candidates=args.max_candidates)
+            tid, checked, mstat = match_by_name(
+                client, name, h, max_candidates=args.max_candidates)
         except opencd_rate.DailyQuotaExceeded as e:
             log(f"🛑 {e} —— 本轮提前收工（这是保护，不是错误）")
             quota_stopped = True
             break
+
+        if mstat == MATCH_ERROR:
+            # ★★ 搜索**请求失败** —— 这条**不熔断**（下轮还会重试）。
+            #   熔断它会把"今天网络抖了一下"变成"这条种子永远漏掉"。
+            stats["search_err"] += 1
+            log(f"  ❌ 搜索失败（下轮会重试，不熔断）：{L.brief(name)}")
+            continue
         if not tid:
-            stats["nomatch"] += 1
-            log(f"  ⚠️  未匹配到皇后条目：{L.brief(name)}（验了 {checked} 个候选）")
+            if mstat == MATCH_ZERO:
+                # ★★ 搜索**成功但 0 候选** —— 这是"皇后上没有这条"。
+                #   熔断：这条不再消耗后续请求。理由见下面那段注释。
+                stats["zero_cand"] += 1
+                log(f"  ⚠️  皇后上搜不到（0 个候选，本条熔断）：{L.brief(name)}")
+            else:
+                # 搜到了候选，但逐个验过 infohash 都不匹配（可能有同名的别的版本）
+                stats["nomatch"] += 1
+                log(f"  ⚠️  验了 {checked} 个候选，infohash 都不匹配：{L.brief(name)}")
             continue
         stats["matched"] += 1
 
@@ -391,8 +517,18 @@ def run_from_qb(client, args):
         #   `torrent_file_path`（发布必需的 .torrent）。放这里比事后重查省事。
         pending.append((tid, t))
 
-    log(f"🔍 匹配完成：命中 {stats['matched']} · 未命中 {stats['nomatch']} · "
+    log(f"🔍 匹配完成：命中 {stats['matched']} · 同名不匹配 {stats['nomatch']} · "
+        f"搜不到 {stats['zero_cand']} · 搜索失败 {stats['search_err']} · "
         f"已抓过 {stats['cached']} · 待抓 {len(pending)}")
+    # ★★ 「饿死」可见化（2026-09-22）：本轮请求预算被 __前 N 条__ 吃光时，
+    #   后面的种子**永远轮不到**（遍历顺序固定、无游标持久化）。
+    #   不报出来的话，表现是"跑了几天，raw_html 一直是 0"而**没有任何错误**
+    #   （用户 2026-09-22 实测：541 条、每轮 20 请求 ⇒ 第 21 条起重来没被搜过）。
+    #   ★ 这条日志是**诊断**，不是修复 —— 真修复要么改搜索策略（提高命中率、
+    #     降低每条消耗），要么引入游标。先把事实报出来，别再静默。
+    if len(pending) == 0 and client.gate.budget_left_round() == 0:
+        log(f"⚠️  本轮请求预算（{client.gate.max_per_round}）已用尽，"
+            f"qB 里还有种子**本轮没轮到**（遍历顺序固定 ⇒ 靠后的会被饿死）。")
 
     # 抓取待办
     for tid, t in pending:
@@ -454,7 +590,11 @@ def run_from_qb(client, args):
 
     L.summary(log, "crawl",
               命中=stats["matched"], 待抓=len(pending), 已抓=stats["fetched"],
-              禁转=stats["denied"], 未命中=stats["nomatch"], 失败=stats["failed"],
+              禁转=stats["denied"],
+              # ★ 2026-09-22：把原来笼统的「未命中」拆开 —— 它们的处置不同
+              #   （搜不到=熔断、搜索失败=重试），混成一个数就没法运维。
+              同名不匹配=stats["nomatch"], 搜不到=stats["zero_cand"],
+              搜索失败=stats["search_err"], 失败=stats["failed"],
               入库=stats["stored"], 未做种=stats["not_seeded"],
               无log=stats["no_log"], 缺种子文件=stats["no_file"],
               入库失败=stats["store_failed"],
@@ -467,6 +607,12 @@ def run_from_qb(client, args):
     elif quota_stopped:
         log("ℹ️  本轮被配额闸门提前收工 ⇒ 退出码 0（**保护不是错误**，"
             "记成失败会让 daemon 退避、反而跑得更少）")
+    # ★ 搜索失败单独提示，但它**不进退出码**（见 `_exit_code` 的注释：
+    #   它是"这一条没验成"，不是"本轮干不成活"；而且熔断逻辑已保证
+    #   不会因此反复消耗 —— 下轮自然会重试）。
+    if stats["search_err"]:
+        log(f"ℹ️  本轮有 {stats['search_err']} 条搜索请求失败（已标记重试、未熔断）"
+            f"⇒ **不影响退出码**；若持续出现，多半是 cookie 或站点限流。")
     return code
 
 
@@ -481,8 +627,20 @@ def run_manual(client, args):
       daemon 只看 `--from-qb` 那条路的退出码。
     """
     if args.search is not None:
-        rows = search_candidates(client, args.search, limit=args.max_candidates)
+        # ★ `search_candidates` 现在失败会**抛**（不再返回空列表当"搜不到"），
+        #   手工路要把它变成人话 + 一个能区分的退出码，否则 traceback 直接糊脸。
+        try:
+            rows = search_candidates(client, args.search, limit=args.max_candidates)
+        except RuntimeError as e:
+            log(f"❌ 搜索失败：{L.brief(e)}")
+            log("   （★ 这与「搜到 0 个候选」是两件事：那是「皇后上没这条」，"
+                "这是「请求没成功」）")
+            return 1
         log(f"🔍 搜「{args.search}」→ {len(rows)} 个候选（**只列候选，不抓**）")
+        if not rows:
+            log("   ⚠️ 0 个候选：皇后上搜不到这条。★ 最常见的原因是"
+                "**qB 的种子名格式与皇后标题不同**（qB 名字带 `[FLAC]`/`(年份)`"
+                " 这类后缀，而搜索是子串匹配）—— 换个更短的关键词再试。")
         L.detail(log, rows, lambda r: f"    id={r['torrent_id']} {L.brief(r['title'], 70)}")
         log("   ★ 候选**不能取第一条**：同名不同格式很常见，必须验 infohash")
         return 0
