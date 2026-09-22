@@ -197,7 +197,7 @@ def preflight(stages):
     log("")
     log("   请先确认 /data 指向的是那份真实的数据库：")
     log(f"     当前 DB_PATH = {config.DB_PATH}")
-    log("     docker compose run --rm musopia python check_db.py")
+    log("     docker compose run --rm tools python check_db.py")
     log("")
     log("   如果确实是全新部署、qB 里的种子都还没发过，再显式放行：")
     log("     ALLOW_EMPTY_DB=true")

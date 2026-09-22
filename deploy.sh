@@ -272,9 +272,15 @@ cat <<MSG
   cd <这个目录的 NAS 路径>            # 例: /volume2/docker_ssd/musopia_script2
   sudo docker compose config --quiet && echo 'YAML OK'
   sudo docker compose up -d --build   # ★ 必须 up --build，不是 restart
-  sudo docker logs --tail=60 musopia
+  sudo docker logs --tail=60 opencd2musopia
 
 ★ 为什么不能 restart：代码是 COPY 进镜像的，restart 只重启容器，
   跑的还是**旧镜像里的旧代码**。改了代码没生效、日志里看不到新输出，
   九成是这个原因。
+
+★ 容器名是 `opencd2musopia`（compose 里 container_name 定死的）；project 名由
+  compose 文件顶层的 `name: opencd2musopia` 定死，**不靠目录名推断** ——
+  所以从哪个目录跑、加不加 -p，记账都是同一套（2026-09-22 踩过"清不掉/撞名"的坑）。
+★ 改 project 名换记账时，旧容器要显式删掉再 up：
+    sudo docker rm -f <旧容器名> && sudo docker compose up -d --build
 MSG

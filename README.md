@@ -57,7 +57,7 @@ qBittorrent(:3020, 分类 opencd)
 
 ```
 musopia_script2/                    # NAS 部署目录（compose 就放这里，./ 即指它）
-├─ docker-compose.yml        86 行  # musopia 常驻 + tools/once 一次性任务
+├─ docker-compose.yml        86 行  # opencd2musopia 常驻 + tools/once 一次性任务
 ├─ Dockerfile                32 行  # 代码 COPY 进镜像（不是 bind mount）
 ├─ .env                             # 站点 Cookie / qB 密码 / 图床 Key（唯一密钥来源，绝不进仓库）
 ├─ .env.example                     # 占位符模板（全是 changeme）
@@ -319,7 +319,7 @@ DRY_RUN=true docker compose --profile tools run --rm once
 docker compose up -d --build
 
 # 3. 观察
-docker compose logs -f musopia    # 或 docker logs -f musopia
+docker compose logs -f opencd2musopia    # 或 docker logs -f opencd2musopia
 docker compose ps                 # 看 healthy 状态
 ```
 
@@ -343,9 +343,9 @@ docker compose up -d --build      # ✅ 重新构建镜像并替换容器，新�
 ### 看日志
 
 ```bash
-docker logs -f musopia            # 容器名是 musopia（compose 里 container_name 定死的）
-docker logs --tail 100 musopia    # 只看最近 100 行
-docker compose logs -f musopia    # 等价写法
+docker logs -f opencd2musopia      # 容器名是 opencd2musopia（compose 里 container_name 定死的）
+docker logs --tail 100 opencd2musopia    # 只看最近 100 行
+docker compose logs -f opencd2musopia    # 等价写法
 ```
 
 `docker logs` 后面**必须跟容器名**，不带参数会报 `requires exactly 1 argument`。
@@ -447,7 +447,7 @@ docker compose --profile tools run --rm tools \
 docker compose build
 ```
 
-下面用 `tools` profile 的一次性容器，跑完即删（`--rm`），不影响常驻的 `musopia`：
+下面用 `tools` profile 的一次性容器，跑完即删（`--rm`），不影响常驻的 `opencd2musopia`：
 
 ```bash
 # ① 渲染/副标题单测（不连站点、不连 qB，最快）
@@ -579,14 +579,14 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 | `找不到 takeedit 表单` | 种子已被删除，或当前账号无编辑权限 |
 | 提示「无需修改」 | 站点内容已和本地一致，属正常（脚本可安全重复运行） |
 | 改了本地数据但 edit 阶段说没任务 | `--stale-only` 看 `updated_at`。注意 `save_task()` 只在**值真的变了**时才刷新它；手改库请自己带上 `updated_at=CURRENT_TIMESTAMP` |
-| **改了记录但页面迟迟不更新** | 有变更时 edit 应在 60s 内跟上。若长时间不动，看日志有没有 `⏸️ [edit] 本轮未推进`（卡在某条永远失败的记录上，如缺 takeedit 表单）；否则查 `docker compose logs musopia` 里 edit 阶段是否在报错（Cookie 失效会走指数退避） |
-| 容器 unhealthy | 心跳停了。`docker compose logs musopia` 看卡在哪个阶段 |
+| **改了记录但页面迟迟不更新** | 有变更时 edit 应在 60s 内跟上。若长时间不动，看日志有没有 `⏸️ [edit] 本轮未推进`（卡在某条永远失败的记录上，如缺 takeedit 表单）；否则查 `docker compose logs opencd2musopia` 里 edit 阶段是否在报错（Cookie 失效会走指数退避） |
+| 容器 unhealthy | 心跳停了。`docker compose logs opencd2musopia` 看卡在哪个阶段 |
 | 想立刻重跑某阶段 | 删掉 `daemon_state.json` 里对应的 `last_run`，或整个文件删掉重启 |
 | 改了代码但行为没变 | `restart` 不重新构建镜像。用 `docker compose up -d --build` |
 | **站点打回「請更正曲目列表，使其易於閱讀」** | 源 CUE 被**西欧单页码页**写坏（非 ASCII 字符整体变成 `.`），或码页不在 `LOG_ENCODINGS` 里、被兜底解成**私用区乱码**。先看本地 `tracklist` 是不是整片点号/乱码。`read_tracklist()` 已按**每份 CUE** 判退化并回退到音频文件名，见 **SUMMARY §11** |
 | **多碟页面出现两个同名 `CDx` 折叠块** | 有张碟的目录名不符合 `CD/DISC/DISK+数字`，补号与已有碟号撞了。已修（补号避开已占用编号），见 **SUMMARY §11.6** |
 | `database is locked` | 有别的进程在并发写库。检查是否有孤儿容器（`docker ps`），见「清理孤儿容器」 |
-| `docker logs` 报 requires exactly 1 argument | 后面要跟容器名：`docker logs -f musopia` |
+| `docker logs` 报 requires exactly 1 argument | 后面要跟容器名：`docker logs -f opencd2musopia` |
 
 ---
 
