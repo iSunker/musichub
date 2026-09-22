@@ -24,10 +24,9 @@ OpenCD（皇后）抓取层 —— ★ **本项目唯一主动访问别人站点
 
 ★ 2026-09-19 调整（用户要求）：每请求最小间隔 **2s → 120s**；
   每日上限 **300 → 50**（目标是「每天 50 个种子」，但闸门是**请求**量纲 —— 见下）。
-★★ 缺口（**未解决**）：真正的「每天 50 个种子」需要**跨轮持久**的计数，
-  而 `RateGate` 每进程新建 ⇒ `_count_day` 每轮归 0 ⇒ 当前的「每日」上限
-  实际是**每轮**上限。跨轮账本与真·种子配额留到「接调度 + 入库」那步一起做。
-  完整理由见 `opencd_rate.py` 模块头「已知缺口」。
+✅ 2026-09-22：**跨轮持久计数已接线** —— 主流程构造 `RateGate` 时传 `ledger=_DbLedger()`，
+  计数落在 `data.db` 的 `opencd_quota` 表里 ⇒ 「每日 50」从"每轮 50"变回**真的每日 50**。
+  ★ 剩下的量纲问题（请求 vs 种子）见 `opencd_rate.py` 模块头「已知缺口」①，**仍未解决**。
 
 ═══════════════════════════════════════════════════════════════════════════
 用法
@@ -36,7 +35,21 @@ OpenCD（皇后）抓取层 —— ★ **本项目唯一主动访问别人站点
     python crawl.py --tid 200610           # 主动抓：指定 id
     python crawl.py --url <详情页URL>       # 主动抓：指定 URL
     python crawl.py --search "齐秦"         # 主动抓：按名字搜（只列候选，不抓）
-    python crawl.py --from-qb --dry-run    # 只列会抓哪些，不发请求（除必要匹配）
+    python crawl.py --from-qb --dry-run    # 只列会抓哪些，不发请求（★ 见下）
+
+★★ 关于 `--dry-run` 的**准确**语义（2026-09-22 修）：
+    原 docstring 写的是"不发请求"，而**实测不是** —— 待抓循环里的
+    `fetch_detail()` 没有任何 dry-run 保护，于是"只列会抓哪些"的演练会
+    **真的把每个待抓详情页都敲一遍**（`ERR-META-01` 的形状：说的和做的不一样）。
+    现在已修，语义是：
+      · **不发**详情页请求（`fetch_detail` 那条路整条跳过）
+      · **不发**入库写入（`client.dry_run` 已有保护）
+      · ⚠️ **仍会发 1 次 cookie 探活**（`GET /torrents.php`）+ 匹配阶段的搜索/验证请求
+        ⇒ 留这两处是**刻意的**：没有它们就分不清"cookie 死了"与"dry-run 在正常跳过"，
+          而匹配请求本来就是 dry-run 想让你**看到**的东西（"会抓哪些"要靠匹配得出）。
+          一轮的量在预算内（1 次探活），且量纲仍走 `RateGate`。
+      ★ 判据见 `tools/opencd-crawl-selftest.py` 判据⑧（dry-run 下详情页命中 **0**、
+        而匹配阶段命中 **> 0**）。
 """
 import argparse
 import json
@@ -49,6 +62,7 @@ from datetime import datetime
 import requests
 
 import config
+import db
 import opencd_ingest
 import opencd_log as L
 import opencd_parse
@@ -59,6 +73,67 @@ sys.stdout.reconfigure(encoding="utf-8")
 # 落盘目录（★ 解析层永远读它，不重复请求 —— 这是"抓取与解析解耦"的落地）
 RAW_DIR = os.getenv("OPENCD_RAW_DIR", os.path.join(config.DATA_DIR, "raw_html"))
 
+
+# ==================== 配额账本适配器 ====================
+
+class _DbLedger:
+    """
+    把 `db.ledger_get/ledger_add` 适配成 `RateGate` 要的鸭子类型接口。
+
+    ★ 为什么适配器在这里、不在 `opencd_rate.py`：
+      `opencd_rate.py` 刻意保持**零项目内依赖**（只 import stdlib），这样它的
+      闸门逻辑能被脱离 `.env`/`DATA_DIR` 单独测（`python opencd_rate.py --selftest`）。
+      在那边 `import db` 会把 `config.require_env(...)` 的副作用（缺 .env 直接
+      `sys.exit`）带进去 ⇒ 那条自检就再也跑不起来了。
+    ★ 为什么不在 `db.py` 里直接做成一个类：`db.py` 是**纯数据层**，不该知道
+      `RateGate` 的接口长什么样。放这里 = 依赖方向正确（crawl 同时知道两边）。
+    """
+
+    def __init__(self, kind=db.LEDGER_KIND_REQUEST):
+        self.kind = kind
+
+    def get(self, day_key):
+        return db.ledger_get(day_key, kind=self.kind)
+
+    def add(self, day_key, delta=1):
+        return db.ledger_add(day_key, delta=delta, kind=self.kind)
+
+
+# ==================== 退出码（★ 抽成纯函数是为了能穷举测）====================
+#
+# ★★ 为什么必须说真话：daemon 判断阶段成败**只看退出码**（`run_stage` 那段），
+#   于是"失败却返回 0"会**静默地废掉指数退避** —— 站点被按常规周期反复敲，
+#   而日志上一切正常（`SUMMARY §3.17`）。
+#   `run_from_qb` 原先**总是返回 0**（连 `store_failed > 0` 也是），这就是那个形状。
+#
+# ★ 为什么抽成纯函数：真值表要能**两个方向**都断言（该返 1 的真返 1、
+#   该返 0 的**不能**返 1）。写成内联的 `return 1` 也能让"该返 1"那条过，
+#   必须能把"不该返 1"也测出来，所以参数化。
+
+def _exit_code(stats, *, quota_hit=False):
+    """
+    本轮 crawl 的退出码。真值表见 `tools/opencd-crawl-selftest.py` 判据⑬。
+
+    | 情况 | 退出码 | 理由 |
+    |---|---|---|
+    | `store_failed > 0`（入库失败）| **1** | 重试有意义；静默就是 §3.17 那个形状 |
+    | `failed > 0`（详情页抓取失败）| **1** | 网络/HTTP 失败，下轮还会 pending |
+    | 配额用尽（`quota_hit`）| **0** | ★ **闸门在保护，不是错误** |
+    | 其余（没活 / 全部 NOT_SEEDED）| **0** | "没事干" ≠ "失败" |
+
+    ★★ `quota_hit` 判 0 是本函数最要紧的一条：配额用尽时返回 1 会让 daemon 记
+      "连续失败"并**指数退避** —— 于是次日配额一恢复，daemon 反而在退避期里
+      按更长的周期跑，把用户要的"每天 50"变成远低于 50。**把保护当故障**，
+      方向正好反了。
+    ★ 登录失败 / qB 不可达：调用方**直接 return 1**（不经过本函数）—— 那两条
+      在 `run_from_qb` 里是 `check_login()` / `qb_torrents()` 的早退，与 stats 无关。
+    """
+    if stats.get("store_failed", 0) > 0:
+        return 1
+    if stats.get("failed", 0) > 0:
+        return 1
+    return 0
+
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
@@ -67,8 +142,9 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 # ★★ 量纲警告：`OPENCD_MAX_PER_DAY` 是**请求**量纲，用户要的是「每天最多 **50 个种子**」
 #    （一种子 ≈ 2~3 请求：搜索 1 + 验候选 1~5 + 详情页 0~1）。
 #    取 50 即**把请求上限压到种子数之下** —— 结果是偏保守（实际约 17~25 种子/天），
-#    而不是超量。★ 想真正按种子卡，需要跨轮持久的账本，那是「接调度 + 入库」那步的事
-#    （缺口详见 `opencd_rate.py` 模块头「已知缺口」，**别读成已解决**）。
+#    而不是超量。★ 「跨轮持久」那半步 2026-09-22 已做完（账本，见 `_DbLedger`），
+#    但**量纲仍是请求** —— 想按种子卡要在入库那步记 kind='seed'（见 `opencd_rate.py`
+#    模块头「已知缺口」①，**别读成已解决**）。
 DEFAULT_MAX_PER_ROUND = int(os.getenv("OPENCD_MAX_PER_ROUND", "20"))
 DEFAULT_MIN_INTERVAL = float(os.getenv("OPENCD_MIN_INTERVAL", "120"))
 DEFAULT_MAX_PER_DAY = int(os.getenv("OPENCD_MAX_PER_DAY", "50"))
@@ -288,6 +364,10 @@ def run_from_qb(client, args):
              "failed": 0, "stored": 0, "not_seeded": 0, "no_log": 0,
              "no_file": 0, "store_failed": 0}
     pending = []
+    # ★ 配额闸门提前收工（匹配阶段 或 抓取阶段）—— 与"没活了"必须分开计。
+    #   不加这个的话，摘要里"本轮请求 20"与"待抓 0"看起来像"没事干"，
+    #   而真相是"被自己的每日上限拦住了"（运维上完全不同的两件事）。
+    quota_stopped = False
 
     for t in torrents:
         h = (t.hash or "").lower()
@@ -296,6 +376,7 @@ def run_from_qb(client, args):
             tid, checked = match_by_name(client, name, h, max_candidates=args.max_candidates)
         except opencd_rate.DailyQuotaExceeded as e:
             log(f"🛑 {e} —— 本轮提前收工（这是保护，不是错误）")
+            quota_stopped = True
             break
         if not tid:
             stats["nomatch"] += 1
@@ -316,10 +397,19 @@ def run_from_qb(client, args):
     # 抓取待办
     for tid, t in pending:
         name = t.name or ""
+        # ★★ dry-run 保护（2026-09-22 修）：原先这里**没有任何保护** ⇒
+        #    `--dry-run` 会把每个待抓详情页**真的抓一遍**，与 docstring 承诺的
+        #    "不发请求"矛盾（`ERR-META-01`：把失败/副作用当成功）。
+        #    ★ 写法照抄 `match_by_name()` 里那处已有分支，保持两处一致：
+        #      只打日志 + `continue`，不进 `fetch_detail()` 也就不会 `client.get()`。
+        if client.dry_run:
+            log(f"    [dry-run] 会抓详情页 id={tid}（{L.brief(name, 60)}）")
+            continue
         try:
             info, cached = fetch_detail(client, tid)
         except opencd_rate.DailyQuotaExceeded as e:
             log(f"🛑 {e} —— 本轮提前收工")
+            quota_stopped = True
             break
         except Exception as e:
             stats["failed"] += 1
@@ -368,12 +458,28 @@ def run_from_qb(client, args):
               入库=stats["stored"], 未做种=stats["not_seeded"],
               无log=stats["no_log"], 缺种子文件=stats["no_file"],
               入库失败=stats["store_failed"],
+              配额停=("是" if quota_stopped else "否"),
               本轮请求=client.gate.used_round, 当日请求=client.gate.used_day)
-    return 0
+    code = _exit_code(stats, quota_hit=quota_stopped)
+    if code:
+        log(f"⚠️  本轮有失败（抓取失败 {stats['failed']} · 入库失败 "
+            f"{stats['store_failed']}）⇒ 退出码 {code}，daemon 会按连续失败退避重试")
+    elif quota_stopped:
+        log("ℹ️  本轮被配额闸门提前收工 ⇒ 退出码 0（**保护不是错误**，"
+            "记成失败会让 daemon 退避、反而跑得更少）")
+    return code
 
 
 def run_manual(client, args):
-    """主动抓：--tid / --url / --search。"""
+    """
+    主动抓：--tid / --url / --search。
+
+    ★★ 退出码**故意不接 `_exit_code()`**（2026-09-22 注明，免得像疏漏）：
+      本路不由 daemon 驱动，**没有退避语义** —— 退出码只对"人和脚本"有意义。
+      改成返回 `_exit_code()` 会让手工跑一次失败反而打乱习惯（原本 0=成功、
+      1=入库失败、2=参数错），而收益是零（没人靠它退避）。
+      daemon 只看 `--from-qb` 那条路的退出码。
+    """
     if args.search is not None:
         rows = search_candidates(client, args.search, limit=args.max_candidates)
         log(f"🔍 搜「{args.search}」→ {len(rows)} 个候选（**只列候选，不抓**）")
@@ -448,24 +554,43 @@ def main():
     args = ap.parse_args()
 
     config.print_runtime_info()
+    # ★ 建表（幂等）—— 配额账本表必须在构造 gate 之前就存在，否则 gate 的
+    #   `ledger.get()` 会 OperationalError（`__init__` 里吞掉降级为 0，
+    #   但那样"每日上限"就悄悄失效了 —— 宁可在最前面显式建一次）。
+    db.init_db()
     os.makedirs(RAW_DIR, exist_ok=True)
     log(f"🗂️  OPENCD_RAW_DIR = {RAW_DIR}")
 
+    # ★★ 跨轮持久账本（2026-09-22）。`day_key` 用**本地日期**，与账本同口径
+    #    （`db.LEDGER_COLUMNS` 注释里有理由；**别改成 UTC**）。
+    day_key = time.strftime("%Y-%m-%d")
+    ledger = _DbLedger()
     gate = opencd_rate.RateGate(
         max_per_round=int(os.getenv("OPENCD_MAX_PER_ROUND", DEFAULT_MAX_PER_ROUND)),
         min_interval=float(os.getenv("OPENCD_MIN_INTERVAL", DEFAULT_MIN_INTERVAL)),
         max_per_day=int(os.getenv("OPENCD_MAX_PER_DAY", DEFAULT_MAX_PER_DAY)),
-        day_key=time.strftime("%Y-%m-%d"),
+        day_key=day_key,
         log=log,
+        ledger=ledger,
     )
+    # ★ 显式跨天检查：本进程的 day_key 与账本里的日期不同就按账本重载
+    #   （`roll_day` 在 `__init__` 之后调用才有意义 —— 构造时已按当天载入，
+    #    这里是为了"进程活着跨过零点"以及"手动重跑时对齐"这两种情况）。
+    #   ★ 正常路径（daemon 每轮新进程）下它是个 no-op，但**契约承重**：
+    #     删掉它，"跨天"就只剩构造那一刻的语义，再也无法在长跑进程里纠正。
+    gate.roll_day(day_key)
+
     log(f"⏱️  频率：每轮 {gate.max_per_round} 个请求 · 最小间隔 {gate.min_interval:g}s · "
         f"每日上限 {gate.max_per_day}（★ **请求**量纲）")
     # ★ 显式打出「用户要的是 50 个种子」与其真实的保守含义 —— 免得日志里
     #   `每日上限 50` 被读成「每天 50 个种子已经做到了」（那是量纲混淆）。
     log(f"   ★ 目标：每天最多 50 个**种子**（一种子 ≈ 2~3 请求）⇒ 折合约 "
         f"{gate.max_per_day // 3}~{gate.max_per_day // 2} 个种子/天。")
-    log(f"   ⚠️  且当前 `_count_day` **每轮归 0**（RateGate 每进程新建）"
-        f"⇒ 这个「每日」上限实际退化成「每轮」上限，跨轮持久配额待接调度那步再做。")
+    # ★ 这两行原先写的是"每轮归 0 / 每日上限退化成每轮上限"—— 现在**已经是假的**，
+    #   留着会让运维误判（`ERR-META-04`：改了行为却不改文档）。改成报账本的真实状态。
+    log(f"   ✅ 跨轮持久已启用：当日已用 {gate.used_day}/{gate.max_per_day}（账本 "
+        f"data.db:{db.LEDGER_TABLE} day_key={day_key}）⇒ 这是**真的**每日上限。")
+    log(f"   ⚠️  量纲仍是**请求**（不是种子）—— 见 opencd_rate.py 模块头「已知缺口」①。")
 
     client = Client(gate=gate, dry_run=args.dry_run)
     if not client.cookie:

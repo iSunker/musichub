@@ -1,10 +1,13 @@
 """
-容器化编排器：常驻进程，按各自周期依次调度 scan / publish / sync / covers / edit。
+容器化编排器：常驻进程，按各自周期依次调度
+scan / publish / sync / covers / edit / crawl。
 
 为什么不用 cron：
-1. 这五个阶段有严格的先后依赖（先扫出种子才有东西可发，先回填 ID 才能编辑），
+1. 这些阶段有严格的先后依赖（先扫出种子才有东西可发，先回填 ID 才能编辑），
    cron 各自定时会出现"发布还没跑完就开始编辑"的交叉执行，两个进程同时写
    同一个 SQLite 就会 database is locked。这里串行调度，天然互斥。
+   ★ 例外：crawl（扫 qB 反查皇后）与上面五个是**两条独立流水线**，只共用
+     `tasks` 表、不互为前置 —— 它默认还是关的（`ENABLE_CRAWL=false`）。
 2. cron 在容器里还得额外解决 PID 1、环境变量继承、日志重定向三个老问题。
 
 设计要点：
@@ -153,6 +156,47 @@ def build_stages():
             "cooldown": env_int("EDIT_COOLDOWN", 60),
         })
 
+    # 6) 从 qB 反查皇后（OpenCD），抓新种子的详情页并入库。
+    #    ★ 与 scan 是**两条独立流水线**，只共用 `tasks` 表，互不阻塞
+    #      ⇒ 放最后纯粹因为它是新增的、**最可能被关掉**的那个，与依赖无关。
+    #    ★★ 它**不会**导致任何新发布：`crawl.py` 刻意传 `qb_seed_days=None`
+    #      ⇒ 每行落 `NOT_SEEDED` ⇒ 而发布队列要求 `status='SUCCESS'`
+    #      （见 `db.PENDING_PUBLISH_WHERE`）⇒ 一条都进不去。这是**刻意的**，
+    #      不是没做完（闸门①的纪律是「宁可晚抓，不可早发」，理由见 `crawl.py`）。
+    #    ★ 为什么默认关（`ENABLE_CRAWL` 默认 **False**）：它是**第一个会主动
+    #      出网访问别人站点**的阶段。默认关 = 升级镜像不会改变对外行为，
+    #      要开必须显式加一行 .env。安全默认。
+    if env_bool("ENABLE_CRAWL", False):
+        cmd = ["python", "crawl.py", "--from-qb"]
+        # ★★ dry-run 用**专用**变量 `OPENCD_CRAWL_DRY_RUN`（默认 **True**），
+        #    不复用上面那个 `DRY_RUN`，两个理由：
+        #    ① `DRY_RUN=false` 会**同时**打开 publish 与 edit 的写操作
+        #       （见 `apply_flag`），而"我想抓皇后页面"与"我想往 Musopia 发种"
+        #       是**两个站、两个风险面**，必须各自可控；
+        #    ② 极性相反：`DRY_RUN` 默认 false（=写），而 crawl 要求默认 true
+        #       （=不写，"部署时先观察"），一个变量不可能有两个默认值。
+        #    ★ 顺带：所以这里**不能用 `apply_flag`**（它是 opt-out 语义：
+        #      DRY_RUN=true 时把 flag 摘掉）；crawl 的 `--dry-run` 是 opt-in，
+        #      要**加**上去。别为了"统一"改成 apply_flag，那会正好反过来。
+        if env_bool("OPENCD_CRAWL_DRY_RUN", True):
+            cmd.append("--dry-run")
+        stages.append({
+            "name": "crawl",
+            "cmd": cmd,
+            # ★ 1800s（与 scan 同周期；用户 2026-09-22 定，从原定 300s 改来）。
+            #   为什么从 300 改到 1800：300s 下每天 ~288 轮，而每日请求上限只有
+            #   50 ⇒ 配额**每轮都用不完就撞日上限**，`roll_day` 与账本变成装饰；
+            #   1800s 下每天 ~48 轮，「每天 50 请求」才成为**真正的紧约束**。
+            "interval": env_int("CRAWL_INTERVAL", 1800),
+            # ★★ **故意不加 `pending` 探针**（别的短周期阶段都有）。
+            #    探针的用途是"有积压就比周期跑得更勤"，但 crawl 的积压信号
+            #    （qB 里出现了新种子）**在调度进程里看不到** —— 要么把
+            #    `qbittorrentapi` 引进调度器（重依赖 + 每 30s tick 就问一次），
+            #    要么猜。**更糟的是它有害**：配额用尽时 `pending` 会连续几小时
+            #    为 >0 ⇒ 每 `cooldown` 秒敲一次皇后的 **cookie 探活** ——
+            #    正是 `_wait_seconds()` docstring 警告的"站点被悄悄敲得更勤"。
+            #    ⇒ 宁可用固定周期；"该不该跑"由周期决定，不由探针决定。
+        })
 
     return stages, dry_run
 

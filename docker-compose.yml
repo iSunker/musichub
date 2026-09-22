@@ -1,7 +1,9 @@
 # Musopia 全自动流水线。
 #
-# 一个常驻容器跑 daemon.py，按各自周期串行调度五个阶段：
-#   scan -> publish -> sync -> covers -> edit
+# 一个常驻容器跑 daemon.py，按各自周期串行调度六个阶段：
+#   scan -> publish -> sync -> covers -> edit -> crawl
+# （crawl = 扫 qB 反查皇后、抓详情页入库；★ 默认关闭，要开需 ENABLE_CRAWL=true。
+#  它只入库、**不会**产生新发布 —— 理由见 daemon.py 里 crawl 阶段那段注释。）
 # 其余 service 都带 profiles，平时不启动，只用于手动跑一次性命令。
 #
 # ★★ project 名**写死在这里**（顶层 `name:`），不靠目录名推断。
@@ -16,7 +18,7 @@
 name: opencd2musopia
 
 # 为什么是单容器而不是五个：
-#   五个阶段共用一个 SQLite，多容器各自定时会撞上并发写（database is locked），
+#   各阶段共用一个 SQLite，多容器各自定时会撞上并发写（database is locked），
 #   而且"发布还没跑完就开始编辑"这种交叉执行会读到半成品数据。
 #   daemon.py 串行调度天然规避了这两个问题。
 

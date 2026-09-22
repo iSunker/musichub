@@ -253,10 +253,10 @@ URL 抠回来**（回写本地库修复历史数据），再渲染新简介提�
 > 第 ③ 条其实是前两条漏洞的历史补救：本地 `cover_url` 曾被旧版 bug 抹空，
 > 现在能从站点页面找回并回写库。
 
-### 3.10 单容器 + 自研调度，而不是五个 cron
+### 3.10 单容器 + 自研调度，而不是几个 cron
 
 **错在哪**：早期按服务拆分成 `musopia_publish` / `musopia_scan` 等多个容器，各自定时。
-五个阶段**共用一个 SQLite**，多容器各自定时必然出现并发写（`database is locked`），
+各阶段**共用一个 SQLite**，多容器各自定时必然出现并发写（`database is locked`），
 还会「发布还没跑完就开始编辑」，读到半成品数据。
 
 **现在**：`daemon.py` 单容器**串行**调度 `scan → publish → sync → covers → edit`。
@@ -321,7 +321,7 @@ URL 抠回来**（回写本地库修复历史数据），再渲染新简介提�
 这个延迟的直接后果，就是「想立刻生效只能手动开一次性容器」
 （`docker compose --profile tools run --rm tools python run.py --recheck` 再补一条 edit）。
 而**手动开容器正是这一轮数据风险的入口**：临时容器与常驻进程并发写同一个 SQLite，
-`up -d` 一旦把常驻的 `musopia` 带起来，五个阶段会一起跑。
+`up -d` 一旦把常驻的 `opencd2musopia` 带起来，各阶段会一起跑。
 
 **现在**：daemon 每跑完一轮 edit 就问一次 `db.count_stale()`，用它决定下次多快再来：
 
@@ -499,7 +499,7 @@ ebbffcc  加 deploy.sh：本地 → NAS 的白名单同步              (2026-09
 ### 5.2 当前运行状态
 
 - NAS `<PROD-DIR>` 上常驻 `musopia` 容器，站点 ID 已回填。
-- `daemon_state.json` 记录五个阶段的 `last_run` / `last_ok`（全部 `true`）。
+- `daemon_state.json` 记录各阶段的 `last_run` / `last_ok`（全部 `true`）。
   最近一次落盘是 2026-09-09。
 - 本机 `<DEV-DIR>` 是**整目录复制**来的完整开发副本（含 `.git`、`data.db`、
   `output_torrents/`、真实的 `.env`）。
@@ -824,7 +824,7 @@ bash deploy.sh --apply             # ② 写入 NAS（自动备份）
 cd <PROD-DIR>
 sudo docker compose config --quiet && echo 'YAML OK'
 sudo docker compose up -d --build  # ★ 必须 up --build，不是 restart
-sudo docker logs --tail=60 musopia
+sudo docker logs --tail=60 opencd2musopia
 ```
 
 回滚：`bash deploy.sh --rollback`，然后同样在 NAS 上 `up -d --build`。
@@ -1134,8 +1134,8 @@ sudo docker compose --profile tools run --rm tools python /data/_probe_show.py
 排查（纯命令，可直接粘，★ 别在同一行混中文）：
 
 ```bash
-sudo docker ps --format '{{.Names}}\t{{.Status}}' | grep musopia
-sudo docker logs --tail=60 musopia
+sudo docker ps --format '{{.Names}}\t{{.Status}}' | grep opencd2musopia
+sudo docker logs --tail=60 opencd2musopia
 ```
 
 **② ★★ 发布判据失效 —— `iter_my_uploads()` 翻页是坏的**
@@ -1649,6 +1649,8 @@ python tools/opencd-crawl-selftest.py  # ⇒ 20/20（改的是映射层，应保
 **#13 `publish` 阶段在日志里一行都没有**（★ 2026-09-21 用户贴入真实日志后新发现）
 
 **证据**（用户粘贴的 `sudo docker logs --tail=60 musopia`）：
+> ⚠️ 上面这条命令里的容器名是**当时**的名字（2026-09-22 已改名 `opencd2musopia`）。
+> 这是**历史记录**，按原样保留 —— 改引文等于篡改证据；现在要跑请用新名字。
 日志覆盖 `14:22:46`（covers 结束）→ `15:32:21`（scan 结束），
 **中间只出现 `covers` 与 `scan` 两个阶段，`publish` 一次都没有**。
 配合 `sudo docker ps` 的 `musopia Up 39 hours (healthy)`：
@@ -1751,20 +1753,31 @@ NAS compose 根目录 `_probe_publish.py` / `_probe_show.py` / `_probe_uploads.p
 
 ---
 
-### 🔵 进行中：OpenCD 转载流水线（2026-09-19 定稿 · **第 1、2 步已了结 · 第 3 步已落库**）
+### 🟢 进行中：OpenCD 转载流水线（2026-09-19 定稿 · **第 1~3 步已了结 · 第 3 步已接调度+入库**）
 
 > **进度**：第 1 步（解析器）、第 2 步（三态裁决）、第 3 步（抓取层）**代码已完成并落库**，
-> `--selftest` **62/62 项通过**（纯离线，零请求）。
+> `--selftest` **71/71 项通过**（纯离线，零请求；另有 `opencd_rate` 21/21）。
 > ★ 第 3 步的产物是 `crawl.py` / `opencd_rate.py` / `opencd_log.py` +
-> `tools/opencd-crawl-selftest.py`（**离线自检 20/20**，用本地 mock 皇后，
+> `tools/opencd-crawl-selftest.py`（**离线自检 41/41**，用本地 mock 皇后，
 > 全程不碰外网）。`Dockerfile` / `deploy.sh` 白名单已同步。
-> ★★ **但第 3 步还没「接上」**：`daemon.py` 的 `build_stages()` 里**没有 crawl 阶段**
-> （`grep crawl daemon.py` 零命中），也没有入库 —— 抓到的数据**只落盘 `raw_html/`，
-> 不进 `data.db`**。所以它是「能手工跑、还没进调度」的状态。
+> ✅ **2026-09-22：第 3 步已「接上」**（本项曾长期停在最后一米）：
+>   - `daemon.py` 的 `build_stages()` 里**已加 `crawl` 阶段**
+>     （`grep crawl daemon.py` 已命中）—— 由 `ENABLE_CRAWL` 控制，★ **默认 false**。
+>   - **已入库**：`crawl.py` 调 `opencd_ingest.ingest(...)`，解析结果进 `data.db`
+>     的 `opencd_*` 列（此前抓到的数据**只落盘 `raw_html/`，直接丢掉**）。
+>   - **跨轮持久配额账本**已落地（`data.db` 新表 `opencd_quota`，见 `db.ledger_*`）
+>     ⇒ `opencd_rate.roll_day()` / `reset_round()` **不再是死代码**，
+>     「每日 50」从「每轮 50」变回**真的每日 50**（量纲仍是请求，见下）。
+>   - **退出码说真话**：新增纯函数 `crawl._exit_code()`（抓取/入库失败 ⇒ 1；
+>     配额用尽 ⇒ **0**，因为那是保护不是错误）。此前 `run_from_qb` **总是返回 0**，
+>     静默废掉了 daemon 的指数退避。
+>   - **dry-run 漏洞已修**：此前 `--dry-run` 仍会把每个待抓详情页**真的抓一遍**。
+>   ★★ **但它不会产生任何新发布**（刻意的）：`crawl.py` 传 `qb_seed_days=None`
+>     ⇒ 每行落 `NOT_SEEDED` ⇒ 发布队列要求 `status='SUCCESS'` ⇒ 一条都进不去。
+>     闸门①纪律：**宁可晚抓，不可早发**。
 > **第 4 步（字段映射 → 渲染 → 发布）尚未开工**，完成度 0%。
-> ✅ **2026-09-19 已部署并复核**：这 9 个文件**已全部上线**（`deploy.sh --apply` +
-> `up -d --build`，见 §5.6）⇒ 本机与 NAS 逐字节一致。★ 抓取层仍是
-> 「能手工跑、还没进调度」的状态（那是**代码缺口**，与部署无关）。
+> ✅ **2026-09-19 已部署并复核**：那 9 个文件**已全部上线**（`deploy.sh --apply` +
+> `up -d --build`，见 §5.6）⇒ 本机与 NAS 逐字节一致。
 > ★ **2026-09-19 追加**：按用户要求调了抓取层限速（每请求 2s → **120s**、
 > 每日上限 300 → **50**）—— **只改参数、不动机制**，所以「每天 50 个**种子**」
 > 仍是「每天 50 个**请求**」的近似（缺口见下面「限速」那段的 3 条边界）。
@@ -1874,9 +1887,19 @@ NAS compose 根目录 `_probe_publish.py` / `_probe_show.py` / `_probe_uploads.p
 9. **每日邮件通知**（用户要求）—— ★ **本轮只建代办，不落地**（方案待讨论）：
    - 内容至少含三类：**已发布** / **被跳过（`DUP_SITE` / `DENIED` / `NO_LOG`）** /
      **失败**。用户特别点名：**要包含哪些种子未含 log**。
+   - ★★ **2026-09-22 追加一类：`OPENCD_COOKIE` 失效**（用户要求「cookie 失效发邮件警告」）。
+     ★ 它天然属于这一类，**不要**单造一条 SMTP 通路 —— 那会引入新的凭据管理
+     （见上面「实现位置建议」与 `A.5` 纪律）。
+     ★ 本期未实现 SMTP，但 cookie 失效**不会静默**，有两道现成的观察点：
+       ① `crawl.py` 的 cookie 探活（`GET /torrents.php`，**只读、不登录**）失败
+          ⇒ `run_from_qb` 返回 1 ⇒ daemon 记**连续失败**并**指数退避**；
+       ② `daemon_state.json` 里 `crawl.last_ok` 会变 `false`，且每小时巡检会报出来。
+     ★ 落地时的实现位置：与「已发布/被跳过/失败」同一封邮件，**同一个 SMTP 配置**。
    - 待讨论：SMTP 用哪个邮箱、发给谁、什么时间发、主题格式、失败重试、是否要 HTML。
    - ★ 实现位置建议：`tools/` 下一个独立脚本 + daemon 加一个阶段（每日一次），
      **不要把 SMTP 凭据塞进 `.env` 之外的任何地方**（同 `A.5` 纪律）。
+     ⚠️ 注意 `tools/` 不在 `Dockerfile` 的 `COPY` 行里 ⇒ 该脚本若要跑在容器里，
+     **必须**同时加进 `Dockerfile` COPY 与 `deploy.sh` FILES（见 `ERR-DOCKER-05`）。
 
 #### 第 1 步 · 解析器 + 测试（纯离线，零请求，零风险）—— ✅ **已了结（2026-09-19）**
 
@@ -1946,7 +1969,7 @@ NAS compose 根目录 `_probe_publish.py` / `_probe_show.py` / `_probe_uploads.p
   实测一并覆盖：值改成认不出的串 / 值置空 / 简体「禁止转载」「欢迎转载」——
   **只有明确 ALLOW 才放行**，其余 5 种一律 `may_auto_publish() == False`。
 
-#### 第 3 步 · 抓取层（**这才开始碰站点**，限速在这里）—— ✅ **代码已落库 · ⚠️ 未接调度、未入库**
+#### 第 3 步 · 抓取层（**这才开始碰站点**，限速在这里）—— ✅ **已落库 · 已接调度 · 已入库**
 
 **前置：列表页解析已做完（2026-09-19）** —— 抓取层的入口，`--selftest` **56/56**。
 - 样本：`opencdhtml/sanitized/sample-listpage.html`（50 行）。
@@ -2247,7 +2270,7 @@ NAS compose 根目录 `_probe_publish.py` / `_probe_show.py` / `_probe_uploads.p
 
 1. **把 §3.16 的调度改动部署上去** —— 本机 `bash deploy.sh --apply`；NAS 上**手动**给 `.env`
    加 `EDIT_COOLDOWN=60`（该文件不在白名单）；再 `docker compose up -d --build`。
-   ⚠️ 该命令会让五个阶段**全部跑一遍**，发布/编辑会真的敲站点。
+   ⚠️ 该命令会让各阶段**全部跑一遍**，发布/编辑会真的敲站点。
 2. **剩余退化记录的页面修复（14725 / 14741 / 14856）** —— 前提是先跑一次
    `run.py --recheck` 把它们标脏，之后 §3.16 会让 daemon 自己跟上编辑。
    **但"跑一次 recheck"目前只有开一次性容器这一条路，而那条路已被否决** ——

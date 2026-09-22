@@ -81,9 +81,15 @@ grep -n '^## B\.' ENVIRONMENT.md
 
 | 容器名 | service | profile | 作用 |
 |---|---|---|---|
-| `musopia` | `musopia` | （无，常驻） | 跑 `daemon.py`，唯一长期运行的 |
+| `opencd2musopia` | `musopia` | （无，常驻） | 跑 `daemon.py`，唯一长期运行的。★ 2026-09-22 从 `musopia` 改名 |
 | `musopia_tools` | `tools` | `tools` | 手动一次性任务，`--rm` 跑完即删 |
 | `musopia_once` | `once` | `tools` | 跑一轮全部阶段就退出，配 `DRY_RUN=true` 演练 |
+
+> ★★ **project 名写死在 `docker-compose.yml` 顶层的 `name: opencd2musopia`**，
+> 不靠目录名推断。2026-09-22 踩过：容器曾以 `-p musopia` 起、而 `cd 目录 && compose down`
+> 算出的是 `musopia_script2` ⇒ 两个 project 互不认识 ⇒ `down` 报 "No resource found"、
+> `up` 撞上那个"不属于本 project"的同名容器 ⇒ **冲突死锁**。写死之后从机制上消失。
+> ★ 纪律：**改 project 名 = 换一套记账**，旧容器必须 `docker rm -f` 再 up。
 
 - 三个 service **共用同一个镜像** `musopia-script:latest`（compose 里 `x-common` 锚点定义的）。
 - `network_mode: "host"` —— 共享 NAS 宿主机网络栈。
@@ -161,6 +167,14 @@ grep -n '^## B\.' ENVIRONMENT.md
 | `DATA_DIR` | `/data` | 容器内状态目录 |
 | `QB_HOST` | `http://127.0.0.1:3020` | ★ compose 里还有一层兜底 `${QB_HOST:-…}`；**这一行要显式写**，见 `ERR-ENV-01` |
 | `OPENCD_CATEGORY` / `PUBLISH_CATEGORY` | `opencd` / `Musopia` | 分类名 |
+| `ENABLE_CRAWL` | `false` | ★ crawl 阶段总开关。**默认关**：它是唯一会主动访问别人站点的阶段 |
+| `OPENCD_CRAWL_DRY_RUN` | `true` | ★★ crawl **专用** dry-run，与上面 `DRY_RUN` **无关**（两个站、两个风险面；极性相反）|
+| `CRAWL_INTERVAL` | `1800` | crawl 周期。★ 见下面「调度时刻表」为什么不是 300 |
+| `OPENCD_COOKIE` | `changeme` | ★ 皇后的 Cookie（**不是** Musopia 的）。**只读 GET，从不用密码登录** |
+| `OPENCD_URL` | `https://open.cd` | 皇后地址 |
+| `OPENCD_MAX_PER_ROUND` | `20` | 每轮请求预算（**请求**量纲）|
+| `OPENCD_MIN_INTERVAL` | `120` | 两次请求最小间隔（**请求**量纲）|
+| `OPENCD_MAX_PER_DAY` | `50` | 当日请求上限（**请求**量纲，非种子数）—— 2026-09-22 起**真的**跨轮累计 |
 | `MUSIC_DIR` / `INCOMPLETE_DIR` | `/volume1/video/music` / `/volume2/qb_temp/temp_docker_opencd` | 宿主机路径，compose 里用到 |
 
 **四个真密钥**（只在 `.env`，`config.py` 用 `require_env()`，**缺失直接 `sys.exit`**）：
@@ -175,10 +189,35 @@ grep -n '^## B\.' ENVIRONMENT.md
 | `sync` | 86400s（24 h）| |
 | `covers` | 21600s（6 h）| |
 | `edit` | **有活 60s / 没活 21600s** | ★ backlog-driven：每轮跑完问一次 `db.count_stale()`，还有待办就按 `EDIT_COOLDOWN` 接着跑，清零才回长周期 |
+| `crawl` | 1800s（30 min）| ★ **默认关**（`ENABLE_CRAWL=false`）；唯一出网访问别人站点的阶段 |
 
-- 五阶段**串行**，由 `daemon.py` 单容器调度（为什么：见 A.4）。
-- ★ **重建容器 = 五阶段各跑一次**（`DRY_RUN=false` 且 state 文件里 `last_run` 全过期时）。
+- 六阶段**串行**，由 `daemon.py` 单容器调度（为什么：见 A.4）。
+  ★ `crawl` 与其余五个是**两条独立流水线**（只共用 `tasks` 表、不互为前置），
+    放最后只是因为它是新增的、最可能被关掉的那个 —— **与依赖无关**。
+- ★ **重建容器 = 各阶段各跑一次**（`DRY_RUN=false` 且 state 文件里 `last_run` 全过期时）。
   动手重建前先确认时机 —— 发布和编辑会真的敲站点。
+- ★★ **`ENABLE_CRAWL=false` 时，`once` profile 的演练（`docker compose run --rm once`）
+  *不会*跑 crawl** ⇒ 「我用 once 演练过了」这句话**对 crawl 不成立**（`ERR-META-02`：
+  验证手段覆盖不到被测对象）。要演练 crawl 得显式加 `ENABLE_CRAWL=true`
+  + 保持 `OPENCD_CRAWL_DRY_RUN=true`。
+
+### crawl 的两个「为什么不是直觉值」
+
+| 决定 | 值 | 理由 |
+|---|---|---|
+| 周期 | **1800s**（不是文档原定的 300）| 300s ⇒ 每天 ~288 轮，而每日请求上限只有 50 ⇒ **配额每轮都用不完就撞日上限**，账本与跨天逻辑退化成装饰。1800s ⇒ 每天 ~48 轮，「每天 50 请求」才是**紧约束**（用户 2026-09-22 定）|
+| dry-run 变量 | **专用** `OPENCD_CRAWL_DRY_RUN` | `DRY_RUN=false` 会**同时**打开 publish/edit 的写操作 —— 而"抓皇后页面"与"往 Musopia 发种"是**两个站、两个风险面**，必须各自可控；且极性相反（`DRY_RUN` 默认 false=写，crawl 要默认 true=不写），一个变量不可能有两个默认值 |
+
+- ★★ **crawl 不产生任何新发布**（不是没做完，是刻意的）：`crawl.py` 传
+  `qb_seed_days=None` ⇒ 每行落 `NOT_SEEDED` ⇒ 而发布队列要求 `status='SUCCESS'`
+  （见 `db.PENDING_PUBLISH_WHERE`）⇒ 一条都进不去。闸门①纪律：**宁可晚抓，不可早发**。
+- ★ **不设 `pending` 探针**（其余短周期阶段的调度都是探针驱动）：探针的用途是
+  "有积压就比周期跑得更勤"，而 crawl 的积压信号（qB 里出现新种子）在**调度进程里
+  看不到**；**更糟的是它有害** —— 配额用尽时 `pending>0` 会成立好几小时 ⇒
+  每 `cooldown` 秒敲一次皇后 cookie 探活 ⇒ 正是「站点被悄悄敲得更勤」。
+- ★ `crawl` 的运行证据三样：`raw_html/`（抓过的详情页）、`daemon_state.json` 里的
+  `crawl` 键、`data.db` 的 `opencd_quota` 表（配额账本）。**没有 `raw_html/`
+  ⇒ 一个详情页都没抓过。**
 
 ---
 
@@ -222,7 +261,7 @@ NAS iSunker-DS423（DSM 7.2）
 | 把本地代码送到 NAS | ✅ | `bash deploy.sh --apply`（白名单同步）|
 | **在 NAS 上执行命令** | ❌ **不能** | ★ **只能把命令打印给用户，由用户在 NAS 上跑** |
 | 重建/重启容器 | ❌ **不能** | 同上：`sudo docker compose up -d --build` |
-| 看容器日志 | ❌ **不能** | 同上：`sudo docker logs --tail=60 musopia` |
+| 看容器日志 | ❌ **不能** | 同上：`sudo docker logs --tail=60 opencd2musopia` |
 | 改 NAS 上的 `.env` | ❌ **不能** | 同上：在 DSM 里手工编辑 |
 
 ★ **由此产生的一条硬规矩**：**任何需要重建容器的改动，AI 只能「改文件 + 打印命令」，不能声称已完成。**
@@ -243,7 +282,7 @@ NAS iSunker-DS423（DSM 7.2）
 - **PicGo 图床**：封面图上传。
 - ★ **NAS 上不止本项目一个栈**。别的容器也在跑、也占磁盘、也可能在写 NAS。
   看到「磁盘在动」「文件在变」时，**先别默认是本项目干的**。
-- ★ **为什么是单容器 + 自研调度，而不是五个 cron**：五个阶段共用一个 SQLite，
+- ★ **为什么是单容器 + 自研调度，而不是几个 cron**：各阶段共用一个 SQLite，
   多容器各自定时必然并发写（`database is locked`），还会「发布没跑完就开始编辑」读到半成品。
   串行调度天然规避这两个问题（详见 README「为什么是单容器」、SUMMARY §3.10）。
 
@@ -274,9 +313,10 @@ NAS 上那份是生产配置；本机 `<DEV-DIR>/.env` 是 2026-09-13 整目录�
 
 ## A.7 时间节律与调度窗口
 
-- 五阶段周期见上面「调度时刻表」。**`scan` 每 30 分钟动一次 qB**。
+- 各阶段周期见上面「调度时刻表」。**`scan` 每 30 分钟动一次 qB**。
+- ★ `crawl` **默认关**（`ENABLE_CRAWL=false`）—— 上表里它那行只在显式打开后才有意义。
 - `edit` 是 backlog-driven：**有变更 60s 内就跟上，没变更按 6h**。
-- ★ **重建容器会把五阶段全部触发一次**（`RUN_ON_START=false` 只挡「启动立刻跑」，
+- ★ **重建容器会把各阶段全部触发一次**（`RUN_ON_START=false` 只挡「启动立刻跑」，
   挡不住「周期已过期」）。`publish` 会真的发最多 5 个种子、`edit` 会真的改页面。
   **重建前先确认时机。**
 - ★ 手动开一次性容器（`--profile tools run`）会与常驻 daemon **并发写同一个 SQLite**
@@ -889,7 +929,7 @@ NAS 上那份是生产配置；本机 `<DEV-DIR>/.env` 是 2026-09-13 整目录�
   2. ★ **判据：别把 `✅ Cookie 有效` 读成「写权限也在」。**
      要验写入能力，必须看**写操作本身**的响应，不能拿读探针顶替。
   3. 权限恢复后**先手工跑一条**（`tools` / `once` 容器，见 README）再交回定时。
-- **怎么发现的**：NAS 上 `sudo docker logs --tail=60 musopia`（SSH 未开，本机跑不了，见 `ERR-SMB-01`）。
+- **怎么发现的**：NAS 上 `sudo docker logs --tail=60 opencd2musopia`（SSH 未开，本机跑不了，见 `ERR-SMB-01`）。
   2026-09-14 16:19:14 那轮：`✅ Cookie 有效，user_id = 10427` →
   `[1/5]`~`[5/5]` 全部 `未拿到重定向 ID，HTTP 200` → `🎯 发布完成：成功 0 条，失败 5 条`。
   ★ 是**用户直接确认**根因，不是从日志推出来的 —— 日志只到"HTTP 200"为止。

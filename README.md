@@ -71,7 +71,7 @@ musopia_script2/                    # NAS 部署目录（compose 就放这里，
 ├─ update_metadata.py       264 行  # ★批量编辑已发布页面
 ├─ sync_site.py             119 行  # 回填 site_torrent_id（编辑的前置条件）
 ├─ backfill_covers.py       144 行  # 补历史缺失的封面
-├─ daemon.py                435 行  # ★单容器串行调度五个阶段
+├─ daemon.py                      # ★单容器串行调度六个阶段
 ├─ check_db.py               53 行  # 状态速览，排查问题先跑这个
 ├─ healthcheck.py            55 行  # 容器健康检查（读写心跳文件）
 ├─ deploy.sh                        # ★本地→NAS 白名单同步（开发工具，不上 NAS）
@@ -293,7 +293,7 @@ daemon 的 edit 阶段带 `--stale-only`，只处理
 
 ## Docker 全自动运行
 
-一个常驻容器跑 `daemon.py`，按各自周期**串行**调度五个阶段：
+一个常驻容器跑 `daemon.py`，按各自周期**串行**调度六个阶段：
 
 ```
 scan（扫 qB、抽元数据、做种）
@@ -305,7 +305,13 @@ sync（回填 site_torrent_id）
 covers（补历史缺失封面）
   ↓
 edit（改标题/副标题/简介，--stale-only 增量）
+  ↓
+crawl（扫 qB 反查皇后、抓详情页入库）★ 默认关（ENABLE_CRAWL=false）
 ```
+
+★ `crawl` 与上面五个是**两条独立流水线**（只共用 `tasks` 表、不互为前置），
+放最后只是因为它是新增的、最可能被关掉的那个 —— **与依赖无关**。
+它**只入库、不会产生新发布**（闸门①未打通，理由见下面「OpenCD 转载流水线」）。
 
 ### 部署
 
@@ -362,9 +368,9 @@ docker rm -f musopia_publish musopia_scan
 docker compose up -d --build --remove-orphans
 ```
 
-### 为什么是单容器 + 自研调度，而不是五个 cron
+### 为什么是单容器 + 自研调度，而不是几个 cron
 
-五个阶段共用一个 SQLite。多容器各自定时必然出现并发写（`database is locked`），
+各阶段共用一个 SQLite。多容器各自定时必然出现并发写（`database is locked`），
 还会「发布还没跑完就开始编辑」，读到半成品数据。串行调度天然规避这两个问题，
 顺带省掉 cron 在容器里的 PID 1 / 环境变量继承 / 日志重定向三个坑。
 
@@ -612,7 +618,8 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 > `deploy.sh --apply` 写入 NAS，并已 `up -d --build` 重建镜像、
 > **实测确认新代码生效**（库列数 17 → 22）。详见 **SUMMARY §5.4 / §5.5 / §5.6**。
 > ★ 两点仍不成立，别读成"什么都跟上了"：① `ENABLE_PUBLISH=false` **未恢复**；
-> ② `OPENCD_COOKIE` **仍未填**（crawl 未接调度，暂不需要）。
+> ② `OPENCD_COOKIE` 的状态**以 NAS 上那份 `.env` 为准**（crawl 已接调度，
+>    2026-09-22 起 `ENABLE_CRAWL=false` 默认关 ⇒ 不填也不会白跑一轮）。
 
 **✅ 已了结**：
 
@@ -668,23 +675,30 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
    一起同步过去（`cmp` 逐字节核过）。该条目的两条断言**都不成立**，故销掉。
    ★ 待修：那三处「白名单 = `Dockerfile` 的 `COPY` 行」的描述仍不准确
    （本文件 `:508`、`SUMMARY.md §10.2`）—— 归入第 5 条一并处理。
-5. **🔵 OpenCD 转载流水线（第 1、2 步已了结 · 第 3 步代码已落库、未接调度）。**
+5. **🟢 OpenCD 转载流水线（第 1~3 步已了结 · 抓取层**已接调度 + 已入库**）。**
    定时从 OpenCD（皇后）爬种子详情页 → 解析 → **合规裁决** → 映射字段 →
    渲染简介（★ 抓轨日志要转成折叠代码）→ 发布到 Musopia。
    ★ **计划与进度全在 `SUMMARY.md §12` 顶部**（九条决定 + 四个步骤 + 每步验收判据）。
-   - **已完成**：`opencd_parse.py` 解析 + 三态裁决，`--selftest` **62/62 通过**（纯离线）。
+   - **已完成**：`opencd_parse.py` 解析 + 三态裁决，`--selftest` **71/71 通过**（纯离线）。
      就地验：`python opencd_parse.py --selftest`
-   - **第 3 步（抓取层）代码已落库**：`crawl.py` / `opencd_rate.py` / `opencd_log.py`，
-     离线自检 `python tools/opencd-crawl-selftest.py` **20/20**（本地 mock 皇后，不碰外网）。
-     ★ **但还没接进 `daemon.py`，也没入库** —— 现在只能手工跑，抓到的数据只落盘
-     `raw_html/<tid>.html`，不进 `data.db`。**它还没开始自动敲站点。**
+   - **第 3 步（抓取层）已接进调度（2026-09-22）**：`crawl.py` / `opencd_rate.py` /
+     `opencd_log.py`，离线自检 `python tools/opencd-crawl-selftest.py` **41/41**
+     （本地 mock 皇后，不碰外网）。★ **已入库**（`opencd_ingest`），
+     且 daemon 里多了 `crawl` 阶段（`ENABLE_CRAWL`，★ **默认 false**）。
+   - ★★ **但它**不会**产生任何新发布**（刻意的，不是没做完）：`crawl.py` 传
+     `qb_seed_days=None` ⇒ 每行落 `NOT_SEEDED` ⇒ 而发布队列要求 `status='SUCCESS'`
+     ⇒ 一条都进不去。闸门①纪律：**宁可晚抓，不可早发**。
    - **限速（2026-09-19 调）**：每请求最小间隔 **120s**、每日上限 **50**（见 `.env.example`）。
-     ⚠️ **这两个旋钮都是「请求」量纲，不是「种子」** —— 用户要的「每天 50 个种子」
+     ⚠️ **两个旋钮都是「请求」量纲，不是「种子」** —— 用户要的「每天 50 个种子」
      目前只能**近似**成「每天 50 个请求」（一种子 ≈ 2~3 请求 ⇒ 实际约 17~25 种子/天，偏保守）。
-     ⚠️ 更要注意：`RateGate` 每轮新建 ⇒ 那个「每日」上限**实际退化成每轮上限**。
-     真·跨轮配额留到**接调度 + 入库**那步一起做（详见 `SUMMARY §12` 的「已知缺口」）。
-   - **下一步**：把抓取层接进调度 + 入库（那两个 3 天闸门 + 跨轮配额账本），
-     然后才是**第 4 步**（字段映射 → 渲染 → 发布，**全部默认 dry-run**）。
+     ✅ **2026-09-22 修**：`RateGate` 原先每轮新建 ⇒ 「每日」上限**退化成每轮上限**；
+     现在计数落在 `data.db` 的 `opencd_quota` 表（跨轮持久）⇒ 是**真的每日 50**。
+     ⚠️ 但量纲仍是**请求** —— 按种子卡要在入库那步记 `kind='seed'`，见 `SUMMARY §12`。
+   - **cookie 失效不会静默**：探活失败 ⇒ crawl 退出码 1 ⇒ daemon 指数退避；
+     `daemon_state.json` 里 `crawl.last_ok=false`，每小时巡检会报出来。
+     ★「发邮件告警」并入每日邮件待办（`SUMMARY §12` 决定 9），**本期不实现 SMTP**。
+   - **下一步**：**第 4 步**（字段映射 → 渲染 → 发布，**全部默认 dry-run**）+
+     打通闸门①（读 qB 的做种时长，需要先在 NAS 上实测 `qbittorrent-api` 的字段名）。
    - ★ 动手前必读：**转载规则是三态**（只有明确 ALLOW 才自动发布；
      ★ 且裁决**只认字段、不靠关键词兜底** —— 见 `SUMMARY §12` 第 2 步）、
      样本脱敏（`opencdhtml/` 默认忽略，只放行 `sanitized/`）。

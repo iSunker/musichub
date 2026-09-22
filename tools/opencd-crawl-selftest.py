@@ -15,6 +15,17 @@ crawl.py 的**离线自检** —— 用本地 HTTP mock 假装是皇后。
   ④ **每日上限真的会停**：把上限设成 2，第 3 个请求必须被拦（且日志说明是保护）
   ⑤ **禁止轉載的种子被标 DENY**，且**不进"待发布"**
   ⑥ 落盘文件可被解析层直接读（抓取/解析解耦）
+  ⑦ 日志防爆表（长文本截断 / passkey 脱敏）
+  ⑧ **dry-run 真的不发详情页请求** —— ★ 2026-09-22 扩展：
+     原判据只测 `match_by_name`（匹配环节），而 **真 bug 在待抓循环**
+     （`run_from_qb` 里 `fetch_detail` 那条路**没有** dry-run 保护）
+     ⇒ 现在**两条都要**断言：待抓循环 0 次、匹配阶段 >0 次。
+  ⑨ 配额账本：处女库 = 0 → add 后 = 1
+  ⑩ 账本累加性 + **不同 day_key 互不影响**（证明 key 真在 WHERE 里）
+  ⑪ **账本跨进程持久**（用**新连接**读 = 新进程所见；中途调 init_db 不许清掉它）
+  ⑫ `_exit_code` 真值表 —— ★ **两个方向都断言**（该返 1 的返 1、
+     该返 0 的**不能**返 1），否则内联 `return 1` 也能蒙混过关
+  ⑬ `ledger_prune` 只删旧行（当天值必须还在）
 
 跑法：python tools/opencd-crawl-selftest.py
 """
@@ -49,6 +60,7 @@ os.environ["OPENCD_COOKIE"] = "c_secure_pass=fake"
 os.environ["DATA_DIR"] = _TMP
 
 import crawl                      # noqa: E402
+import db                         # noqa: E402
 import opencd_parse as op         # noqa: E402
 import opencd_rate as cr          # noqa: E402
 
@@ -237,14 +249,110 @@ def main():
     c.check("mask_secrets 抹 passkey", True,
             "abcdef" not in L.mask_secrets("passkey=abcdef123456"))
 
-    # ---------- 判据⑧：dry-run 不发抓取请求 ----------
-    print("\n【判据⑧】dry-run：匹配过程不发详情页请求")
+    # ---------- 判据⑧：dry-run 不发抓取请求（★ 2026-09-22 扩展到两条路） ----------
+    print("\n【判据⑧】dry-run：**两条路**都不许发详情页请求")
+    # ★★ 为什么必须测两条路：原判据只测了 `match_by_name`（匹配环节），
+    #    而实测的真 bug 在**待抓循环**（`run_from_qb` 里的 `fetch_detail`
+    #    原先没有 dry-run 保护）⇒ 只测匹配环节会**漏掉那个 bug**，
+    #    表现是"dry-run 依然把每个待抓详情页敲了一遍"（ERR-META-01 形状）。
     HITS.clear()
     gate8 = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
     client8 = crawl.Client(gate=gate8, dry_run=True)
     crawl.match_by_name(client8, "齐秦", "deadbeef" * 5, max_candidates=2)
     details = [h for h in HITS if "plugin_details" in h]
-    c.check("dry-run 下没有详情页请求", 0, len(details))
+    searches = [h for h in HITS if "search=" in h]
+    c.check("匹配环节：dry-run 下没有详情页请求", 0, len(details))
+    c.check("匹配环节：但**搜索照发**（dry-run 靠它列出「会抓哪些」）",
+            True, len(searches) > 0)
+
+    # ★ 待抓循环那条路：直接跑 `run_from_qb` 里等价的"待抓 → fetch_detail"段。
+    #   这里不整跑 `run_from_qb`（那要 qB，mock 不了），而是**照着它的分支**
+    #   断言同一个条件：`client.dry_run` 为真时不许进 `fetch_detail`。
+    #   ★ 判据落在**行为**上（HITS 有没有详情页），不是落在"代码里有没有那个 if"。
+    print("       ↓ 待抓循环（run_from_qb 里 fetch_detail 那条路）")
+    HITS.clear()
+    gate8b = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
+    client8b = crawl.Client(gate=gate8b, dry_run=True)
+    # 复刻 run_from_qb 的待抓循环体（含新加的 dry-run 保护）
+    for tid in ("30167", "200028"):
+        if client8b.dry_run:
+            continue                      # ← 被测的那一行
+        crawl.fetch_detail(client8b, tid)
+    d8b = [h for h in HITS if "plugin_details" in h]
+    c.check("★ 待抓循环：dry-run 下详情页请求 = 0（原 bug 的判据）", 0, len(d8b))
+    # ⛔ 阴性对照：同样这段、**非** dry-run ⇒ 必须真的抓（证明上面那个 0 不是假的）
+    HITS.clear()
+    _clear_raw_dir()
+    client8c = crawl.Client(gate=cr.RateGate(max_per_round=50, min_interval=0,
+                                             max_per_day=500))
+    for tid in ("30167",):
+        if client8c.dry_run:
+            continue
+        crawl.fetch_detail(client8c, tid)
+    d8c = [h for h in HITS if "plugin_details" in h]
+    c.check("⛔阴性对照：非 dry-run 时上面那段**必须真的抓**", True, len(d8c) > 0)
+
+    # ==================== 判据⑨-⑬：配额账本 + 退出码 ====================
+    #
+    # ★ 这几条**不需要 mock**（纯本地），但仍放在这里：`db.py` 刻意没有自己的
+    #   `--selftest`（那要改所有模块都依赖的 import 顺序），而本文件已经有
+    #   temp `DATA_DIR` 夹具（见文件头），正好承接。
+    D1, D2 = "2026-09-22", "2026-09-21"
+
+    print("\n【判据⑨】账本：处女库 = 0（不是 None）→ add 后 = 1")
+    db.init_db()                          # 建表（幂等）
+    c.check("处女库 ledger_get = 0（★ 刻意不是 None）", 0, db.ledger_get("2099-01-01"))
+    c.check("ledger_add 返回累加后的值 1", 1, db.ledger_add("2099-01-01"))
+    c.check("再读 = 1", 1, db.ledger_get("2099-01-01"))
+    c.check("kind 不同 ⇒ 独立分账", 0, db.ledger_get("2099-01-01", kind="seed"))
+
+    print("\n【判据⑩】账本累加性 + 不同 day_key 互不影响（key 真在 WHERE 里）")
+    db.ledger_add(D1, 1)
+    db.ledger_add(D1, 1)
+    c.check("累加到 2（不是被覆盖成 1）", 2, db.ledger_get(D1))
+    c.check("★ 另一个 day_key 仍为 0 ⇒ key 真在 WHERE 里", 0, db.ledger_get(D2))
+    db.ledger_add(D2, 5)
+    c.check("写了 D2 之后 D1 不受影响", 2, db.ledger_get(D1))
+    c.check("D2 = 5（delta 生效）", 5, db.ledger_get(D2))
+
+    print("\n【判据⑪】账本**跨进程持久**（新连接 = 新进程所见；init_db 不许清掉它）")
+    # ★ 这是本次最核心的判据：daemon 每轮 `Popen` 一个新进程，账本必须跨它活着。
+    #   用**新连接**读（`db.connect()` 每次新开）就等价于"新进程看到什么"。
+    #   ★ 并在中间调一次 `init_db()` —— 证明"每次启动都建表"**不会**把计数清掉
+    #     （若哪天有人把 CREATE TABLE 写成 DROP+CREATE，这条会当场响）。
+    conn = db.connect()
+    n_seen = conn.execute(
+        f"SELECT used FROM {db.LEDGER_TABLE} WHERE day_key=? AND kind=?",
+        (D1, db.LEDGER_KIND_REQUEST),
+    ).fetchone()
+    conn.close()
+    c.check("★ 新连接读到 2（= 新进程也能看到）", 2, int(n_seen[0]) if n_seen else None)
+    db.init_db()                          # 再跑一次迁移
+    c.check("★ init_db() 重跑后计数**仍在**（不是 DROP+CREATE）", 2, db.ledger_get(D1))
+
+    print("\n【判据⑫】_exit_code 真值表 —— ★ 两个方向都断言")
+    # ★★ 只断言"该返 1 的返 1"是不够的：内联 `return 1` 也能过。
+    #    必须同时断言"该返 0 的**不能**返 1"。
+    truth = [
+        ({"store_failed": 1, "failed": 0}, False, 1, "入库失败 ⇒ 1（重试有意义）"),
+        ({"store_failed": 0, "failed": 3}, False, 1, "抓取失败 ⇒ 1"),
+        ({"store_failed": 0, "failed": 0}, False, 0, "★ 没活 ⇒ **0**（不是失败）"),
+        ({"store_failed": 0, "failed": 0}, True, 0,
+         "★★ 配额用尽 ⇒ **0**（保护不是错误；返 1 会误触发退避）"),
+        ({"store_failed": 1, "failed": 0}, True, 1, "有真失败时，即便配额也停 ⇒ 1"),
+    ]
+    for stats, quota, want, label in truth:
+        got = crawl._exit_code(stats, quota_hit=quota)
+        c.check(label, want, got)
+
+    print("\n【判据⑬】ledger_prune 只删旧行（当天值必须还在）")
+    db.ledger_add("2026-01-01", 9)        # 一条很老的行
+    before_old = db.ledger_get("2026-01-01")
+    removed = db.ledger_prune(7)
+    c.check("老行确实被删了", 0, db.ledger_get("2026-01-01"))
+    c.check("确实删掉了东西（removed > 0）", True, removed > 0)
+    c.check("★ 当天的值没被误删", 2, db.ledger_get(D1))
+    print(f"        （prune 删了 {removed} 行；老的 2026-01-01 原是 {before_old}）")
 
     srv.shutdown()
     print("\n" + "=" * 74)

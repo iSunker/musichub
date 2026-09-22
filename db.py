@@ -80,6 +80,43 @@ COLUMNS = [
 ]
 
 
+# ==================== 配额账本（跨轮持久）====================
+#
+# 为什么需要它：`opencd_rate.RateGate` 的「每日上限」原先**每轮归 0** ——
+#   daemon 每个周期用 `subprocess.Popen` 起一个**新进程**跑 crawl，而 gate 是
+#   进程内对象 ⇒ `_count_day` 随进程一起消失 ⇒ 那个「每日 50」实际是「每轮 20」。
+#   要让「每天 N 个请求」成为**真上限**，计数必须落在进程之外。
+#
+# ★ 为什么落在 `data.db` 而不是新开一个 JSON 文件：
+#   ① `init_db()` 已经是**唯一的幂等迁移点**（建表 + 补列），新表白拿一套；
+#      新文件则要重做一遍"建/迁移/原子写"。
+#   ② `deploy.sh` 的 `NEVER` 名单护着 `data.db`（不会被本地覆盖），
+#      新文件得再往名单里加一条 —— 而**漏加的那次是静默的**。
+#   ③ compose 已经把 `/data` bind mount 出来了，SMB 上直接可查可备份。
+#
+# ★ 为什么不并进 `tasks` 的某一列：它是**全局计数器**，不是"某行的属性"。
+#   没有 info_hash 可挂 —— 塞进 tasks 要么给 544 行各重复存一份、要么全 NULL，
+#   两种都不是"这个数字属于哪一行"能表达的关系。
+#
+# ★ 表再小也要独立：将来若要记「按 kind 分账」（如 `seed` 与 `request` 各一份），
+#   加一个 kind 值即可，不动任何已有列。
+LEDGER_TABLE = "opencd_quota"
+LEDGER_KIND_REQUEST = "request"          # 目前只有这一种；种子量纲的账将来加 kind
+LEDGER_COLUMNS = [
+    # ★★ `day_key` 是**本地日期字符串**（'YYYY-MM-DD'），**故意不是 UTC**。
+    #   用户的心里模型是"本地日历日"（跨零点就该重置），所以本地日才是对的口径。
+    #   ★ 而**存字符串**（不是 timestamp）就没东西可混 —— `ERR-SQL-03` 的教训是
+    #     两套时钟口径（库内 UTC / 日志 CST）混在一起得出"今晚没写入"的错结论。
+    #     这里从根上避免：是字符串，就没人会拿它去 `datetime('now')` 比。
+    #   ★ **不要**"顺手修正"成 UTC —— 那会让重置时刻与用户的日历对不上。
+    ("day_key", "TEXT NOT NULL"),
+    ("kind", "TEXT NOT NULL"),
+    ("used", "INTEGER NOT NULL DEFAULT 0"),
+    ("updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+]
+LEDGER_PK = "PRIMARY KEY (day_key, kind)"
+
+
 def connect():
     conn = sqlite3.connect(config.DB_PATH, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -110,6 +147,14 @@ def init_db():
 
     cur.execute("CREATE INDEX IF NOT EXISTS idx_tasks_site_id ON tasks(site_torrent_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status, site_status)")
+
+    # 配额账本（见上面 LEDGER_* 那一节的理由）。★ 与 tasks 同一个连接、同一次
+    # commit 建出来 —— daemon 启动时只调一次 init_db()，表就一定在。
+    _led_cols = ",\n            ".join(f"{n} {d}" for n, d in LEDGER_COLUMNS)
+    cur.execute(
+        f"CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (\n"
+        f"            {_led_cols},\n            {LEDGER_PK}\n        )"
+    )
 
     conn.commit()
     conn.close()
@@ -417,3 +462,87 @@ def stats():
     no_cover = cur.fetchone()[0]
     conn.close()
     return {"total": total, "groups": groups, "no_site_id": no_id, "no_cover": no_cover}
+
+
+# ==================== 配额账本（读写）====================
+#
+# 三个函数都是**无状态**的：每次自己开连接、自己关。理由同 save_task ——
+# 调用方是短命进程（每个 crawl 轮一个新进程），持有长连接只会留下没关的 WAL。
+
+def ledger_get(day_key, kind=LEDGER_KIND_REQUEST):
+    """
+    取某天某种用途的**已用**计数。★ **没有记录返回 0，不是 None**。
+
+    ★ 这个"返 0 而不是 None"是刻意的：调用方（`opencd_rate.RateGate` 构造）会拿它
+      直接当 `_count_day` 用。若返回 None，`_count_day` 就成了 None ⇒
+      `None >= max_per_day` 在 py3 里**抛 TypeError**（不是静默放假，算走运），
+      但更糟的是有的调用点写成 `used or 0`，那就把"查不到"和"真的是 0"混成一坨
+      （`SUMMARY §3.15`：缺值不留默认值，但**这里是"确实没有"= 0** 的正当语义）。
+    """
+    conn = connect()
+    row = conn.execute(
+        f"SELECT used FROM {LEDGER_TABLE} WHERE day_key = ? AND kind = ?",
+        (str(day_key), str(kind)),
+    ).fetchone()
+    conn.close()
+    return int(row[0]) if row else 0
+
+
+def ledger_add(day_key, delta=1, kind=LEDGER_KIND_REQUEST):
+    """
+    累加并返回**累加后**的值。
+
+    ★★ 必须是**单条原子 UPSERT**，不能"先 SELECT 再 UPDATE"：
+      后者中间留着窗口 —— 两个写者都读到 49、都写回 50，**等于白记一次**。
+      而配额少记一次 = 超出用户定的上限，正是这条流水线最不能出的错。
+      故用 `ON CONFLICT(day_key, kind) DO UPDATE SET used = used + excluded.used`，
+      **与 `save_task` 同一套写法**（那里也是靠 ON CONFLICT 保证原子）。
+    ★ 用 `used = used + excluded.used` 而不是 `= excluded.used` 是全部关键：
+      后者是**覆盖**，第一次写 1 之后再写就永远 1。
+    """
+    delta = int(delta)
+    conn = connect()
+    conn.execute(
+        f"INSERT INTO {LEDGER_TABLE} (day_key, kind, used) VALUES (?, ?, ?) "
+        f"ON CONFLICT(day_key, kind) DO UPDATE SET "
+        f"used = used + excluded.used, updated_at = CURRENT_TIMESTAMP",
+        (str(day_key), str(kind), delta),
+    )
+    conn.commit()
+    row = conn.execute(
+        f"SELECT used FROM {LEDGER_TABLE} WHERE day_key = ? AND kind = ?",
+        (str(day_key), str(kind)),
+    ).fetchone()
+    conn.close()
+    return int(row[0]) if row else 0
+
+
+def ledger_prune(keep_days=7, kind=None):
+    """
+    删掉**旧日期**的账本行，保留最近 `keep_days` 天（含今天）。返回删除行数。
+
+    ★ 为什么必须存在：账本一天一行，不清理就是无限增长 —— 虽然**极慢**
+      （一天一行、一年 365 行），但"永远不会自己停的增长"就是泄漏，
+      而这里清它的代价是零（旧日期的计数已经没人读了）。
+    ★★ **判据必须按字符串比较，不能按 timestamp**：`day_key` 是
+      `'YYYY-MM-DD'`，字典序 == 时间序（定长、零填充），所以
+      `day_key < '2026-09-15'` 就是"早于那天"，不需要任何日期解析 ——
+      一旦这里改成 `date(day_key) < ...` 就把"纯字符串"这个安全属性丢了。
+    ★ `kind=None` 表示所有 kind 一起清：调用方（crawl）不关心 kind，
+      漏传 kind 只清一半才是坑。
+    """
+    keep = max(1, int(keep_days))
+    conn = connect()
+    cutoff = conn.execute(
+        "SELECT date('now', 'localtime', ?)", (f"-{keep - 1} days",)
+    ).fetchone()[0]
+    sql = f"DELETE FROM {LEDGER_TABLE} WHERE day_key < ?"
+    params = [str(cutoff)]
+    if kind is not None:
+        sql += " AND kind = ?"
+        params.append(str(kind))
+    cur = conn.execute(sql, params)
+    n = cur.rowcount
+    conn.commit()
+    conn.close()
+    return int(n or 0)

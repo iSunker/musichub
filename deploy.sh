@@ -262,10 +262,17 @@ for s in "${CHANGED[@]}"; do
 done
 trap - EXIT
 
-cat <<MSG
-
-✓ 同步完成。备份: .deploy-backup/$STAMP  （回滚: bash deploy.sh --rollback）
-
+# ★ 引号版 heredoc（<<'MSG'）是刻意的：
+#   原先用 <<MSG，于是内容里的反引号被 shell 当**命令替换**执行了 ——
+#   实测把「容器名是 `opencd2musopia`」打成了「容器名是 」，名字**消失**，
+#   而那几行正是要给用户**粘到 NAS 上**的命令（★ 这正是"输出看着正常、
+#   内容已经错了"的形状 —— 比报错更危险）。引号版不展开任何东西，反引号就安全了。
+#   代价是 `$STAMP` 也不展开 ⇒ 那一行用 __STAMP__ 占位、单独打出来。
+#   ★ 别想着"把 heredoc 存进变量再替换"：`cat <<'MSG'` 是**直接写 stdout**的，
+#     不会赋给名为 MSG 的变量（`${MSG//…}` 会 unbound variable，已实测踩过）。
+echo "✓ 同步完成。备份: .deploy-backup/$STAMP  （回滚: bash deploy.sh --rollback）"
+echo
+cat <<'MSG'
 ────────────────────────────────────────────────────────────
 接下来在 **NAS 上**手动执行（脚本没法替你做，SSH 没开）：
 
