@@ -61,6 +61,9 @@ FILES=(
   opencd_map.py opencd_gate.py opencd_ingest.py cover_fetch.py
   topup_opencd_fields.py observe_custom_fields.py
   sync_opencd_tid.py readiness_probe.py qb_probe.py flip_status.py
+  # ★ 蟹黄堡站适配层（2026-09-24 加）—— publish.py 会 import 它，
+  #   不进白名单就是"跑到发蟹黄堡那一步才 ImportError"（本注释上方那条纪律的场景）。
+  crabpt_site.py
   Dockerfile docker-compose.yml
   .dockerignore
   README.md
