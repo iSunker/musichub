@@ -74,3 +74,18 @@ _preview/
 #   它是**运行时产物**、不是事实源：进版本库会让"某天的开关"升级成"事实"，
 #   而且本机那份会跟 NAS 上的真值漂开（同 tools/.nas_health_last.json 的理由）。
 daemon_env.json
+
+# ★★ tools/nas_health.py 的读数快照（--json 写）。
+#   2026-09-24 才补：上面那条纪律**早就把本文件当反面教材引用**，
+#   但**从没忽略它自己** —— 它一直被 git 跟踪（`git ls-files` 认它），
+#   于是"某天的心跳/条数读数"真的被提交成了"事实"：
+#   实测旧提交里躺着 heartbeat_alive=false / published=8，
+#   而那是**跑脚本那一刻**的瞬间值，不是任何结论。
+#   ★ 教训：写"X 的理由"时，要顺手确认 X 本身也被这条规则覆盖到 ——
+#     否则引用得越准，越像"已经处理过了"。
+#   ★ 与 tools/.baseline-*.json 同类（会变的读数），处置一致：不进仓库。
+tools/.nas_health_last.json
+
+# 一次性/判据留档（会变的数字与生产标题，不进仓库）
+tools/.baseline-*.json
+opencd_tid_backfill.json
