@@ -65,6 +65,13 @@ SNAPSHOT_MAX_AGE = 3600
 STAGE_ENABLE_KEY = {"scan": "ENABLE_SCAN", "publish": "ENABLE_PUBLISH",
                     "sync": "ENABLE_SYNC", "covers": "ENABLE_COVERS",
                     "edit": "ENABLE_EDIT", "crawl": "ENABLE_CRAWL"}
+# ★★ 自动发布的第二把钥匙（2026-09-24）。**必须与 `publish.AUTO_KEY_ENV` 同名** ——
+#    写死一处会漂（ERR-META-03）。这里不 import（本脚本刻意不依赖项目代码：
+#    它要在**本机**跑，而 `config` 缺密钥就 `sys.exit`，见 ERR-ENV-01 一族）。
+AUTO_KEY_ENV = "PUBLISH_I_AM_HERE"
+# ★ 约定值同样**必须与 `publish.AUTO_KEY_VALUE` 一致**。★ 判据是**字符串相等**，
+#   不是布尔真假 —— 把它按 `env_bool` 转会得到假 False（2026-09-24 实测踩过）。
+AUTO_KEY_VALUE = "i-am-here"
 
 
 def read_env_snapshot(dst=None):
@@ -72,6 +79,22 @@ def read_env_snapshot(dst=None):
 
     ★ 判"真假"的口径**照抄 `daemon.env_bool`**（`strip().lower() in ("1","true","yes","on")`），
       只有一处实现错误的地方就全错，所以这里宁可多写一行也不"差不多就行"。
+    ★★ 2026-09-24 订正：`env_bool` 的口径**只对布尔开关成立**。快照里还有
+      **字符串**键（`PUBLISH_I_AM_HERE` = `i-am-here`），把它也按布尔转
+      ⇒ 得到一个**假 False** ⇒ 下游会把"**值完全正确**"读成"**配错了**"。
+      （★ 这就是"用别人的口径量自己"—— 2026-09-24 实测踩过一次：
+       快照里明明是 `'i-am-here'`，`【自动发布】`段却报「已配但值不对」。）
+    ★ 现在同时返回**原始字符串** `raw`（键名 → 未转换的值），
+      字符串键**必须**从 `raw` 读，布尔键再走 `vals`。两个视图并存，各按各的口径。
+    ★★★ 2026-09-24 **第二次**踩同一个错（这次是**整数**，不是字符串）：
+      新增的 `PUBLISH_MAX_PER_CYCLE` / `PUBLISH_MIN_GAP` 是**整数**，
+      从 `vals`（布尔视图）读 ⇒ `"1"` 印成 `True`、`"120"` 被当成 `1`
+      ⇒ `【发布速率】` 段报出**看着像真的**错数。
+      ★ 一般化（比"字符串要特殊处理"更准）：**`vals` 只对"开关"成立**；
+        凡是**非布尔**的键（字符串 / 整数 / 时长）**一律从 `raw` 读**，
+        再按它**自己的**类型解析。
+      ⇒ 判据：**先问这个键是什么类型，再决定用哪个视图**；
+        不要因为"它也是从 env 来的"就套布尔口径（`ERR-META-03` 的味道）。
     ★ 任何一步失败都**返回空 dict + 原因**，绝不返回一个"看着正常的默认值" ——
       默认值会被下游当成事实用（ERR-META-01 一族）。
     """
@@ -79,18 +102,19 @@ def read_env_snapshot(dst=None):
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}, None, "快照不存在（容器还没跑过新版 daemon，或 /data 挂点不对）"
+        return {}, {}, None, "快照不存在（容器还没跑过新版 daemon，或 /data 挂点不对）"
     except Exception as e:                                    # noqa: BLE001
-        return {}, None, f"快照读取失败：{type(e).__name__}: {e}"
+        return {}, {}, None, f"快照读取失败：{type(e).__name__}: {e}"
 
     age = time.time() - p.stat().st_mtime
+    rawvals = {k: v for k, v in (raw.get("values") or {}).items()}
     vals = {}
-    for k, v in (raw.get("values") or {}).items():
+    for k, v in rawvals.items():
         vals[k] = str(v).strip().lower() in ("1", "true", "yes", "on")
     if age > SNAPSHOT_MAX_AGE:
-        return {}, age, (f"快照已 {age / 3600:.1f}h 未刷新（阈值 "
-                         f"{SNAPSHOT_MAX_AGE / 3600:.1f}h）⇒ 不拿它当判据")
-    return vals, age, ""
+        return {}, {}, age, (f"快照已 {age / 3600:.1f}h 未刷新（阈值 "
+                             f"{SNAPSHOT_MAX_AGE / 3600:.1f}h）⇒ 不拿它当判据")
+    return vals, rawvals, age, ""
 
 
 def cst(epoch):
@@ -155,8 +179,29 @@ def read_db(dst=None):
     ).fetchone()[0]
     total = cur.execute("SELECT count(*) FROM tasks").fetchone()[0]
     mx = cur.execute("SELECT max(updated_at) FROM tasks").fetchone()[0]
+
+    # ★★ `PUBLISHED` 口径（2026-09-24 加）—— 补上「publish **真的**推进了没」这条判据。
+    #
+    #    ★ 为什么需要它：`publish.last_run` 只说明**阶段跑过**，不说明**发出去东西**。
+    #      实测踩过：阶段 6.2 秒"成功 1 条"，而站上是否发出、qB 是否真做种，
+    #      `last_finish` 一个字都没说。⇒ 现在把"已上站的条数"当独立判据报出来。
+    #
+    #    ★ `status='PUBLISHED'` 是 `run.py`/`publish.py` 写回的状态（见 db.py）。
+    #      它**单调增**，所以两次巡检之差 = **本轮真发出去的条数**。
+    #
+    #    ★★ 但它**只到"上站"为止，到不了"做种"**：qB 侧 `state=missingFiles` 这种
+    #      坏种**照样是 `PUBLISHED`**（实测：修 `readd_to_qb` 前那 6 条全是）。
+    #      ⇒ 本文件**不连 qB**（纯 SMB 只读）⇒ 那一条**只能另测**：
+    #         cd /volume2/docker_ssd/musopia_script2
+    #         sudo docker compose run --rm tools python -c "..."   # 查 qB 里的 state
+    #      或（延迟后）按 infohash 查 `content_path` / `state`。
+    #      ★ 别把这条 `PUBLISHED` 数**当成**"做种正常" —— 那是两码事（ERR-META-01）。
+    published = cur.execute(
+        "SELECT count(*) FROM tasks WHERE status='PUBLISHED'"
+    ).fetchone()[0]
     con.close()
-    return {"stale": stale, "exists": exists, "total": total, "max_updated_at": mx}
+    return {"stale": stale, "exists": exists, "total": total,
+            "max_updated_at": mx, "published": published}
 
 
 def main():
@@ -173,7 +218,7 @@ def main():
     dst = pathlib.Path(args.dst) if args.dst else resolve_dst()
     # ★ disabled 的来源分层：显式声明 > 容器快照 > 空集。**每一层都打印来源**，
     #   免得"这次为什么没报 publish"变成一个要翻代码才知道的事。
-    snap_vals, snap_age, snap_note = read_env_snapshot(dst)
+    snap_vals, snap_raw, snap_age, snap_note = read_env_snapshot(dst)
     if args.disabled:
         disabled = {s.strip() for s in args.disabled.split(",") if s.strip()}
         missing = set()
@@ -240,8 +285,27 @@ def main():
         if stage in missing and age > iv:
             verdict += " 「未声明」⇒ 该动就得动，此超期为真异常（快照里无此键）"
         # edit 的例外：有活时按 cooldown 连跑
+        #
+        # ★★ 2026-09-24：这里**只解释 `edit` 自己的调度状态**，
+        #    **不评价「stale 待办」那个数**。两者很容易被读成同一件事，摊开写清：
+        #      · `no_progress` 是 `daemon.py` 的**调度**标志（`before > 0 and after >= before`）
+        #        ⇒ 含义是"本轮跑了、但待办没降" ⇒ 退回 `EDIT_INTERVAL`(6h) 长周期。
+        #        **这是设计内的降级**（改成"有活就 60s 冷却"会变成每 60s 敲站点，更糟），
+        #        不是故障 —— 所以这里说"正常"是对的。
+        #      · 而下面 `【库】` 的 `stale 待办` 是**库的口径**（`db.STALE_CONDITION`），
+        #        跟 `no_progress` **不是同一个判据**，两者**不必同步**：
+        #        实测 2026-09-24（43 = 1 条 `site_synced_at IS NULL` + 42 条
+        #        `updated_at > site_synced_at`，差值 0.01~14 天 = **持续灌注**，非同源批次）。
+        # ★★★ 因此：**`stale 待办` 的"数量本身不是判据"** ——
+        #    它大不等于坏、小不等于好。要看的是**差值分布**与**成因拆解**
+        #    （是 site_synced_at 为 NULL，还是 updated_at 更新过 —— **两个方向的修法不同**）。
+        #    ★ 而且它与「补了但没推上去」那件事**方向相反**（那件是漏判 stale，
+        #      因为写库工具**刻意不碰 `updated_at`** ⇒ `STALE_CONDITION` 读不到"我变新了"）；
+        #      ⇒ 看到 `stale` 先问是哪个方向，别直接归因（`SESSION-NOTES.md` 有整节）。
+        # ★ 定性已写进 `SESSION-NOTES.md`「2026-09-24（夜·续）」；此处只留**判读纪律**。
         if stage == "edit" and st.get("no_progress"):
-            verdict += " · no_progress=true（待办清不掉，退回长周期，正常）"
+            verdict += (" · no_progress=true（edit 调度退回长周期，正常；"
+                        "★ 与下方 stale 待办**不是同一判据**）")
         rows.append((stage, age, iv, st, verdict))
 
     hb_age = now - max(hb_mtime, hb_content or 0)
@@ -292,9 +356,157 @@ def main():
         ages = fmt_age(age) if age is not None else "-"
         print(f"  {stage:<9}{ivs:>8}  {lr:<21}{ages:<26}{verdict}")
 
+    # ---------- ★★ 自动发布的第二把钥匙（2026-09-24） ----------
+    #
+    # ★ 为什么巡检要专门报这一条：`publish.py` 的 `guard_auto_key()` 只在
+    #   **无人值守路径**（`--auto`）上校验 `PUBLISH_I_AM_HERE`。
+    #   ⇒ 两个开关**都为真**才会自动发。而"巡检看不见的开关 = 会被当成没配"
+    #     —— 那正是 `ENABLE_PUBLISH` 被连续多轮写反的同一个形状（ERR-META-04）。
+    #
+    # ★ 三态，**不是**两态（照抄上面 `missing` 那段的教训）：
+    #     键在且为真  → ✅ 自动发布会真发（★ 这句要显眼）
+    #     键在且为假  → ⛔ 钥匙在但值是错的 ⇒ **每轮都会被拒**（值得报）
+    #     键**不在**  → ❔ 未声明 —— ★ 这**不等于**"关了"：变量不存在时
+    #                   `guard_auto_key()` 走的是"根本没配"那一支 ⇒ 同样**不发**，
+    #                   但原因不同（"还没配" vs "配错了"，修法不一样）。
+    #   ★ 一句话：**三种状态里只有第一种会真发**，所以这一栏必须逐字说清是哪种。
+    # ★ 三态，**不是**两态（照抄上面 `missing` 那段的教训）：
+    #     键在且**字符串等于约定值** → ✅ 放行
+    #     键在但值不对               → ⛔ 每轮被拒（值得报）
+    #     键**不在**                 → ❔ 未声明 —— ★ 这**不等于**"关了"：
+    #                   变量不存在时 `guard_auto_key()` 走"根本没配"那一支 ⇒
+    #                   同样**不发**，但原因不同（"还没配" vs "配错了"，修法不一样）。
+    # ★★ 判"对不对"**必须比字符串**，不能借 `snap_vals`（那是布尔口径）——
+    #    这条键的值是 `i-am-here`，按布尔转会得到假 False（2026-09-24 实测踩过）。
+    key_raw = None if not snap_raw else snap_raw.get(AUTO_KEY_ENV)
+    key_ok = (key_raw is not None
+              and str(key_raw).strip() == AUTO_KEY_VALUE)
+    if not snap_raw:
+        key_state = "不可用（快照没读到）"
+    elif key_ok:
+        key_state = "✅ 已配且正确 ⇒ ★ 自动发布会真发"
+    elif key_raw is None:
+        key_state = "❔ 未声明（变量不存在）⇒ 按『根本没配』处理，不发"
+    else:
+        # ★ 不回显值（哪怕它不是密钥）—— 回显就会写进巡检记录；只报"不对"。
+        key_state = "⛔ 已配但值不对 ⇒ 每轮都会被拒（退出码 3）"
+
+    pub_on = (snap_vals.get("ENABLE_PUBLISH") is True) if snap_vals else None
+    if pub_on is None:
+        auto_pub = "❔ 判不了：ENABLE_PUBLISH 读不到（见上方快照来源）"
+    elif not pub_on:
+        auto_pub = "⏹️ 不会自动发：ENABLE_PUBLISH=false（阶段压根不排）"
+    elif key_ok:
+        auto_pub = "★★ 会自动发：两把钥匙都成立 —— 下一轮 publish 到期即提交"
+    else:
+        auto_pub = "⛔ 不发：ENABLE_PUBLISH=true 但第二把钥匙没通过（每轮退避重试）"
+
+    print("\n【自动发布】两把钥匙都成立才会真提交（不可逆，见 ERR-META-12）")
+    print(f"  ENABLE_PUBLISH      = "
+          f"{snap_vals.get('ENABLE_PUBLISH') if snap_vals else '(读不到)'}"
+          f"   （布尔口径）")
+    # ★ 这一行**直接报"与约定值是否相等"**，不把原始值当布尔使 ——
+    #   两个口径分开印，读的人一眼能看出"哪个键按哪个口径判"。
+    print(f"  {AUTO_KEY_ENV:<19} = "
+          f"{'(读不到)' if not snap_raw else ('与约定值相等 ✅' if key_ok else '与约定值不等')}"
+          f"   （**字符串**口径，不作布尔转换）")
+    print(f"  第二把钥匙   {key_state}")
+    print(f"  ⇒ {auto_pub}")
+
+    # ---------- ★★ 发布**速率**：两道旋钮 + 由此推出的每日上限 ----------
+    #
+    # ★ 为什么把这段**算出来**印在这里：2026-09-24 用户问「现在每天最多发布多少条」，
+    #   而那个答案当时**必须靠人脑算**（`86400 / PUBLISH_INTERVAL × MAX_PER_CYCLE`）
+    #   —— 而人算正是本项目反复吃亏的地方（`ERR-META-03`：算错的数字**不报错**，
+    #   只给出一个看着合理的值）。⇒ 让巡检**直接报结论**，且把它**依据的两个原始值
+    #   一起印出来**，读的人能自己复核，不必信这个乘积。
+    #
+    # ★★ 两道旋钮**分工不同**，所以分两行报、**不合成一个"限速"数**：
+    #     · `PUBLISH_MAX_PER_CYCLE` × 周期 ⇒ **日上限**（量）
+    #     · `PUBLISH_MIN_GAP`             ⇒ **突发形态**（节奏）；它**不影响**日上限
+    #   把两者说成同一个数，就是本轮 `.env.example` 里专门警告过的那处**最易读错**的坑。
+    #
+    # ★ 读法：这两个键 2026-09-24 才进 `ENV_SNAPSHOT_KEYS` 白名单 ⇒
+    #   **旧快照里没有它们**（那正是白名单的可见性设计：缺了看得见）。
+    #   缺键时**不许**按兜底值假装算出一个日上限 —— 那会给出一个**看着精确的错数**
+    #   （`PUBLISH_MAX_PER_CYCLE` 的兜底还是 `0 = 不限`，套进来会算出"无限"，荒谬）。
+    # ★★★ 必须从 `snap_raw`（**字符串**视图）读，**不能**用 `snap_vals` ——
+    #   那是**布尔**口径（`read_env_snapshot` 的 docstring 明写：
+    #   "字符串键必须从 raw 读"）。这两个键是**整数**，不是开关：
+    #     `"1"`   → 布尔视图 `True`  ⇒ 印出来是 `True` 而不是 `1`（**2026-09-24 实测踩过**）
+    #     `"120"` → 布尔视图 `True`  ⇒ 拿它算"间隔"就得到一个**假的 1**
+    #   ⇒ 与 `PUBLISH_I_AM_HERE` 被按布尔转是**同一个错**，只是这次错的是整数。
+    raw_or_empty = snap_raw or {}
+    iv_raw = raw_or_empty.get("PUBLISH_INTERVAL")
+    per_cycle_raw = raw_or_empty.get("PUBLISH_MAX_PER_CYCLE")
+    gap_raw = raw_or_empty.get("PUBLISH_MIN_GAP")
+
+    def _as_int(v):
+        """字符串 → int；None/空/非数字 ⇒ None（**不猜默认值**，见下）。"""
+        if v is None or str(v).strip() == "":
+            return None
+        try:
+            return int(float(v))
+        except (ValueError, TypeError):
+            return None
+
+    iv_s = _as_int(iv_raw)
+    per_cycle = _as_int(per_cycle_raw)
+    gap_s = _as_int(gap_raw)
+    # ★ `PUBLISH_INTERVAL` 不在快照白名单里（它是周期，不是开关）⇒
+    #   退到本文件**自己的** `INTERVALS`（同一份周期口径，见文件头）。
+    #   ★ 不静默用兜底假装算：拿不到就报"判不了"（另见下面那句注释）。
+    if iv_s is None and INTERVALS.get("publish"):
+        iv_s = INTERVALS["publish"]
+
+    print("\n【发布速率】日上限 = (86400 / PUBLISH_INTERVAL) × PUBLISH_MAX_PER_CYCLE")
+    if per_cycle is None or iv_s is None:
+        miss = []
+        if per_cycle is None:
+            miss.append("PUBLISH_MAX_PER_CYCLE")
+        if iv_s is None:
+            miss.append("PUBLISH_INTERVAL")
+        print(f"  ❔ 判不了：{'、'.join(miss)} 读不到"
+              f"（后者不在快照白名单，取自 state 的间隔）")
+        print("     ★ 不按兜底值硬算 —— 兜底是 0 = 不限，会算出『无限』这种假数")
+    else:
+        try:
+            n_rounds = 86400 / int(iv_s)
+            cap = int(n_rounds) * int(per_cycle)
+            print(f"  PUBLISH_INTERVAL      = {iv_s}s "
+                  f"（{n_rounds:.0f} 轮/天）")
+            print(f"  PUBLISH_MAX_PER_CYCLE = {per_cycle}")
+            if int(per_cycle) == 0:
+                print(f"  ⇒ ★★ 每日上限 = **不限**（每轮 0 = 不限）← 注意这是最危险的值")
+            else:
+                print(f"  ⇒ ★★ 每日上限 ≈ **{cap} 条/天**")
+        except (ValueError, TypeError):
+            print(f"  ❔ 读到的值不是整数：interval={iv_s!r} max_per_cycle={per_cycle!r}")
+    # ★ 条间隔单独一行，并**显式说明它不改变上面的日上限** ——
+    #   这是本文件最容易读错的一处，必须写在数字旁边而不是别处。
+    if gap_s is None:
+        print(f"  PUBLISH_MIN_GAP       = ❔ 读不到（旧快照 / 未配）")
+    else:
+        try:
+            g = int(float(gap_s))
+        except (ValueError, TypeError):
+            g = None
+        if g is None:
+            print(f"  PUBLISH_MIN_GAP       = ⚠️ 值不是数字：{gap_s!r} ⇒ 按 0 处理")
+        elif g <= 0:
+            print(f"  PUBLISH_MIN_GAP       = {g}（0 = 不限 ⇒ 条与条之间只有 1.5s 地板）")
+        else:
+            print(f"  PUBLISH_MIN_GAP       = {g}s ⇒ 一批 N 条要摊开 (N-1)×{g}s")
+            print(f"     ★ 它**不改变**上面的日上限：{g}s×5 = {g * 5 / 60:.0f} 分钟"
+                  f"仍塞得进一轮 ⇒ 只管突发形态，管不了总量")
+
     print("\n【库】SMB 只读直连 (PRAGMA query_only=1)")
     print(f"  总记录        {db['total']}")
     print(f"  site EXISTS   {db['exists']}")
+    # ★ 已上站条数：**单调增** ⇒ 两次巡检之差 = 本轮真发出去的条数。
+    #   ★ 与下面那个变化检测配合看（它会在差值 >0 时报出来）。
+    print(f"  PUBLISHED     {db['published']}   (已上站的条数；★ 只到"
+          f"「上站」为止，**不**代表 qB 里在做种)")
     print(f"  stale 待办    {db['stale']}   (口径 = db.py 的 STALE_CONDITION)")
     print(f"  max(updated_at)  {db['max_updated_at']}  ← ★ 这是 **UTC**，加 8h = "
           f"{cst(_utc_to_epoch(db['max_updated_at'])) if db['max_updated_at'] else '-'} CST")

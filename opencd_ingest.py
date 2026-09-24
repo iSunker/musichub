@@ -10,6 +10,11 @@ OpenCD（皇后）页面 → `tasks` 表的**写入侧**。
   · 该文件 `import db` 命中数 = **0** ⇒ **结构上不可能入库**；
   · 生产 `tasks` 表里 `opencd_tid` 非空的记录 = **0 条**。
 
+★ 2026-09-23：`run_from_qb()` 那条路（扫 qB → 按种子名称搜皇后）**已整条删除**，
+  但本模块要解决的那个缺口**一模一样地还在** —— 抓取层仍然只解析、不入库，
+  入库这件事仍然由本模块单独承担（现在的调用方是 `topup_opencd_fields.py`
+  与 `crawl.run_manual`）。★ 上面那三条实测只作为**历史起因**保留。
+
 ⇒ 后果：`descr.py` 里那些「皇后路」分支（`is_opencd` 分流、副标题取 `smalltitle`、
 `OpenCD` 标签、`custom_fields[4][1..2]`）**一次都走不到**，因为库里没有皇后行。
 
@@ -138,7 +143,7 @@ def _finite_days(value):
 
 
 def build_row(info, *, raw_tid, info_hash, torrent_file=None,
-              qb_seed_days=None, now=None):
+              qb_seed_days=None, now=None, opencd_added_at=None):
     """
     `TorrentInfo`（+ 闸门输入）→ `db.save_task(**kw)` 的 kwargs。**纯函数**：
     不碰 DB、不读时钟（`now` 显式传入）。
@@ -194,16 +199,25 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
         status, reason = (STATUS_NO_TORRENT_FILE,
                           f"拿不到本地种子文件（{torrent_file!r}）")
     else:
-        # ⑤⑥ 闸门①（做种够久？）—— ★ 先挡非有限值，再交给闸门
-        days = _finite_days(qb_seed_days)
-        raw_days = qb_seed_days
-        if days is None and raw_days is not None:
-            reasons.append(f"做种时长 {raw_days!r} 不是有限数字")
-        state, why = opencd_gate.decide(days, None, dt)
-        if state != opencd_gate.GATE_READY_TO_FETCH:
-            status, reason = STATUS_NOT_SEEDED, why
-        else:
-            status, reason = STATUS_OK, ""
+        # ★★ 2026-09-23：**闸门① 已退役**（见 `opencd_gate.py` 模块头）。
+        #
+        #    原先这里调 `opencd_gate.decide(days, ...)`，而 `days` 来自
+        #    `qb_seed_days` —— 而**所有调用方都传 `None`**（`crawl.run_manual`
+        #    与 `topup_opencd_fields` 都传 `qb_seed_days=None`）。
+        #    `decide(None, ...)` 恒返回 `NOT_SEEDED` ⇒ **每一行**都落
+        #    `status='NOT_SEEDED'` ⇒ 卡在发布队列闸门①（`status='SUCCESS'`）
+        #    ⇒ **皇后路一行都发不出去**。
+        #
+        #    ★ 实测证据（2026-09-23）：生产库 `status` 分布里
+        #      **`NOT_SEEDED` = 0 行** —— 因为闸门① 是**最后一道**，
+        #      只有"infohash 对、非禁转、有 log、有 .torrent"的行才会走到它，
+        #      而那样完美的行**当时一条都没有**。所以它既没拦住任何东西，
+        #      也**永远不会放行任何东西**：一道从未生效、也永不放行的闸门。
+        #
+        #    ★ 现在直接落 `SUCCESS`：闸门②（发布日期 + 7 天）在
+        #      `db.PENDING_PUBLISH_WHERE` 里，**在发布队列那一层**判 ——
+        #      那是它该待的地方（本模块不该重复实现，`ERR-META-03`）。
+        status, reason = STATUS_OK, ""
 
     if reasons:
         reason = "；".join(reasons + ([reason] if reason else []))
@@ -222,6 +236,16 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
         "artist": m["artist"] or "",
         "year": m["year"] or "",          # ★ 原样（带「年」字），发送前不转
         "opencd_tid": str(raw_tid or ""),
+        # ★★ 皇后的**发布日期**（2026-09-23 补）—— 闸门② 的输入。
+        #    ★ 由**调用方**显式传入（本函数是纯函数，不去 join 外部库）：
+        #      现实里它来自 `sync_opencd_tid.py` 已填好的 `tasks.opencd_added_at`。
+        #    ★ 传 `None` ⇒ 这一列不进 kwargs ⇒ `save_task` 的 upsert
+        #      **不碰它** ⇒ 已有的值不会被抹掉（这正是我们要的：
+        #      日期是 `vtid` 阶段的产物，本步只负责别把它弄丢）。
+        #    ⚠️ 但**新行**不会因此有日期 —— 那时闸门② 会拦（"空 ⇒ 拦"）。
+        #      这是**刻意的**：宁可晚发，也不要拿一个不知道发布日期的行去发。
+        #      修法是跑一次 `sync_opencd_tid.py --apply`（零请求）。
+        **({"opencd_added_at": opencd_added_at} if opencd_added_at else {}),
         "qb_seed_days": _finite_days(qb_seed_days),
         "fetched_at": fetched_at_s,
         "publish_after": publish_after_s,
@@ -229,6 +253,14 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
         "unmapped_json": json.dumps(m.get("unmapped") or [], ensure_ascii=False),
         # ★ `map_all()` 的**证据快照** —— 发布时读它，不重算（重算会随映射表漂移）
         "mapped_json": json.dumps(m, ensure_ascii=False, default=str),
+        # ★★ 皇后的**转载规则**（2026-09-23 补，三态 ALLOW/NEED_CONFIRM/DENY）。
+        #    ★ 为什么必须单独落库：它是**"许不许发"**的判据，而 `mapped_json` 是
+        #      **"发什么"**的字段快照 —— 两件事。实测 `id=200982` 的规则是
+        #      「禁止轉載」，而它当时**已排进发布队列**（队列不知道有这回事）⇒
+        #      差一步就把"禁止轉載"的种子转发出去。
+        #    ★ 取 `info["transfer_rule"]`（`opencd_parse` 已归一成三态）；
+        #      原始串在 `transfer_rule_raw`，需要时另可取。
+        "transfer_rule": info.get("transfer_rule") or "",
         "status": status,
         "reason": reason,
     }
@@ -238,7 +270,7 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
 
 
 def ingest(info, *, raw_tid, info_hash, torrent_file=None,
-           qb_seed_days=None, now=None):
+           qb_seed_days=None, now=None, opencd_added_at=None):
     """
     落库一条皇后记录。返回 `(status, reason)`。
 
@@ -246,7 +278,8 @@ def ingest(info, *, raw_tid, info_hash, torrent_file=None,
       打印 —— 不能静默吞（吞掉就变成"抓了但没入库，还没人知道"）。
     """
     row = build_row(info, raw_tid=raw_tid, info_hash=info_hash,
-                    torrent_file=torrent_file, qb_seed_days=qb_seed_days, now=now)
+                    torrent_file=torrent_file, qb_seed_days=qb_seed_days, now=now,
+                    opencd_added_at=opencd_added_at)
     status, reason = row["status"], row["reason"]
     ih = str(info_hash or "").strip().lower()
     if not ih:
@@ -261,6 +294,33 @@ def explain(status, reason):
     if status == STATUS_OK:
         return "✅ 入库 SUCCESS（等闸门②到期）"
     return f"⏹️ 入库 {status}：{reason}"
+
+
+def _calls_in(fn, name):
+    """
+    `fn` 的**代码**里有没有调用/引用名为 `name` 的东西。返回 True/False。
+
+    ★ 为什么必须走 AST 而不是 `name in getsource(fn)`：
+      **注释里也会出现那个名字** —— 而本项目的注释里到处是
+      「原先这里调 `opencd_gate.decide(...)`」这种**解释它为什么被删**的话。
+      纯字符串匹配会把那些注释当成"还在调用"⇒ 判据**永远失败**，
+      于是要么判据被删掉（丢失这条性质），要么改成 `"xyz.decide(" not in src`
+      这种更脆的写法（照样会被注释绊倒）。
+    ★ 教训（`ERR-META-01` 一族）：**检测方法本身出错**比没有检测更危险 ——
+      它会让你以为"这条性质已经被看着了"，其实那个断言在对着注释发火。
+    """
+    import ast as _ast
+    import inspect as _ins
+    try:
+        tree = _ast.parse(_ins.getsource(fn))
+    except (OSError, SyntaxError, TypeError):
+        return True          # ★ 拿不到源码 ⇒ 按"可能有"处理（保守，宁可误报）
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Name) and node.id == name:
+            return True
+        if isinstance(node, _ast.Attribute) and node.attr == name:
+            return True
+    return False
 
 
 # ==================== 自检 ====================
@@ -310,7 +370,8 @@ def _check():
         r = conn.execute(
             "SELECT status, reason, artist, year, small_descr, log_content, "
             "publish_after, fetched_at, opencd_tid, mapped_json, unmapped_json, "
-            "content_path FROM tasks WHERE info_hash = ?", (ih,)).fetchone()
+            "content_path, transfer_rule, opencd_added_at "
+            "FROM tasks WHERE info_hash = ?", (ih,)).fetchone()
         conn.close()
         return r
 
@@ -336,38 +397,78 @@ def _check():
     chk("★ 存的是 **UTC**（本机 TZ=UTC 时看不出，故直接比时刻）",
         fa == NOW.replace(tzinfo=None), f"{r[7]} vs {NOW.strftime(TS_FMT)}")
 
-    print("\n③ 闸门①：做种不满 / 拿不到 ⇒ NOT_SEEDED，且**选不出**")
-    for days, label in ((None, "None（拿不到）"), (0.0, "0 天"), (2.99, "2.99 天")):
+    # ══════════════════════════════════════════════════════════════════════
+    # ③④ 原为「闸门①（做种 3 天）未满 ⇒ NOT_SEEDED」的两条判据。
+    #    ★★ 闸门① 已于 2026-09-23 **退役**（理由见 `opencd_gate.py` 模块头：
+    #       生产库 `qb_seed_days` 555 行全 NULL ⇒ 它既没拦过东西、也永不放行；
+    #       而"种子下完可用"这件事改由**更强的证据**承担 —— 它能从 vertex2 库
+    #       按 infohash 配到皇后的页面，说明它是个完整可下的种子）。
+    #    ⇒ 这两条**判据反转**：`qb_seed_days` 现在**完全不参与**状态判定，
+    #      传什么值都必须落 `SUCCESS`（"不知道做种时长"不再是一道闸）。
+    #    ★ 为什么**不删掉**这两段：它们是"闸门①曾经存在过、且为什么不再存在"
+    #      的**可执行记录**。删掉之后，将来有人看到 `qb_seed_days` 这一列，
+    #      不会再有任何地方告诉他"这一列已经没人读了"（`ERR-META-04`）。
+    # ══════════════════════════════════════════════════════════════════════
+    print("\n③ ★ 闸门①已退役：`qb_seed_days` **不再参与**判定，传什么都是 SUCCESS")
+    for days, label in ((None, "None（拿不到）"), (0.0, "0 天"), (2.99, "2.99 天"),
+                        (float("nan"), "NaN"), (float("inf"), "inf"),
+                        ("不是数字", "字符串")):
         ih = "c" * 40
         st, why = ingest(ALLOW, raw_tid="t3", info_hash=ih, torrent_file=tf,
                          qb_seed_days=days, now=NOW)
-        inq = any(t["info_hash"] == ih for t in db.get_pending_publish())
-        chk(f"{label} ⇒ NOT_SEEDED 且不在队列", st == STATUS_NOT_SEEDED and not inq,
-            f"{st!r} inqueue={inq}")
+        chk(f"{label} ⇒ SUCCESS（不再落 NOT_SEEDED）",
+            st == STATUS_OK, f"{st!r} / {why[:40]}")
 
-    print("\n④ ★ 发现 A：闸门① 的 NaN / inf 必须**挡掉**（否则会被放行）")
-    for bad, label in ((float("nan"), "NaN"), (float("inf"), "inf"),
-                       ("不是数字", "字符串")):
-        ih = "d" * 40
-        st, why = ingest(ALLOW, raw_tid="t4", info_hash=ih, torrent_file=tf,
-                         qb_seed_days=bad, now=NOW)
-        chk(f"{label} ⇒ NOT_SEEDED", st == STATUS_NOT_SEEDED, f"{st!r} / {why[:38]}")
+    print("\n④ ★ 退役的**可执行记录**：`NOT_SEEDED` 这个状态还在，但已无写入方")
+    # ★ 常量留着（不删）是为了让历史数据可读：库里若还有 `NOT_SEEDED` 的旧行，
+    #   `explain()` 之类还得认得它。★ 但 `build_row` **再也产不出**这个值。
+    chk("★ `STATUS_NOT_SEEDED` 常量仍在（旧数据可读）",
+        STATUS_NOT_SEEDED == "NOT_SEEDED")
+    chk("★ 且 `build_row` 已不再产出它（上面 6 种输入全是 SUCCESS）", True)
+    src_ref = __import__("inspect").getsource(build_row)
+    chk("★★ 源码里**没有** `STATUS_NOT_SEEDED` 的赋值（真的退役了，不是被遮住）",
+        "STATUS_NOT_SEEDED" not in src_ref)
+    chk("★ 源码里也**没有** `decide(` 调用（闸门① 真的不在了）",
+        _calls_in(build_row, "decide") is False)
+    # ★ 但 `opencd_gate` **仍被 import** —— 因为 `publish_after_from()` 还在用
+    #   （`publish_after` 那一列照旧写，只是**不再进闸门② 的 WHERE**）。
+    #   ★ 这条是**防止**有人"顺手清理"把 import 删掉（那会 ImportError）。
+    import inspect as _ins
+    mod_src = _ins.getsource(__import__(__name__))
+    chk("★ `opencd_gate` 仍被 import（`publish_after_from` 还在用）",
+        "import opencd_gate" in mod_src)
+    chk("★ `publish_after` 那一列**照旧写**（只是不再驱动闸门②）",
+        bool(r[6]), f"实得 {r[6]!r}")
+    chk("★★ `publish_after` **不再出现在**闸门 SQL 里",
+        "publish_after" not in db.PENDING_PUBLISH_WHERE)
 
-    print("\n⑤ ★ 闸门② 的**正反两面**（只验一面会漏掉「过滤写反了」）")
+    print("\n⑤ ★★ 闸门② **改锚到皇后的发布日期**（不再是「抓取时刻 + 3 天」）")
     ih = "e" * 40
+    # ★ 情形 A：发布日期**很新**（1 天前）⇒ 7 天窗口未满 ⇒ 不在队列
+    fresh = (NOW - timedelta(days=1)).strftime(TS_FMT)
     ingest(ALLOW, raw_tid="t5", info_hash=ih, torrent_file=tf,
-           qb_seed_days=10.0, now=NOW)          # 刚抓 ⇒ publish_after = +3 天
+           qb_seed_days=None, now=NOW, opencd_added_at=fresh)
     inq = any(t["info_hash"] == ih for t in db.get_pending_publish())
-    chk("刚抓（3 天后才可发）⇒ SUCCESS 但**不在**队列", not inq)
-    # 把 fetched_at/publish_after 挪到 4 天前 ⇒ 必须被选出
-    old = (NOW - timedelta(days=4)).strftime(TS_FMT)
-    old_pa = (NOW - timedelta(days=1)).strftime(TS_FMT)
+    chk("★ 发布日期 1 天前 ⇒ SUCCESS 但**不在**队列（7 天未满）", not inq)
+    # ★ 情形 B：发布日期 **8 天前** ⇒ 必须被选出
+    old = (NOW - timedelta(days=8)).strftime(TS_FMT)
     conn = db.connect()
-    conn.execute("UPDATE tasks SET fetched_at=?, publish_after=? WHERE info_hash=?",
-                 (old, old_pa, ih))
+    conn.execute("UPDATE tasks SET opencd_added_at=? WHERE info_hash=?", (old, ih))
     conn.commit(); conn.close()
     inq2 = any(t["info_hash"] == ih for t in db.get_pending_publish())
-    chk("★ 到期后 ⇒ **在**队列里", inq2)
+    chk("★ 发布日期 8 天前 ⇒ **在**队列里", inq2)
+    # ★★ 情形 C：**发布日期为空** ⇒ **拦**（不是"照旧发"）
+    #    ★ 这是本次改动的**判据反转**：旧口径 `publish_after` 空 ⇒ 放行，
+    #      新口径 `opencd_added_at` 空 ⇒ **拦**。理由：空 = "不知道皇后几号发的"，
+    #      而"不知道"不是"放了很久了"（同闸门④ 的教训：把 NULL 当允许 = 赌博）。
+    ih2 = "7" * 40
+    ingest(ALLOW, raw_tid="t5b", info_hash=ih2, torrent_file=tf,
+           qb_seed_days=None, now=NOW)          # ★ 不传 opencd_added_at
+    r2 = row_of(ih2)
+    chk("★ 空的 opencd_added_at 确实没被写（留空，不编）", not r2[13],
+        f"实得 {r2[13]!r}")
+    inq3 = any(t["info_hash"] == ih2 for t in db.get_pending_publish())
+    chk("★★ 发布日期为空 ⇒ **不在**队列（空 ⇒ 拦，**判据反转**）", not inq3)
 
     print("\n⑥ ★ 第一阶段行**不被冲掉**（content_path 永不可碰）")
     ih = "f" * 40
@@ -417,8 +518,12 @@ def _check():
     print("\n⑫ 五种非 SUCCESS 状态**全部**选不出（防「只修了其中一种」）")
     conn = db.connect()
     for st_name in NON_PUBLISH_STATUSES:
-        conn.execute("UPDATE tasks SET status=?, publish_after=NULL WHERE info_hash=?",
-                     (st_name, ALLOW_H))
+        # ★ `opencd_added_at` 设成"早就够了"，**故意只让 status 这一条来拦** ——
+        #   否则闸门② 会一起把它们挡下，这条判据就分不清"是 status 拦的
+        #   还是日期拦的"（`ERR-META-05`：两个口径不许混）。
+        conn.execute("UPDATE tasks SET status=?, opencd_added_at=? "
+                     "WHERE info_hash=?",
+                     (st_name, (NOW - timedelta(days=30)).strftime(TS_FMT), ALLOW_H))
         n = conn.execute(
             f"SELECT count(*) FROM tasks WHERE info_hash=? AND {db.PENDING_PUBLISH_WHERE}",
             (ALLOW_H,)).fetchone()[0]
@@ -428,8 +533,12 @@ def _check():
     print("\n⑬ ★★ 端到端（最有价值的一条）：队列的行 → 渲染 → 标签")
     import descr
     conn = db.connect()
-    conn.execute("UPDATE tasks SET status='SUCCESS', publish_after=NULL WHERE info_hash=?",
-                 (ALLOW_H,))
+    # ★ 2026-09-23：队列条件里 `publish_after` 已被 `opencd_added_at` 取代
+    #   ⇒ 这条前置**必须**把它也设成"8 天前"，否则选不出来
+    #   （这正是 `db.PENDING_PUBLISH_WHERE` 那句"空 ⇒ 拦"的现场演示）。
+    conn.execute("UPDATE tasks SET status='SUCCESS', "
+                 "opencd_added_at=? WHERE info_hash=?",
+                 ((NOW - timedelta(days=8)).strftime(TS_FMT), ALLOW_H))
     conn.commit(); conn.close()
     pending = [t for t in db.get_pending_publish() if t["info_hash"] == ALLOW_H]
     if not pending:

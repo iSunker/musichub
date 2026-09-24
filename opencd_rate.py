@@ -450,7 +450,8 @@ def main():
                  max_per_day=args.max_per_day, day_key=time.strftime("%Y-%m-%d"))
     print(f"RateGate: 每轮 {g.max_per_round} 请求 · 最小间隔 {g.min_interval:g}s · "
           f"每日上限 {g.max_per_day}（★ 请求量纲）")
-    print("（本模块是闸门库；实际抓取入口是 crawl.py --from-qb。加 --selftest 自检）")
+    print("（本模块是闸门库；实际抓取入口是 topup_opencd_fields.py（批量）"
+          "与 crawl.py（单条 --tid/--url）。加 --selftest 自检）")
     return 0
 
 

@@ -59,6 +59,8 @@ FILES=(
   daemon.py healthcheck.py
   crawl.py opencd_parse.py opencd_rate.py opencd_log.py
   opencd_map.py opencd_gate.py opencd_ingest.py cover_fetch.py
+  topup_opencd_fields.py observe_custom_fields.py
+  sync_opencd_tid.py readiness_probe.py qb_probe.py flip_status.py
   Dockerfile docker-compose.yml
   .dockerignore
   README.md

@@ -42,13 +42,39 @@ COLUMNS = [
     # 皇后侧的 tid（页面 id）。★ 与 `site_torrent_id` 是**两件事**：
     #   同一个 infohash 在皇后和 Musopia 上是两个不同的页面编号，别混成一列。
     ("opencd_tid", "TEXT"),
-    # 两个 3 天闸门（闸门①=做种时长，闸门②=抓页面后 3 天）：
-    #   闸门① `qb_seed_days` —— 在 qB 做种满几天（★ 它证明种子真的下完可用，
-    #          不只是"延迟了"）。没满 3 天**根本不抓**，更省请求。
-    #   闸门② `fetched_at`  →  `publish_after`
-    #          抓页面的时刻 + 3 天 = 可以发布的时刻。含义是
-    #          "我已经看过页面内容、反悔还来得及"，所以是**串联**不是"做种满6天"。
+    # ★★ 闸门（2026-09-23 改判）：
+    #   闸门① `qb_seed_days` —— **已退役**（`opencd_gate.py` 模块头有完整理由）。
+    #          ★ 列留着不删是为了让旧数据可读，但它**已无写入方、也已无读者**。
+    #   闸门② `opencd_added_at` + 7 天 —— **皇后发布那条种子的时刻**
+    #          （外部事实，见下面 `opencd_added_at` 的注解）。
+    #          ★ 它**取代**了旧的 `fetched_at` + 3 天口径，见 `PENDING_PUBLISH_WHERE`。
     ("qb_seed_days", "REAL"),
+    # ★★ 皇后的**发布日期**（2026-09-23 补）—— 新闸门②的输入。
+    #
+    #   来源：vertex2 库 `torrents.add_time`（unix 秒 = 该种子被加进 tracker 的时刻），
+    #   由 `sync_opencd_tid.py` 按 infohash 配对时**顺带**回填。
+    #
+    #   ★★ 为什么存**原始发布日期**、而不是存算好的「+7 天」结果：
+    #     算成结果（比如塞进 `publish_after = add_time + 7d`）看起来更省一列，
+    #     但那是把**事实**加工掉了 ——
+    #       · 改门槛（3 天 / 14 天）就得**重算全库**，而重算要重连外部库；
+    #       · 一旦重算，**原始日期就没了**，以后再也回答不了"这条是几号发布的"；
+    #       · 而 `publish_after` 是**派生值**：派生的东西不该盖掉它的来源
+    #         （`ERR-META-03`：不要手工复制事实来源的口径）。
+    #     ⇒ 存事实，门槛在 WHERE 里**现算**（见 `PENDING_PUBLISH_WHERE` 闸门②）。
+    #
+    #   ★★ 时区（★ 这个坑本机测不出来，见 `PENDING_PUBLISH_WHERE` 里那段警告）：
+    #     写入侧 (`sync_opencd_tid.py`) **显式**用东八区把 unix 秒转成字符串，
+    #     **不依赖容器 TZ**（本机 UTC / 生产 CST+8 会差 8 小时）。
+    #     与 `publish_after` 同规矩：两边**同源同时区**才敢直接字符串比较。
+    #
+    #   ★ 与 `fetched_at` 的区别（别混）：
+    #     `fetched_at`   = **我们**抓页面的时刻（我们自己造的时间）
+    #     `opencd_added_at` = **皇后**发布那条种子的时刻（外部事实，不会因为我们晚抓而变）
+    #     ⇒ 闸门②原先用 `fetched_at + 3d` 有个内在毛病：**我们什么时候去抓，
+    #       反悔窗口就从什么时候起算** —— 晚抓 = 白等。改用 `opencd_added_at`
+    #       后，窗口锚在**真正该锚的地方**。
+    ("opencd_added_at", "TIMESTAMP"),
     ("fetched_at", "TIMESTAMP"),
     ("publish_after", "TIMESTAMP"),
     # 映射不上的标签等 —— 要显式列出、进每日邮件，**不许静默丢**
@@ -77,6 +103,19 @@ COLUMNS = [
     #     抓页面时做的那个决定**，不能到时候重算（重算结果会漂）。
     #   ★ 读它一律走 `_load_mapped()`：解析失败**抛出**（见那里的注释）。
     ("mapped_json", "TEXT"),
+    # ★★ 皇后的**转载规则**（2026-09-23 补）—— 三态，来自 `opencd_parse`：
+    #      `ALLOW` / `NEED_CONFIRM`（拿不准）/ `DENY`（禁止轉載）。
+    #   ★★ 为什么必须**落库**：这条判据**只存在于皇后页面上**（`轉載規則` 那一格）。
+    #      不抓页面就**无从判断** —— 实测 `id=200982` 的规则是「禁止轉載」，
+    #      而它当时**已经排进了发布队列**（`db.PENDING_PUBLISH_WHERE` 不知道
+    #      有这回事）⇒ 差一步就把"禁止轉載"的种子转发出去。
+    #   ★ 为什么不并进 `mapped_json`：`mapped_json` 是 `opencd_map.map_all()` 的
+    #      产出（**渲染**用的字段快照），而转载规则是**能不能发**的判据。
+    #      两件事：一个决定"发什么"，一个决定"许不许发"。混在一个 JSON 里，
+    #      查询就没法用它做过滤（而它将来很可能要进 WHERE）。
+    #   ★ 它**不参与** `PENDING_PUBLISH_WHERE` 的默认口径（见那里的注释理由）：
+    #      `NEED_CONFIRM` 该不该拦是**产品决定**，没定之前不进 WHERE 直接改变行为。
+    ("transfer_rule", "TEXT"),
 ]
 
 
@@ -185,19 +224,118 @@ TASK_FIELDS = (
 #   「探针说有活 → 一条都选不出来 → 探针还说有活」的**静默空转**，不报任何错。
 PENDING_PUBLISH_WHERE = (
     "status = 'SUCCESS' AND (site_status IS NULL OR site_status != 'EXISTS') "
-    # ★★ 闸门②（抓取时刻 + 3 天 = 可发布时刻）—— 2026-09-21 补。
-    #    ★ 它此前是个**死列**：`publish_after` 写进去也没人查 ⇒ 皇后行一旦
-    #      `status='SUCCESS'` 就会**当轮立刻进发布队列**，3 天反悔窗口
-    #      **被完全绕过**，而且**不报错**。这条过滤就是让闸门②真的生效。
-    #    ★ `IS NULL` / `= ''` 这一支是**给第一阶段（qB 本地抓轨）用的**：
-    #      那批行的 `publish_after` 本来就是 NULL，语义是「没有反悔窗口、照旧发」
-    #      ⇒ 加这条**不改变第一阶段行为**（可用现存 SUCCESS 行回归验证）。
-    #    ★ 时区：写入侧（`opencd_ingest`）刻意用 **UTC** 生成 `publish_after`，
-    #      与 `datetime('now')` **同源同时区**，所以这里能直接字符串比较。
+    # ★★ 闸门②（**皇后的发布日期 + 7 天** = 可发布时刻）—— 2026-09-23 **改判**。
+    #
+    #    ★★ 从 `publish_after`（= 抓取时刻 + 3 天）改成 `opencd_added_at`（= 皇后
+    #      发布那条种子的时刻 + 7 天）。用户 2026-09-23 定：「按皇后的添加日期算」。
+    #
+    #    ★ 为什么必须换（旧口径的内在毛病，不是"改个数字"）：
+    #      `publish_after` 锚在 `fetched_at` —— **我们**什么时候去抓页面，
+    #      反悔窗口就从什么时候起算。⇒ **晚抓 = 白等三天**；那些早就上站半年、
+    #      直到今天才补页面的行，反而要再干等三天（与"这条新不新"完全脱钩）。
+    #      `opencd_added_at` 是**外部事实**：皇后什么时候发的，不会因为我们
+    #      晚抓而改变。⇒ 窗口锚在真正该锚的地方。
+    #
+    #    ★ 时区：写入侧（`sync_opencd_tid.py`）**显式**按东八区把 unix 秒转成
+    #      UTC 字符串，与 `datetime('now')` **同源同时区** ⇒ 这里能直接字符串比较。
     #      ⚠️ 本机 `TZ=UTC` 而生产容器是 CST(+8) ⇒ 这个坑**本机测不出来**，
-    #         只能靠 `opencd_ingest --selftest` 的「恰好 3 天」判据钉住。
-    "AND (publish_after IS NULL OR publish_after = '' "
-    "     OR publish_after <= datetime('now'))"
+    #         只能靠 `sync_opencd_tid.py --selftest` 的时区判据钉住。
+    #
+    #    ★★ `IS NULL` / `= ''` 这一支**改成「拦」**（旧口径是「放行」）：
+    #      旧注释的理由是"给第一阶段（qB 本地抓轨）用 —— 那批 publish_after
+    #      本来就是 NULL，语义是没有反悔窗口、照旧发"。
+    #      ⇒ 那个理由**已经被实测推翻**（同闸门④ 的判据反转）：
+    #        `opencd_added_at` 空 的语义是「**不知道**皇后几号发的」，
+    #        而「不知道」**不是**「放了很久了」。与闸门④ 一个道理：
+    #        把"不知道"当成"允许"，就是每一次都在赌 —— 今晚刚因为同样的
+    #        形状差点发出 6 条禁转种子。
+    #      ⇒ 新判据：**拿不到发布日期 ⇒ 不发**（等 `vtid` 阶段把它填上再说）。
+    #
+    #    ★ 影响面（2026-09-23 换闸门时实测）：
+    #      · 有 tid 的 438 行 **全部**能配对到 `add_time`（0 条为空）⇒ 这条
+    #        "空 ⇒ 拦"**今天一条也拦不到**；但纪律要写进 SQL，将来 VT 那边
+    #        空了才有人管。
+    #      · 分布：中位 36.9 天 / 最小 0.0 / 最大 91.0 ⇒ 7 天门槛放行 346、拦 92。
+    "AND (opencd_added_at IS NOT NULL AND opencd_added_at != '' "
+    "     AND opencd_added_at <= datetime('now', '-7 days'))"
+    # ★★ 闸门③（**皇后行必须先抓到页面**）—— 2026-09-23 补。
+    #
+    #    ★ 起因（实测）：`opencd_tid` 已被回填（430 条），但 `mapped_json` 仍是空的
+    #      ⇒ 站上发出去的内容**六个字段全错**：副标题是「全 N 曲」而非皇后原文、
+    #        标签只剩一个 `OpenCD`（皇后的「港台/流行」丢了）、媒介/製作組是猜的、
+    #        艺术家/年份是空的。实测 `descr.py:621` 的 `if declared:` 不成立时
+    #        会退回 `detect_tags()`，而它**自己注释警告过**对 OpenCD 标题返回 `[]`
+    #        （`[]` 与"没有标签"长得一模一样）。
+    #      ⇒ 更重的一条：`transfer_rule`（皇后的**转载规则**，如「禁止轉載」）
+    #        **只存在于页面解析结果里**（`opencd_ingest.STATUS_DENIED`）。
+    #        不抓页面就**无从判断**，等于可能把「禁止轉載」的种子转发出去。
+    #
+    #    ⚠️ 此前这一条**完全不存在**：这些行是**第一阶段的行**
+    #       （`status='SUCCESS'`，来自 qB 本地抓轨），所以它们走的是
+    #       「第一阶段照旧发」那条豁免 —— **闸门②也被一起绕过**
+    #       （`publish_after` 为空）。这正是 `db.py:189` 注释担心过的"被完全绕过"。
+    #
+    #    ★ 判据的**分寸**（不能一刀切要求 `mapped_json` 非空）：
+    #      · `opencd_tid` 空      = **本地抓轨的行**，本来就没有皇后页面 ⇒ **照旧发**
+    #        （★ 这是承重的：一刀切会把第一阶段全挡下来，是大回归）
+    #      · `opencd_tid` 非空但 `mapped_json` 空 = **想去读皇后却没读** ⇒ **不许发**
+    #      · 两者都非空           = 页面已抓、字段已落库 ⇒ 放行
+    #
+    #    ★ 实测（2026-09-23）：加这条前队列 32 条 → 加后 **6 条**
+    #      （那 6 条是本地抓轨行，不受影响；26 条皇后行被挡回）。
+    "AND (opencd_tid IS NULL OR opencd_tid = '' "
+    "     OR (mapped_json IS NOT NULL AND mapped_json != ''))"
+    # ★★ 闸门④（**禁止轉載的一律不发**）—— 2026-09-23 补，用户明确定的要求。
+    #
+    #    ★ 皇后的 `轉載規則` 三态（`opencd_parse` / `opencd_gate`）：
+    #        `ALLOW` 允许 / `NEED_CONFIRM` 拿不准 / `DENY` 禁止轉載。
+    #      用户 2026-09-23 点名：`id=200982` 是**禁止转载**，「**不要发！！**」。
+    #
+    #    ★★ 为什么它比闸门③更硬：闸门③只保证"抓过页面"，而抓过页面之后
+    #       **还得看规则说不说能转**。`opencd_ingest.STATUS_DENIED` 挡的是
+    #       **皇后路 ingest 的那一批**；但**第一阶段的行**（qB 本地抓轨）从来
+    #       不过 ingest，所以 `DENIED` 对它们**完全没有约束力** —— 这道闸门
+    #       就是补那个洞。
+    #
+    #    ★★★ 2026-09-23 **判据反转**：从「空 ⇒ 放行」改成「**空 ⇒ 拦**」
+    #
+    #    ★ 起因（实测，用户两次点名）：队列里 **6 条全是禁止转发**
+    #      —— 3 条 `中國名家名曲` + 3 条 `周杰伦`（太阳之子/八度空间/Jay）。
+    #      而它们 6 条的 `transfer_rule` **全是 NULL** ⇒ 旧的「空 ⇒ 放行」
+    #      **把 6 条禁转全放了过去**（只差一步就发出去了）。
+    #
+    #    ★ 结论：错的不是"漏标了 6 行"，而是**这个默认值本身** ——
+    #        `transfer_rule` 空 的语义是「**不知道**能不能转」，**不是**「允许」。
+    #        把"不知道"当成"允许" ⇒ 每一次都在赌，而实测**连赌错 6 次**。
+    #
+    #    ★ 为什么"本地抓轨行"不能作为豁免理由（旧注释的理由已被推翻）：
+    #      旧注释写"空 = 没抓过页面（本地抓轨行）⇒ 不拦"，把
+    #      **「本地抓轨」与「有权转发」当成了同一件事**。
+    #      实测反例：那 6 条禁转**正是**本地/手工加的行（`opencd_tid` 空、
+    #      `content_path` 指 `/downloads/…`），而它们**一条都不许发**。
+    #      ⇒ 「没有皇后页面」**不等于**「随便转」。
+    #
+    #    ★ 新判据（**默认拒绝 + 显式授权**）：
+    #      · `transfer_rule = 'ALLOW'` ⇒ **唯一**放行的值
+    #      · 空 / `DENY` / `NEED_CONFIRM` / 其它任何值 ⇒ **拦**
+    #        ★ `NEED_CONFIRM` 现在也**拦**了（它的语义是"拿不准"，
+    #          而"拿不准就不发"安全；此前"暂时放行"那条注释已作废）。
+    #
+    #    ★ 影响面（2026-09-23 实测，逐闸门拆开数）：
+    #        ①status=SUCCESS 299 → ①+② site_status 32 → ①+②+③ mapped 6
+    #        → ①+②+③+④(旧) **6**  → ①+②+③+④(**新**) **0**
+    #      ⇒ 队列 6 → 0：那 6 条禁转**全部被拦住**。
+    #      ⇒ ★ **不影响任何已在站上的行**：`site_status='EXISTS'` 的 269 条
+    #         本来就不在发布队列里（闸门② 早已把它们排除）。
+    #      ⇒ ★ 代价：第一阶段（本地抓轨）今后要发，必须先**显式**标 `ALLOW`。
+    #         这是**刻意的**（"默认允许 + 显式禁止"在此场景是反的：禁转是少数，
+    #         但"不知道"更常见，所以**授权才该是需要动作的那一方**）。
+    #
+    #    ⚠️ 已知的**不完整之处**（未修，别当成已解决）：
+    #      本闸门只保证"我们**自己**判断过能不能转"，而 `ALLOW` 目前
+    #      **只来自皇后页面的自动解析**（+ 手工标注）。
+    #      ⇒ 若某个本地行确实有权发，得**人工**标 `ALLOW`（这正是设计意图）。
+    "AND transfer_rule = 'ALLOW'"
 )
 
 
@@ -232,6 +370,41 @@ def _load_mapped(task):
             f"（info_hash={task.get('info_hash')!r}）"
         )
     return data
+
+
+# ── 「重扫不许覆盖」的 status 集合（★ 唯一来源，别在别处再写一份）──────────
+#
+# ★★ 起因（实测，2026-09-23）：`scan` 阶段每 30 分钟重扫一遍 qB，而**已发布的
+#    种子仍在 qB 里** ⇒ `run.py` 那次**无条件**的 `save_task(..., status="SUCCESS")`
+#    会把 `publish.py` 写下的 `status='PUBLISHED'` **冲回 `SUCCESS`**。
+#    实测：08:56 发布后是 `PUBLISHED`（2 条），09:2x 再看已是 `SUCCESS`。
+#
+#    `save_task()` 的 upsert 只更新**显式传入**的列，所以 `site_status` /
+#    `site_torrent_id` 没被冲掉 ⇒ **当时没造成重复发布**。但"已发布"这个
+#    **事实**丢了 ⇒ 任何靠 `status='PUBLISHED'` 判事的逻辑都静默失效。
+#
+# ★ 这三类值都是**别的阶段下的结论**，扫描阶段没有资格推翻它们：
+#     · `PUBLISHED`      —— `publish.py` 写的"已在站上"
+#     · `NO_TORRENT_FILE`—— `crawl.py` 手工路写的"没有 .torrent"（重建会改
+#                           passkey ⇒ 改 infohash，所以是**刻意**不重建）
+#     · `FAILED`         —— 失败结论；重扫想推翻它得**显式**说（`--recheck`），
+#                           不能靠"顺手重扫一遍"把它抹掉
+#
+# ★ 注意 `NO_LOG_FILE` **不在**这个集合里：`run.py` 对它有**专门**的短路分支
+#   （`status == "NO_LOG_FILE"` 直接 continue，压根走不到 save_task），
+#   而且 `--recheck` 的语义就是"无视这个缓存重做一遍"。
+#   ⇒ 若把 `NO_LOG_FILE` 也塞进来，`--recheck` 就废了（那正是它的用途）。
+PROTECTED_STATUSES = ("PUBLISHED", "NO_TORRENT_FILE", "FAILED")
+
+
+def get_status(info_hash):
+    """读一行的 `status`（**只读**，给"写之前先看看"用）。行不存在 ⇒ `None`。"""
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute("SELECT status FROM tasks WHERE info_hash = ?", (info_hash,))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else None
 
 
 def get_pending_publish():
@@ -345,6 +518,81 @@ def count_pending_publish():
     ).fetchone()[0]
     conn.close()
     return n
+
+
+def publish_funnel():
+    """
+    发布队列**逐级拆开**的行数 —— 回答"为什么队列是 0/为什么这条没进队列"。
+
+    ★★ 为什么必须有这个函数（2026-09-23 的实测教训）：
+      队列变成 0 时，`publish.py --dry-run` 只会说"没有需要发布的任务" ——
+      它**不告诉你卡在哪一级**。于是 diagnose 只能靠**手写 SQL**，
+      而手写必踩 `ERR-META-03`：口径与 `PENDING_PUBLISH_WHERE` 漂移后
+      **不报错**，只给出一个看着合理、其实不同口径的错数字。
+      今晚就是这么被绊住的（现场拼 `python -c` 撞终端换行，拼一次断一次）。
+      ⇒ 把"逐级数"做成**一个函数**，口径**直接从 `PENDING_PUBLISH_WHERE` 派生**，
+        永久消除"手写一份"这条路。
+
+    ★★ 每一级都是**累加**的（`WHERE` = 前面所有级的 AND 叠加）——
+      这样相邻两级的**差**就是"被这一级拦掉多少"，而那正是要看的。
+      ⚠️ **别把各级单独的数相减来推结论**（`ERR-META-05`：不同口径不能混减）。
+         这里**同口径**（都在累加链上），所以**差是合法的** —— 但只在同一条链内。
+
+    ★ 返回 dict，键名即判据；`queue` = 最终 `PENDING_PUBLISH_WHERE` 的行数，
+      与 `count_pending_publish()` **必然相等**（同一个常量拼出来的）。
+    """
+    # ★ 逐级条件：**按闸门顺序**列出，且**每一级都包含前面所有级**。
+    #   直接从 PENDING_PUBLISH_WHERE 里数会得到 0，而我要的是"每加一级剩多少"。
+    levels = [
+        ("g1_status_success",      "status = 'SUCCESS'"),
+        ("g2b_site_not_exists",
+         "status = 'SUCCESS' AND (site_status IS NULL OR site_status != 'EXISTS')"),
+        # 闸门②：皇子发布日期 + 7 天（★ 与 PENDING_PUBLISH_WHERE 里那句**逐字同源**）
+        ("g2_added_7d",
+         "status = 'SUCCESS' AND (site_status IS NULL OR site_status != 'EXISTS') "
+         "AND (opencd_added_at IS NOT NULL AND opencd_added_at != '' "
+         "     AND opencd_added_at <= datetime('now', '-7 days'))"),
+        # 闸门③：皇后行必须抓过页面（tid 空 = 本地抓轨行，豁免）
+        ("g3_mapped",
+         "status = 'SUCCESS' AND (site_status IS NULL OR site_status != 'EXISTS') "
+         "AND (opencd_added_at IS NOT NULL AND opencd_added_at != '' "
+         "     AND opencd_added_at <= datetime('now', '-7 days')) "
+         "AND (opencd_tid IS NULL OR opencd_tid = '' "
+         "     OR (mapped_json IS NOT NULL AND mapped_json != ''))"),
+        # 闸门④：transfer_rule 必须显式 ALLOW
+        ("g4_allow",
+         "status = 'SUCCESS' AND (site_status IS NULL OR site_status != 'EXISTS') "
+         "AND (opencd_added_at IS NOT NULL AND opencd_added_at != '' "
+         "     AND opencd_added_at <= datetime('now', '-7 days')) "
+         "AND (opencd_tid IS NULL OR opencd_tid = '' "
+         "     OR (mapped_json IS NOT NULL AND mapped_json != '')) "
+         "AND transfer_rule = 'ALLOW'"),
+    ]
+    conn = connect()
+    out = {}
+    for name, where in levels:
+        out[name] = conn.execute(
+            f"SELECT count(*) FROM tasks WHERE {where}").fetchone()[0]
+    # ★ 最终队列：**用真常量**（不是上面那条手抄的链）—— 这样若哪天
+    #   `PENDING_PUBLISH_WHERE` 改了而上面 levels 没跟着改，下面 `queue`
+    #   与 `g4_allow` **不相等** ⇒ 当场暴露漂移（ERR-META-03 的自动哨兵）。
+    out["queue"] = conn.execute(
+        f"SELECT count(*) FROM tasks WHERE {PENDING_PUBLISH_WHERE}").fetchone()[0]
+    # 闸门② 的分母（有多少行**真的**有发布日期）—— 区分"日期缺"与"日期太新"
+    out["added_notnull"] = conn.execute(
+        "SELECT count(*) FROM tasks WHERE opencd_added_at IS NOT NULL "
+        "AND opencd_added_at != ''").fetchone()[0]
+    # ★ 这两个是"数据现状"，不进闸门链，但要和上面分开报（ERR-META-05）
+    out["tid_notnull"] = conn.execute(
+        "SELECT count(*) FROM tasks WHERE opencd_tid IS NOT NULL "
+        "AND opencd_tid != ''").fetchone()[0]
+    out["rule_allow"] = conn.execute(
+        "SELECT count(*) FROM tasks WHERE transfer_rule = 'ALLOW'").fetchone()[0]
+    out["rule_null"] = conn.execute(
+        "SELECT count(*) FROM tasks WHERE transfer_rule IS NULL "
+        "OR transfer_rule = ''").fetchone()[0]
+    conn.close()
+    return out
 
 
 def get_missing_cover(published_only=True):

@@ -1,9 +1,12 @@
 # Musopia 全自动流水线。
 #
-# 一个常驻容器跑 daemon.py，按各自周期串行调度六个阶段：
-#   scan -> publish -> sync -> covers -> edit -> crawl
-# （crawl = 扫 qB 反查皇后、抓详情页入库；★ 默认关闭，要开需 ENABLE_CRAWL=true。
-#  它只入库、**不会**产生新发布 —— 理由见 daemon.py 里 crawl 阶段那段注释。）
+# 一个常驻容器跑 daemon.py，按各自周期串行调度七个阶段：
+#   scan -> publish -> sync -> covers -> edit -> vtid -> crawl
+# （vtid = 从 vertex2 库按 infohash 拿皇后页面 id，**纯本地零请求**，默认开；
+#  crawl = 按那些 id 抓皇后详情页补 mapped_json，★ 默认关闭，要开需 ENABLE_CRAWL=true。
+#  它只入库、**不会**产生新发布 —— 理由见 daemon.py 里各自的注释段。）
+# ★ 2026-09-23：原先的「扫 qB → 按种子名称搜索皇后」那条路**已整条删除**，
+#   id 现在一律来自 vtid 阶段（实测按 infohash 命中 430/547，按名字只有 1/547）。
 # 其余 service 都带 profiles，平时不启动，只用于手动跑一次性命令。
 #
 # ★★ project 名**写死在这里**（顶层 `name:`），不靠目录名推断。
@@ -34,6 +37,11 @@ x-common: &common
     # network_mode: host 下没有 host.docker.internal 这条特殊 DNS 记录，
     # 容器直接共享宿主机网络栈，所以用宿主机自己访问 qB 的真实地址。
     - QB_HOST=${QB_HOST:-http://127.0.0.1:3020}
+    # ★ 上面那个只读挂载的落点。`sync_opencd_tid.py` 读它（容器内路径）。
+    #   写在这里而不是 .env：它是**挂载点的配对**，改一处不改另一处必然出错；
+    #   放同一份文件里，改挂载的人一定看得见它。（.env 里另有 VERTEX_DB 的
+    #   同名键只为本机跑自检用，两者互不覆盖 —— 本地 .env 不进容器。）
+    - VERTEX_DB=/vertex/sql.db
   volumes: &common-volumes
     # 状态（data.db / output_torrents / daemon_state.json）放在脚本目录，
     # 而不是匿名命名卷：SMB 上直接看得到、能备份，出问题也能直接查库。
@@ -42,6 +50,17 @@ x-common: &common
     # 抽元数据、找封面要读音乐文件，只读挂载
     - ${MUSIC_DIR:-/volume1/video/music}:/downloads:ro
     - ${INCOMPLETE_DIR:-/volume2/qb_temp/temp_docker_opencd}:/downloads/incomplete:ro
+    # ★★ vertex2（另一个项目）的库，只读挂进来 —— `sync_opencd_tid.py` 靠它按
+    #   infohash 找出皇后的 `details.php?id=`。它是本项目**唯一的 id 来源**。
+    #   ★ 挂的是**目录**不是文件：sync_opencd_tid.py 期望的路径是
+    #     `/vertex/sql.db`（库会和它旁边的 -wal/-shm 一起被 SQLite 用到，
+    #     只挂单个文件会漏掉那两个伴随文件）。
+    #   ★ `:ro` 是硬要求 —— 我们**没有任何理由**写别人的库，而只读挂载让
+    #     "手滑写坏 vertex2" 从"靠自律"变成"内核拒绝"。SQLite 打开时还会
+    #     自己加 `mode=ro` + `query_only=1`（见该脚本纪律 5），双保险。
+    #   ★ 默认值是**部署时实测过的**；对不上就报 `外部库不存在` 而非静默跳过
+    #     （该脚本纪律 4：源读不到 ⇒ 非零退出）。
+    - ${VERTEX_DB_DIR:-/volume2/docker_ssd/vertex2/vertex/db}:/vertex:ro
   # 共享宿主机网络：既能到 127.0.0.1 的 qB，也能正常出网访问站点和图床
   network_mode: "host"
 

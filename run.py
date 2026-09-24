@@ -200,6 +200,37 @@ def main():
             stats["failed"] += 1
             continue
 
+        # ★★ 重扫**不许**推翻别的阶段下的结论（`db.PROTECTED_STATUSES`）。
+        #
+        # 起因（实测，2026-09-23）：这里原先**无条件**写 `status="SUCCESS"`，
+        # 而 `scan` 每 30 分钟重扫一遍 qB、**已发布的种子仍在 qB 里** ⇒
+        # 把 `publish.py` 写的 `status='PUBLISHED'` 冲回 `SUCCESS`
+        # （实测：08:56 是 `PUBLISHED`，09:2x 已是 `SUCCESS`）。
+        # `save_task()` 只更新显式传入的列，所以 `site_status`/`site_torrent_id`
+        # 没被冲掉 —— **没造成重复发布**，但"已发布"这个事实**丢了**。
+        #
+        # ★ 判据要**读库现况**，不能靠"这一轮 scan 里它是什么"（那是上一轮的结论）。
+        # ★ `--recheck` 是**显式**要重做 ⇒ 它有权推翻；默认路径无权。
+        if not args.recheck:
+            prev = db.get_status(info_hash)
+            if prev in db.PROTECTED_STATUSES:
+                print(f"⏭️  已有结论 status={prev!r}（非 scan 的管辖）⇒ 只刷新元数据，不动 status")
+                db.save_task(
+                    info_hash=info_hash,
+                    torrent_name=name,
+                    formatted_title=formatted_title,
+                    cover_url=cover_url,
+                    torrent_file=torrent_file,
+                    small_descr=small_descr,
+                    tracklist=tracklist,
+                    log_content=log_content,
+                    log_filename=log_filename,
+                    logs_json=json.dumps(logs, ensure_ascii=False),
+                    content_path=content_path,
+                )
+                stats["ok"] += 1
+                continue
+
         db.save_task(
             info_hash=info_hash,
             torrent_name=name,

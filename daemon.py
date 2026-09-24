@@ -1,13 +1,14 @@
 """
 容器化编排器：常驻进程，按各自周期依次调度
-scan / publish / sync / covers / edit / crawl。
+scan / publish / sync / covers / edit / vtid / crawl。
 
 为什么不用 cron：
-1. 这些阶段有严格的先后依赖（先扫出种子才有东西可发，先回填 ID 才能编辑），
+1. 这些阶段有严格的先后依赖（先扫出种子才有东西可发，先拿到页面 id 才能抓页面），
    cron 各自定时会出现"发布还没跑完就开始编辑"的交叉执行，两个进程同时写
    同一个 SQLite 就会 database is locked。这里串行调度，天然互斥。
-   ★ 例外：crawl（扫 qB 反查皇后）与上面五个是**两条独立流水线**，只共用
-     `tasks` 表、不互为前置 —— 它默认还是关的（`ENABLE_CRAWL=false`）。
+   ★ 例外：crawl（按 tid 抓皇后详情页）与上面几个只共用 `tasks` 表、
+     不互为前置 —— 它默认还是关的（`ENABLE_CRAWL=false`）。
+   ★ 但 `vtid`（从 vertex2 库拿皇后页面 id）**必须**排在 crawl 之前：先有 id 才有页面可抓。
 2. cron 在容器里还得额外解决 PID 1、环境变量继承、日志重定向三个老问题。
 
 设计要点：
@@ -76,7 +77,35 @@ def build_stages():
     dry_run = env_bool("DRY_RUN", False)
 
     def apply_flag(*flags):
-        """DRY_RUN=true 时把 --apply/--yes 这类写操作参数摘掉，只保留预览。"""
+        """DRY_RUN=true 时把 `--apply`/`--yes`/`--auto` 这类"真动手"参数摘掉。
+
+        ★★ 2026-09-24 加了对 `--auto` 的**告警**（这条注释比代码重要）：
+          摘掉 `--yes` 的后果是"**静默降级成交互确认**" —— 而容器里没有 TTY，
+          `input()` 立刻拿到 EOF ⇒ 它**看起来像"被拒绝"、实际是"没人问过"**。
+          摘掉 `--auto` 的后果**更重**：`publish.py` 的第二把钥匙只在
+          `--auto` 为真时校验 ⇒ 摘掉它 = **把那道保险关掉**。
+          ⇒ 所以这里对 `--auto` 只**打印**、若真被摘掉要说清楚，
+            绝不能让它变成一个"安静的成功"。
+          ★ 但注意：**真正的防线在 `publish.py` 自己**（钥匙只在 `--auto` 时校验）。
+            下面这段只是"把静默变成响声"，**不是**保险本身 ——
+            别把它当成"有它就不用管 `--auto` 传没传了"（`ERR-META-01`）。
+        """
+        if dry_run:
+            stripped = [f for f in flags if f in ("--yes", "--auto")]
+            if stripped:
+                log(f"⚠️  DRY_RUN=true ⇒ 摘掉 {stripped}（不会真动手；"
+                    f"★ 若其中含 --auto，publish 阶段的第二把钥匙随之不校验）")
+            # ★★ 2026-09-24 实测补的一条：摘掉 `--yes` 看起来像"少一层保险"，
+            #   但它在**真实路径**上的后果是**这个阶段直接崩** —— `publish.py`
+            #   会走进 `input()`，容器里没有 stdin ⇒ `EOFError` ⇒ 退出码 1
+            #   （2026-09-24 17:02 实测，见 publish 阶段的日志）。
+            #   ★ 但本函数**只在 DRY_RUN=true 时**摘参数，而 DRY_RUN=true 时
+            #     `publish.py` 会在 `args.dry_run` 那一支**先 return**（早于
+            #     `input()`）⇒ **实际不会崩**。
+            #   ⇒ 所以这里**只告警**，不为了"看起来更安全"去改摘参数的行为
+            #     （把 `--yes` 留下来 = 让 dry-run 真去发，方向正好反了）。
+            #   ★ 留这段注释是为了把"为什么 DRY_RUN 下不会崩"写清楚 ——
+            #     否则下一个人看到"摘掉了 --yes"会以为又踩了同一个坑。
         return [] if dry_run else list(flags)
 
     stages = []
@@ -95,9 +124,41 @@ def build_stages():
 
     # 2) 发布新种子到站点
     if env_bool("ENABLE_PUBLISH", True):
-        cmd = ["python", "publish.py"] + apply_flag("--yes")
-        if dry_run:
-            cmd.append("--dry-run")
+        # ★★ 2026-09-24：从 `publish.py --yes` 改为 `publish.py --auto`。
+        #    **不是改名字，是把"确认"换了个人按。**
+        #
+        #    ★ 原先这一行传的是 `--yes` —— 而 `--yes` 的语义是**跳过交互确认**，
+        #      也就是「**没有**人确认」。而发布是本项目**唯一不可逆**的动作。
+        #      ⇒ 原设计里，"自动发"与"人发的"共用同一条路径，两者唯一的区别
+        #        只是"有没有 TTY" —— 那不是保险，那是**没人**。
+        #
+        #    ★ 现在把两件事**分开**：
+        #      · `--yes`   = 跳过**交互**确认（人手工跑时用）
+        #      · `--auto`  = 声明"这是无人值守路径" ⇒ `publish.py` 里那道
+        #                    `guard_auto_key()` **必须**通过（`PUBLISH_I_AM_HERE`）。
+        #      两把钥匙（`ENABLE_PUBLISH` + `PUBLISH_I_AM_HERE`）放在**两处**：
+        #      前者是容器的长期开关，后者要在**每次执行时**都成立。
+        #      ★ 细节见 `publish.py` 的模块 docstring（"每个保险里放一把钥匙"）。
+        #
+        #    ★★ 为什么**两个都要传**（`--yes` 与 `--auto`）—— 2026-09-24 实测踩过：
+        #
+        #      `--yes` 与 `--auto` 管的是**两件不同的事**，少一个就崩：
+        #        · `--yes`  = 跳过**交互确认**（`main()` 里那个 `input()`）
+        #        · `--auto` = 声明"无人值守" ⇒ `publish.py` 校验第二把钥匙
+        #      ★ 上一次改动把 `--yes` 换成 `--auto`（以为"确认换个人按"），
+        #        结果：daemon 不带 `--yes` ⇒ `main()` 走进 `input()` ⇒
+        #        **容器里没有 stdin ⇒ EOFError ⇒ 整个阶段崩**（实测退出码 1）：
+        #          File "/app/publish.py", line 512, in main
+        #              answer = input("确认向站点发布这 1 条吗？(y/N): ")
+        #          EOFError: EOF when reading a line
+        #      ★★ 当时之所以没被发现，是因为那段注释里写着
+        #        "`run_auto()` 自己补上 `--yes`，且**只**走那一条路" ——
+        #        而 **daemon 根本不调 `run_auto()`**（它直接起 `publish.py` 子进程，
+        #        走的是 `main()`）。`run_auto()` 是个**没人调用的死函数**，
+        #        却让理由看起来很完整（`ERR-META-01`：判据看着对，但覆盖的不是那条路）。
+        #      ⇒ 教训：**改"谁传什么参数"时，必须去查真实调用链**，
+        #        不能信某个函数的名字或它自己文档里的说法。
+        cmd = ["python", "publish.py"] + apply_flag("--yes", "--auto")
         n = env_int("PUBLISH_MAX_PER_CYCLE", 0)
         if n:
             cmd += ["--limit", str(n)]
@@ -156,18 +217,60 @@ def build_stages():
             "cooldown": env_int("EDIT_COOLDOWN", 60),
         })
 
-    # 6) 从 qB 反查皇后（OpenCD），抓新种子的详情页并入库。
-    #    ★ 与 scan 是**两条独立流水线**，只共用 `tasks` 表，互不阻塞
-    #      ⇒ 放最后纯粹因为它是新增的、**最可能被关掉**的那个，与依赖无关。
-    #    ★★ 它**不会**导致任何新发布：`crawl.py` 刻意传 `qb_seed_days=None`
-    #      ⇒ 每行落 `NOT_SEEDED` ⇒ 而发布队列要求 `status='SUCCESS'`
-    #      （见 `db.PENDING_PUBLISH_WHERE`）⇒ 一条都进不去。这是**刻意的**，
-    #      不是没做完（闸门①的纪律是「宁可晚抓，不可早发」，理由见 `crawl.py`）。
-    #    ★ 为什么默认关（`ENABLE_CRAWL` 默认 **False**）：它是**第一个会主动
-    #      出网访问别人站点**的阶段。默认关 = 升级镜像不会改变对外行为，
-    #      要开必须显式加一行 .env。安全默认。
+    # 6) ★★ VT 回填：从 vertex2 的库按 infohash 拿皇后页面 id（`tasks.opencd_tid`）。
+    #    ★ 必须排在 crawl **之前** —— `build_stages()` 的注释定了规矩：
+    #      "按执行优先级从上到下排列"。先拿到 tid，crawl 才有页面可抓。
+    #
+    #    ★★ 为什么它是**新的唯一 tid 来源**（2026-09-23）：用户决定删除
+    #      「按种子名称搜索皇后」那条路（原来在 `crawl.py --from-qb` 里）。
+    #      对比：按名字搜 实测命中 1/547 且会误配；按 infohash 从 VT 库配 **430/547**。
+    #
+    #    ★ 为什么默认 **True**（与 crawl 的默认关正好相反）：
+    #      它是**纯本地、零请求**的 —— `sync_opencd_tid.py` 纪律 5 明写
+    #      "不 import requests、不 import crawl"，且只读打开别人的库
+    #      （`mode=ro` + `query_only=1`）。⇒ 默认开着**不改变对外行为**。
+    #    ★★ 但它**会写本项目的库**（`--apply` 只填 `opencd_tid` 空白列）。
+    #      `DRY_RUN` **不**管它 —— 同 crawl 的理由：`DRY_RUN` 管的是
+    #      "往 Musopia 写"，而这个阶段动的是本地库的**一个空白列**。
+    #
+    #    ★★ 退出码是**承重的**：`sync_opencd_tid.py` 纪律 4 规定
+    #      "源读不到 ⇒ 非零退出，**绝不**降级成'没有可回填的行'"。
+    #      而 daemon 的"连续失败 ⇒ 指数退避"正是**想要的行为**：
+    #      VT 挂载丢了 / 库改名 / 表结构漂了 ⇒ 阶段失败 ⇒ 退避 ⇒ 日志可见。
+    #      ⇒ **不要**给它加"失败也返回 0"的豁免（那会把
+    #      `ERR-META-01`「检测方法失效比不检测更危险」请回来）。
+    if env_bool("ENABLE_VTID", True):
+        stages.append({
+            "name": "vtid",
+            "cmd": ["python", "sync_opencd_tid.py", "--apply"],
+            # ★ 24h 与 sync 同周期。它没有"每天都变"的东西 ——
+            #   新种子靠 vertex2 那边的 RSS 周期进库，一天一次足够。
+            "interval": env_int("VTID_INTERVAL", 86400),
+            # ★★ **故意不加 `pending` 探针**：它的"积压"= "还有多少 tid 没回填"，
+            #    而那要**同时读两个库**才知道（本地 tasks × 外部 vertex）。
+            #    每 30s tick 去 join 一次别人家的库，代价与收益完全不成比例。
+        })
+
+    # 7) 按 tid 抓皇后详情页（补 `mapped_json` 等页面内容）。
+    #
+    #    ★★ 2026-09-23 改造：原来这里跑 `crawl.py --from-qb`
+    #      （扫 qB → 按名字搜皇后 → 抓页面）。名字搜索删除后那条命令**没有
+    #      匹配手段了**，⇒ 本阶段改成跑 `topup_opencd_fields.py`：
+    #      它从库里选"有 tid 但 mapped_json 为空"的行，逐条抓详情页。
+    #
+    #    ★ 为什么仍然要抓页面（VT 不替代它）：`details.php` 摘要是那些字段的
+    #      **唯一来源** —— 转载规则 / 标签 / 媒介 / 製作組 / 艺术家 / 年份。
+    #      VT 库只给页面**编号**，不给正文（实测：`tools/_probe_vertex_columns.py`
+    #      把每一列都列过，没有规则字段）。`db.PENDING_PUBLISH_WHERE` 的
+    #      闸门③④ 正是因此存在。
+    #
+    #    ★ 为什么默认关（`ENABLE_CRAWL` 默认 **False**，保持不变）：
+    #      它是**唯一会主动出网访问别人站点**的阶段。默认关 = 升级镜像不会
+    #      改变对外行为，要开必须显式加一行 .env。安全默认。
+    #      ★ 用户 2026-09-23 明确说"先不开，手动看看效果" ⇒ 保持 False。
     if env_bool("ENABLE_CRAWL", False):
-        cmd = ["python", "crawl.py", "--from-qb"]
+        limit = env_int("CRAWL_LIMIT_PER_ROUND", 20)
+        cmd = ["python", "topup_opencd_fields.py", "--limit", str(limit)]
         # ★★ dry-run 用**专用**变量 `OPENCD_CRAWL_DRY_RUN`（默认 **True**），
         #    不复用上面那个 `DRY_RUN`，两个理由：
         #    ① `DRY_RUN=false` 会**同时**打开 publish 与 edit 的写操作
@@ -178,8 +281,11 @@ def build_stages():
         #    ★ 顺带：所以这里**不能用 `apply_flag`**（它是 opt-out 语义：
         #      DRY_RUN=true 时把 flag 摘掉）；crawl 的 `--dry-run` 是 opt-in，
         #      要**加**上去。别为了"统一"改成 apply_flag，那会正好反过来。
+        #    ★ 真跑时才加 `--apply`（`topup` 的默认是**只读预览**）。
         if env_bool("OPENCD_CRAWL_DRY_RUN", True):
             cmd.append("--dry-run")
+        else:
+            cmd.append("--apply")
         stages.append({
             "name": "crawl",
             "cmd": cmd,
@@ -189,13 +295,14 @@ def build_stages():
             #   1800s 下每天 ~48 轮，「每天 50 请求」才成为**真正的紧约束**。
             "interval": env_int("CRAWL_INTERVAL", 1800),
             # ★★ **故意不加 `pending` 探针**（别的短周期阶段都有）。
-            #    探针的用途是"有积压就比周期跑得更勤"，但 crawl 的积压信号
-            #    （qB 里出现了新种子）**在调度进程里看不到** —— 要么把
-            #    `qbittorrentapi` 引进调度器（重依赖 + 每 30s tick 就问一次），
-            #    要么猜。**更糟的是它有害**：配额用尽时 `pending` 会连续几小时
-            #    为 >0 ⇒ 每 `cooldown` 秒敲一次皇后的 **cookie 探活** ——
-            #    正是 `_wait_seconds()` docstring 警告的"站点被悄悄敲得更勤"。
-            #    ⇒ 宁可用固定周期；"该不该跑"由周期决定，不由探针决定。
+            #    探针的用途是"有积压就比周期跑得更勤"，但本阶段的积压信号
+            #    （"还有多少行没补页面"）虽然**在调度进程里算得出**，
+            #    却有一个更硬的理由不加：**配额用尽时 `pending` 会连续几小时
+            #    为 >0** ⇒ 每 `cooldown` 秒就起一轮 ⇒ 每轮都发一次皇后的
+            #    **cookie 探活** —— 正是 `_wait_seconds()` docstring 警告的
+            #    "站点被悄悄敲得更勤"。⇒ 宁可用固定周期。
+            #    ★ 幂等性由 `topup_tried.jsonl` 台账保证（试过的不再选），
+            #      不靠探针（见 `topup_opencd_fields.py` 纪律 3）。
         })
 
     return stages, dry_run
@@ -296,7 +403,28 @@ ENV_SNAPSHOT_KEYS = (
     "DRY_RUN",
     "ENABLE_SCAN", "ENABLE_PUBLISH", "ENABLE_SYNC",
     "ENABLE_COVERS", "ENABLE_EDIT", "ENABLE_CRAWL",
+    # ★ 2026-09-23 加的 vtid 阶段。**白名单漏加 = 巡检看不见它是开是关**
+    #   （见上面的选白名单理由：宁可看得见地缺，不要静默地漏）。
+    "ENABLE_VTID",
     "OPENCD_CRAWL_DRY_RUN", "ALLOW_EMPTY_DB",
+    # ★★ 2026-09-24 加的自动发布钥匙。**它必须进白名单**，理由与 ENABLE_PUBLISH
+    #   完全相同 —— 而恰恰是"判据要用的"：
+    #   · 巡检要能回答"**自动发布现在能不能发**"，而不必去读容器日志；
+    #   · 它的值**不是密钥**（`i-am-here` 是个约定短语，写在源码里），
+    #     所以放进选择性落盘的白名单没有凭据外溢的问题；
+    #   · ★ 反过来说：**不进白名单就看不见它** ⇒ 那正是 `ENABLE_PUBLISH`
+    #     被巡检连续多轮写反的同一个形状（"看不见的开关 = 会被当成没配"）。
+    "PUBLISH_I_AM_HERE",
+    # ★★ 2026-09-24 加的两道**发布限速**旋钮。它们必须进白名单，理由与前一条
+    #   完全相同（"看不见的开关 = 会被当成没配"），而这里还多一层：
+    #   ★ 本机**读不到 NAS 的 `.env`**（它在 deploy.sh 的 NEVER 名单里，ERR-ENV-02）
+    #     也 SSH 不进去 ⇒ **"新的上限到底生效没有"这件事，唯一能问的就是这份快照**。
+    #     不落盘 ⇒ 本轮改动的**全部意图无法从本机验证**。
+    #   ★ 两个值都是**普通整数**（不是凭据），放进选择性落盘的白名单没有外溢问题。
+    #   ★ 它们**不参与真假判断**，只做"报数"用：巡检会把
+    #     `每日上限 = 86400/PUBLISH_INTERVAL × PUBLISH_MAX_PER_CYCLE` 直接印出来
+    #     —— 本轮用户问"现在每天最多发多少条"，那个数字不该靠人算。
+    "PUBLISH_MAX_PER_CYCLE", "PUBLISH_MIN_GAP",
 )
 
 

@@ -4,28 +4,37 @@ crawl.py 的**离线自检** —— 用本地 HTTP mock 假装是皇后。
 
 ★ 为什么要有它：`crawl.py` 是本项目**唯一主动访问别人站点**的模块，
   「跑起来才知道对不对」在这里是不可接受的 —— 真跑一次就是一次对别人站的请求。
-  所以用一个本地 mock server 把整条链路（登录检查 → 搜索 → 验 infohash → 落盘
-  → 解析 → 三态裁决）走通，**全程不碰外网**。
+  所以用一个本地 mock server 把整条链路（登录检查 → 抓详情页 → 落盘 → 解析 → 裁决）
+  走通，**全程不碰外网**。
+
+★★ 2026-09-23：**「按种子名称搜索」整条路已从 `crawl.py` 删除**（用户决定，
+   改由 `sync_opencd_tid.py` 从 VT 库按 infohash 拿 id）。
+   ⇒ 本文件里测那条路的判据**一并删除**：原判据③（同名多候选验到第二个）、
+     ⑫（`_exit_code` 真值表）、⑭⑮⑯（三态区分 / 0 命中熔断 / search_err 的条件判失败）。
+   ★ 判据② 与 ⑧ 原本各有一条分给"匹配环节"的断言，现在**只保留待抓循环那一支**
+     （`fetch_detail` 是删除后**唯一剩下的**出网原语，那才是"抓过就跳"与
+     "dry-run 不发请求"这两条性质真正的落点）。
 
 ★ 判据（每条都在下面实测）：
   ① 请求**必须过闸门**：mock 记下收到几个请求，与 gate 计数**一致**
   ② **抓过就跳**：第二次跑同一个 tid，请求数**不增加**（省请求的核心）
-  ③ **同名多候选时不能取第一条**：mock 返回 2 个候选，只有第 2 个的 infohash
-     匹配 ⇒ 必须验到第 2 个才对
+  ③ ⛔ 已删除（原：同名多候选时不能取第一条 —— 名字搜索已移除）
   ④ **每日上限真的会停**：把上限设成 2，第 3 个请求必须被拦（且日志说明是保护）
   ⑤ **禁止轉載的种子被标 DENY**，且**不进"待发布"**
   ⑥ 落盘文件可被解析层直接读（抓取/解析解耦）
   ⑦ 日志防爆表（长文本截断 / passkey 脱敏）
-  ⑧ **dry-run 真的不发详情页请求** —— ★ 2026-09-22 扩展：
-     原判据只测 `match_by_name`（匹配环节），而 **真 bug 在待抓循环**
-     （`run_from_qb` 里 `fetch_detail` 那条路**没有** dry-run 保护）
-     ⇒ 现在**两条都要**断言：待抓循环 0 次、匹配阶段 >0 次。
+  ⑧ **dry-run 真的不发详情页请求** —— ★ 判据落在**待抓循环**那条路上
+     （`fetch_detail` 是唯一出网原语；原始 bug 就在这里：docstring 说"不发请求"
+     而实际把每个待抓详情页都敲了一遍，`ERR-META-01` 形状）
   ⑨ 配额账本：处女库 = 0 → add 后 = 1
   ⑩ 账本累加性 + **不同 day_key 互不影响**（证明 key 真在 WHERE 里）
   ⑪ **账本跨进程持久**（用**新连接**读 = 新进程所见；中途调 init_db 不许清掉它）
-  ⑫ `_exit_code` 真值表 —— ★ **两个方向都断言**（该返 1 的返 1、
-     该返 0 的**不能**返 1），否则内联 `return 1` 也能蒙混过关
+  ⑫ ⛔ 已删除（原：`_exit_code` 真值表 —— 那个函数随 `run_from_qb` 一起移除）
   ⑬ `ledger_prune` 只删旧行（当天值必须还在）
+  ⑭⑮⑯ ⛔ 已删除（原：三态区分 / 0 命中熔断 / search_err 的条件判失败）
+     ★ 但那一组记录的**教训仍然有效**，见 `main()` 里对应的注释块：
+       "两种不同的失败混成一个数就没法运维" —— 现在的承接者是
+       `topup_opencd_fields.py` 的台账与 `wanted_absent` 上报。
 
 跑法：python tools/opencd-crawl-selftest.py
 """
@@ -178,19 +187,10 @@ def main(json_mode=False):
     print("=" * 74)
     c = Checker()
 
-    # ---------- 判据③：同名多候选，必须验到第二个 ----------
-    print("\n【判据③】同名多候选 ⇒ 不能取第一条，必须逐个验 infohash")
-    _clear_raw_dir()      # ★ 保证判据独立（见判据② 的注释）
-    HITS.clear()
-    gate = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
-    client = crawl.Client(gate=gate)
-    tid, checked, mstat = crawl.match_by_name(
-        client, "齐秦 - 我拿什么爱你", "778c337572b855b7f2f72cc8d43aa4564311e5a4")
-    c.check("命中正确的 tid（不是第一个候选）", "30167", tid)
-    c.check("验了 2 个候选才对", 2, checked)
-    c.check("★ 状态 = MATCH_OK（搜索成功）", crawl.MATCH_OK, mstat)
-    infohash = crawl.extract_infohash(crawl.load_raw("30167") or "")
-    c.check("从详情页取到 infohash（40 hex）", "778c337572b855b7f2f72cc8d43aa4564311e5a4", infohash)
+    # ⛔ 判据③（同名多候选必须验到第二个）**已随名字搜索一并删除**（2026-09-23）。
+    #    它测的是 `match_by_name` 的"逐个验 infohash"环节 —— 那条路整条被移除了
+    #    （id 现在由 `sync_opencd_tid.py` 按 infohash 从 VT 库直接给出，不经过搜索）。
+    #    ★ 判据本身**没有失效**，是它测的**功能不存在了** —— 留着会 ImportError。
 
     # ---------- 判据②：抓过就跳（省请求的核心） ----------
     print("\n【判据②】抓过就跳 —— 第二次跑同一 tid，**详情页请求必须为 0**")
@@ -198,19 +198,23 @@ def main(json_mode=False):
     #    但判据③ 刚跑过、已经把详情页落盘了 ⇒ "第一次确实抓了详情页"当场为 False。
     #    ★ 教训：共享状态的判据会**互相污染**，顺序一变结论就变（同 `ERR-OS-01` 那族
     #      「结论取决于执行顺序」）。这里显式清空落盘目录，让每条判据自己说了算。
+    #
+    # ★ 2026-09-23：**改走 `fetch_detail`**（原来走 `match_by_name`）。
+    #   "抓过就跳"这条性质**落在 `fetch_detail` 的落盘检查上**（`crawl.py:234`），
+    #   而那正是名字搜索删掉之后**唯一剩下的**出网原语 ⇒ 判据该打在它身上。
+    #   ★ 顺带把原来那条"第二次仍要搜"删掉：搜索没有了，这句话失去意义。
     _clear_raw_dir()
     HITS.clear()
     gate2 = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
     client2 = crawl.Client(gate=gate2)
-    crawl.match_by_name(client2, "齐秦 - 我拿什么爱你", "778c337572b855b7f2f72cc8d43aa4564311e5a4")
+    crawl.fetch_detail(client2, "30167")
     first_details = [h for h in HITS if "plugin_details" in h]
     HITS.clear()
-    crawl.match_by_name(client2, "齐秦 - 我拿什么爱你", "778c337572b855b7f2f72cc8d43aa4564311e5a4")
+    crawl.fetch_detail(client2, "30167")
     second_details = [h for h in HITS if "plugin_details" in h]
-    second_searches = [h for h in HITS if "search=" in h]
     c.check("干净的落盘目录下，第一次确实抓了详情页", True, len(first_details) > 0)
     c.check("★ 第二次详情页请求 = 0（全部复用落盘）", 0, len(second_details))
-    c.check("第二次仍要搜（搜索是必要的，省不掉）", True, len(second_searches) > 0)
+
     print(f"        （第一次详情页请求 {len(first_details)} 个 → 第二次 {len(second_details)} 个）")
 
     # ---------- 判据①：请求数 == 闸门计数 ----------
@@ -239,8 +243,16 @@ def main(json_mode=False):
 
     # ---------- 判据⑤：禁止轉載 → DENY ----------
     print("\n【判据⑤】禁止轉載的种子 → DENY，且不放行")
-    info_deny, _ = crawl.fetch_detail(client, "30167")
-    info_allow, _ = crawl.fetch_detail(client, "200028")
+    # ★ 自备 client —— 原来复用判据③ 建的 `client`，而判据③ 已删除
+    #   （`NameError: name 'client' is not defined`，正是这次重构被自检当场抓住的）。
+    #   ★ 教训：判据之间**不许共享夹具** —— 判据② 的注释早写过这个道理，
+    #     这次是同一个坑换了个位置（删上游 ⇒ 下游断）。
+    #   ★ 判据⑤ 要**真的读页面**，所以这里用落盘优先（`fetch_detail` 抓过就跳）
+    #     ⇒ 判据② 已把 30167 落了盘，这一条基本零请求。
+    gate5 = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
+    client5 = crawl.Client(gate=gate5)
+    info_deny, _ = crawl.fetch_detail(client5, "30167")
+    info_allow, _ = crawl.fetch_detail(client5, "200028")
     c.check("30167（禁止轉載）裁决", op.RULE_DENY, info_deny.rule)
     c.check("30167 不可自动发布", False, info_deny.may_auto_publish())
     c.check("200028（歡迎轉載）裁决", op.RULE_ALLOW, info_allow.rule)
@@ -263,31 +275,22 @@ def main(json_mode=False):
     c.check("mask_secrets 抹 passkey", True,
             "abcdef" not in L.mask_secrets("passkey=abcdef123456"))
 
-    # ---------- 判据⑧：dry-run 不发抓取请求（★ 2026-09-22 扩展到两条路） ----------
-    print("\n【判据⑧】dry-run：**两条路**都不许发详情页请求")
-    # ★★ 为什么必须测两条路：原判据只测了 `match_by_name`（匹配环节），
-    #    而实测的真 bug 在**待抓循环**（`run_from_qb` 里的 `fetch_detail`
-    #    原先没有 dry-run 保护）⇒ 只测匹配环节会**漏掉那个 bug**，
-    #    表现是"dry-run 依然把每个待抓详情页敲了一遍"（ERR-META-01 形状）。
-    HITS.clear()
-    gate8 = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
-    client8 = crawl.Client(gate=gate8, dry_run=True)
-    _tid8, _chk8, _st8 = crawl.match_by_name(client8, "齐秦", "deadbeef" * 5, max_candidates=2)
-    details = [h for h in HITS if "plugin_details" in h]
-    searches = [h for h in HITS if "search=" in h]
-    c.check("匹配环节：dry-run 下没有详情页请求", 0, len(details))
-    c.check("匹配环节：但**搜索照发**（dry-run 靠它列出「会抓哪些」）",
-            True, len(searches) > 0)
-
-    # ★ 待抓循环那条路：直接跑 `run_from_qb` 里等价的"待抓 → fetch_detail"段。
-    #   这里不整跑 `run_from_qb`（那要 qB，mock 不了），而是**照着它的分支**
-    #   断言同一个条件：`client.dry_run` 为真时不许进 `fetch_detail`。
-    #   ★ 判据落在**行为**上（HITS 有没有详情页），不是落在"代码里有没有那个 if"。
-    print("       ↓ 待抓循环（run_from_qb 里 fetch_detail 那条路）")
+    # ---------- 判据⑧：dry-run 不发抓取请求 ----------
+    print("\n【判据⑧】dry-run：**不发详情页请求**")
+    # ★★ 这条判据的来历（2026-09-22，仍然值钱，别删）：原判据只测了
+    #    `match_by_name`（匹配环节）那条**没有副作用**的路，而实测的真 bug 在
+    #    **待抓循环** —— `fetch_detail` 那条路原先**没有任何 dry-run 保护**，
+    #    于是 `--dry-run` 会把每个待抓详情页**真的抓一遍**，与 docstring
+    #    承诺的"不发请求"矛盾（`ERR-META-01`：说的和做的不一样）。
+    #
+    # ★ 2026-09-23：`match_by_name` 已删除，但**被测的那条路还在**
+    #   （`topup_opencd_fields.py` 就是复刻的"待抓 → fetch_detail"循环）
+    #   ⇒ 判据重心整个挪到"待抓循环"这一支，不再分两半。
+    print("       ↓ 待抓循环（topup_opencd_fields.py 里的 fetch_detail 那条路）")
     HITS.clear()
     gate8b = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
     client8b = crawl.Client(gate=gate8b, dry_run=True)
-    # 复刻 run_from_qb 的待抓循环体（含新加的 dry-run 保护）
+    # 复刻 topup 的待抓循环体（含 dry-run 保护）
     for tid in ("30167", "200028"):
         if client8b.dry_run:
             continue                      # ← 被测的那一行
@@ -306,7 +309,7 @@ def main(json_mode=False):
     d8c = [h for h in HITS if "plugin_details" in h]
     c.check("⛔阴性对照：非 dry-run 时上面那段**必须真的抓**", True, len(d8c) > 0)
 
-    # ==================== 判据⑨-⑬：配额账本 + 退出码 ====================
+    # ==================== 判据⑨-⑪：配额账本 ====================
     #
     # ★ 这几条**不需要 mock**（纯本地），但仍放在这里：`db.py` 刻意没有自己的
     #   `--selftest`（那要改所有模块都依赖的 import 顺序），而本文件已经有
@@ -344,20 +347,14 @@ def main(json_mode=False):
     db.init_db()                          # 再跑一次迁移
     c.check("★ init_db() 重跑后计数**仍在**（不是 DROP+CREATE）", 2, db.ledger_get(D1))
 
-    print("\n【判据⑫】_exit_code 真值表 —— ★ 两个方向都断言")
-    # ★★ 只断言"该返 1 的返 1"是不够的：内联 `return 1` 也能过。
-    #    必须同时断言"该返 0 的**不能**返 1"。
-    truth = [
-        ({"store_failed": 1, "failed": 0}, False, 1, "入库失败 ⇒ 1（重试有意义）"),
-        ({"store_failed": 0, "failed": 3}, False, 1, "抓取失败 ⇒ 1"),
-        ({"store_failed": 0, "failed": 0}, False, 0, "★ 没活 ⇒ **0**（不是失败）"),
-        ({"store_failed": 0, "failed": 0}, True, 0,
-         "★★ 配额用尽 ⇒ **0**（保护不是错误；返 1 会误触发退避）"),
-        ({"store_failed": 1, "failed": 0}, True, 1, "有真失败时，即便配额也停 ⇒ 1"),
-    ]
-    for stats, quota, want, label in truth:
-        got = crawl._exit_code(stats, quota_hit=quota)
-        c.check(label, want, got)
+    # ⛔ 判据⑫（`_exit_code` 真值表）**已随 `_exit_code` 一并删除**（2026-09-23）。
+    #    那个函数**整个存在的理由**就是 `run_from_qb` 的退出码 —— 它的每一条
+    #    （`store_failed` / `failed` / `search_err` / `quota_hit` 豁免）都对应
+    #    qB 反查那条路的某种结局。`run_from_qb` 删了，函数就没有调用方了。
+    #    ★ `run_manual` 明确不接它（见 `crawl.py:run_manual` 的 docstring：
+    #      "本路不由 daemon 驱动，没有退避语义"）⇒ 删它是**一致的**，不是遗漏。
+    #    ★ 那条"配额用尽不许吞掉真失败"的顺序教训**仍然值钱**，已随函数一起
+    #      留在 git 历史里；若将来 `topup` 需要一个退出码函数，照那个真值表写。
 
     print("\n【判据⑬】ledger_prune 只删旧行（当天值必须还在）")
     db.ledger_add("2026-01-01", 9)        # 一条很老的行
@@ -368,100 +365,30 @@ def main(json_mode=False):
     c.check("★ 当天的值没被误删", 2, db.ledger_get(D1))
     print(f"        （prune 删了 {removed} 行；老的 2026-01-01 原是 {before_old}）")
 
-    # ==================== 判据⑭-⑯：三态区分 + 0 命中熔断 ====================
+    # ⛔ 判据⑭⑮⑯（三态区分 / 0 命中熔断 / `_exit_code` 对 search_err 的处理）
+    #    **已随名字搜索一并删除**（2026-09-23）。
     #
-    # ★★ 这一组是 2026-09-22 **真跑一次生产才暴露**的缺陷（用户实测）：
-    #   541 个 qB 种子、每轮 20 请求上限，日志里一串
-    #   「未匹配到皇后条目：（验了 0 个候选）」——
-    #   而 `验收了 0 个候选` **同时**意味着三件事：
-    #     ① 搜索成功但 0 候选（皇后上没这条）
-    #     ② 搜索请求失败（HTP 503 / 网络）
-    #     ③ 第一个候选的详情页抓失败
-    #   三者的处置**完全不同**（①熔断省配额 / ②③重试），混成一个数就**没法运维**。
-    #   ★ 为什么离线自检原来没抓到它：原判据只用「齐秦」这种**干净关键词**搜，
-    #     必然命中 ⇒ 永远走不到 0 候选那条路（"判据覆盖不到真实输入"，`ERR-META-02`）。
-    #     现在用 mock 的 ZEROCAND / HTTPFAIL 开关把这两态**造出来**。
-
-    print("\n【判据⑭】三态区分：0 候选 ⇒ MATCH_ZERO；请求失败 ⇒ MATCH_ERROR")
-    _clear_raw_dir()
-    g14 = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
-    cl14 = crawl.Client(gate=g14)
-    # ① 搜索成功但 0 候选
-    t_z, n_z, st_z = crawl.match_by_name(cl14, "ZEROCAND 某专辑", "deadbeef" * 5)
-    c.check("① 0 候选 ⇒ tid 为 None", None, t_z)
-    c.check("① 0 候选 ⇒ 状态 MATCH_ZERO（★ 可熔断）", crawl.MATCH_ZERO, st_z)
-    # ② 搜索请求失败（HTTP 503）
-    errors = []
-    t_e, n_e, st_e = crawl.match_by_name(
-        cl14, "HTTPFAIL 某专辑", "deadbeef" * 5,
-        on_error=lambda k, d: errors.append((k, d)))
-    c.check("② 请求失败 ⇒ 状态 MATCH_ERROR（★ 不可熔断）", crawl.MATCH_ERROR, st_e)
-    c.check("② 错误回调收到 kind='http'", "http", errors[0][0] if errors else None)
-    c.check("② 错误详情里带状态码 503", True, "503" in (errors[0][1] if errors else ""))
-    # ③ 阴性对照：正常命中仍是 MATCH_OK（证明上面两个不是"永远返同一态"）
-    _t3, _n3, st3 = crawl.match_by_name(
-        cl14, "齐秦 - 我拿什么爱你", "778c337572b855b7f2f72cc8d43aa4564311e5a4")
-    c.check("⛔阴性对照：正常命中 ⇒ MATCH_OK", crawl.MATCH_OK, st3)
-    # ④ 阴性对照：搜到候选但 infohash 不匹配 ⇒ MATCH_OK（**不是** ZERO！）
-    #    ★ 这条很要紧：它和"0 候选"处置相同（别再搜），但**原因不同**
-    #      （后者是"皇后上没这条"，这里是"有同名的别的版本"）—— 日志要能分开。
-    _t4, _n4, st4 = crawl.match_by_name(cl14, "齐秦 - 我拿什么爱你", "ffff" * 10)
-    c.check("⛔阴性对照：有候选但都不匹配 ⇒ MATCH_OK（不是 ZERO）",
-            crawl.MATCH_OK, st4)
-
-    print("\n【判据⑮】0 命中熔断：ZERO 的**不再发详情页请求**，ERROR 的**仍重试**")
-    # ★★ 熔断的方向必须是"只对 ZERO"：对 ERROR 也熔断 = 把"今天网络抖一下"
-    #    变成"这条种子永远漏抓"，而**不漏抓**正是熔断想保护的东西。
-    _clear_raw_dir()
-    HITS.clear()
-    g15 = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
-    cl15 = crawl.Client(gate=g15)
-    _t, _n, _s = crawl.match_by_name(cl15, "ZEROCAND x", "a" * 40)
-    z_detail = [h for h in HITS if "plugin_details" in h]
-    c.check("① ZERO：0 候选 ⇒ 详情页请求 0 次（本来也没候选可抓）",
-            0, len(z_detail))
-    # 熔断的真正含义：`run_from_qb` 收到 ZERO 后不再为它花任何请求。
-    #   ★ 这里按 `run_from_qb` 的分支**照抄**那段决策，断言同一个条件。
-    HITS.clear()
-    _clear_raw_dir()
-    stats15 = {"zero_cand": 0, "search_err": 0, "nomatch": 0}
-    for nm in ("ZEROCAND x", "HTTPFAIL y"):
-        try:
-            _tid, _chk, st = crawl.match_by_name(cl15, nm, "b" * 40)
-        except Exception:
-            st = crawl.MATCH_ERROR
-        if st == crawl.MATCH_ERROR:
-            stats15["search_err"] += 1      # ← 不熔断
-        elif st == crawl.MATCH_ZERO:
-            stats15["zero_cand"] += 1      # ← 熔断
-    c.check("② 两种失败分别计数（ZERO 1 条 / ERROR 1 条）",
-            {"zero_cand": 1, "search_err": 1, "nomatch": 0}, stats15)
-    c.check("③ ★ ERROR 那条**没有**被熔断（计进 search_err 而非 zero_cand）",
-            1, stats15["search_err"])
-
-    print("\n【判据⑯】`_exit_code` 对 search_err 的**条件**判失败")
-    # ★ 条件 = `search_err > 0 且 matched == 0`。
-    #   单向不够：必须同时断言"部分失败但**有命中**时**不**算失败"，
-    #   否则写成"只要 search_err>0 就返 1"也能过，而那会让一次网络抖动
-    #   把 daemon 打进退避（把偶发放大成"整轮干得更少"）。
-    c.check("全fail（search_err>0, matched=0）⇒ 1",
-            1, crawl._exit_code({"search_err": 3, "matched": 0}))
-    c.check("★ 有命中时的部分失败 ⇒ 0（抖动不该触发退避）",
-            0, crawl._exit_code({"search_err": 3, "matched": 1}))
-    c.check("⛔阴性对照：无 search_err ⇒ 0",
-            0, crawl._exit_code({"search_err": 0, "matched": 0}))
-    # ★★ 配额豁免**只豁免搜索失败**，不许吞掉真失败：
-    #   "配额用尽 + 全部搜索失败" ⇒ 0（搜索失败是配额的后果，不是故障）
-    c.check("★ 配额用尽豁免 search_err ⇒ 0",
-            0, crawl._exit_code({"search_err": 5, "matched": 0}, quota_hit=True))
-    #   "配额用尽 + 有入库失败" ⇒ 1（真失败与配额无关，**必须**报出来）
-    #   ★ 这条是自检抓到的顺序 bug 的回归判据：我第一版把 quota_hit 短路在最前，
-    #     于是这一支会返 0 —— **把真失败静默掉**（"判据失效"那个形状）。
-    c.check("★★ 配额用尽**不能**吞掉入库失败 ⇒ 1",
-            1, crawl._exit_code({"store_failed": 2, "search_err": 5},
-                                quota_hit=True))
-    c.check("★★ 配额用尽**不能**吞掉抓取失败 ⇒ 1",
-            1, crawl._exit_code({"failed": 1}, quota_hit=True))
+    # ★★ 但这一组背后的**教训必须留着** —— 它是"真跑一次生产才暴露"的缺陷，
+    #    而且**换了个地方还可能再犯**，所以整段留在这里当反面教材：
+    #      · 症状：541 个 qB 种子、每轮 20 请求上限，日志里一串
+    #        「未匹配到皇后条目（验了 0 个候选）」。
+    #      · 要害：`验了 0 个候选` **同时**意味着三件事 ——
+    #          ① 搜索成功但 0 候选（皇后上没这条）  ② 搜索请求失败  ③ 候选详情页抓失败
+    #        而三者的处置**完全相反**（①熔断省配额 / ②③重试），
+    #        混成一个数就**没法运维**（`ERR-META-02`：把两种事混成一种）。
+    #      · 离线自检原来没抓到的原因：原判据只用「齐秦」这种**干净关键词**搜，
+    #        必然命中 ⇒ **永远走不到 0 候选那条路** —— 判据覆盖不到真实输入。
+    #      · 熔断的方向：**只对"确实没有"熔断**，对"请求失败"熔断 = 把
+    #        "今天网络抖一下"变成"这条种子永远漏抓"。
+    #    ⇒ 本模块现在的替代品是 `topup_opencd_fields.py` 的台账
+    #      （`topup_tried.jsonl`）+ `wanted_absent` 上报：它面对的是同一个形状
+    #      （"这条没补上"可能是"已补好/没 tid/打错了"三件事），
+    #      而它的做法正是**三态分开报、不静默**。
+    #    ★ mock 里的 ZEROCAND / HTTPFAIL 开关与 `sample-search-qinqin.html`
+    #      也一并留着（判据②⑤ 仍在用详情页样本；搜索样本已无判据引用，
+    #      但删它没有收益，且它记录了实测的齐秦同名样本）。
+    #       ⚠️ 留着的代价：mock 的 `/torrents.php` 分支**不再被任何判据走到**。
+    #       若哪天有人拿它当"搜索还活着"的证据，那条注释（本段）就是答案。
 
     srv.shutdown()
     print("\n" + "=" * 74)

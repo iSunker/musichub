@@ -51,10 +51,36 @@ def parse_args():
     ap.add_argument("--anonymous", action="store_true",
                     help="把种子改成匿名发布（默认不动这个开关，沿用站点现状）")
 
+    # ★ 这行 help 曾写成「可选 name,small_descr,descr」—— **过时且错**（2026-09-23 订正）。
+    #
+    # 实际实现：`select_fields()` 做的是
+    #     {k: v for k, v in full_fields.items() if k in keep}
+    # 而 `keep` 来自把 `--fields` 按逗号切开 —— **没有任何键名白名单校验**，
+    # ⇒ 它是**任意键**的过滤器，键名就是 `descr.build_form_fields()` 那份 dict 的键。
+    #
+    # ★ 承重的判据（实测定过，见 SESSION-NOTES 2026-09-23 晚）：
+    #   给什么键就只提交什么键，其余沿用**页面上现值**
+    #   （`musopia.edit_torrent()` docstring: "overrides 里给什么就改什么"）。
+    #   ⇒ 所以 `name`（会换成皇后标题）、`small_descr`（会清空站点副标题）、
+    #     `descr` **不写进 `--fields` 就不会被碰** —— 这正是"只补不覆盖"的实现。
+    #   实测：补 `tags[4][]` 等 6 个键之后回读，标题仍是我们自己的写法。
+    #
+    # ★ 但 **`id` 永远保留**（`select_fields` 的调用方 `full["id"]=…`），漏写它没关系。
+    # ★ 完整键名清单：`--list-fields`（免得再去读 descr.py 猜）。
     ap.add_argument("--fields", default="",
-                    help="逗号分隔，只改这些字段（可选 name,small_descr,descr）。"
-                         "默认改全部三项")
+                    help="逗号分隔的**任意键**白名单，只提交列出的字段；未列出的"
+                         "字段沿用站点现值（所以不列 name/small_descr/descr 就"
+                         "不会覆盖它们）。默认（空）＝提交全部。"
+                         "完整键名见 --list-fields。"
+                         "例：--fields 'tags[4][],custom_fields[4][1],team_sel[4]'")
     ap.add_argument("--verify", action="store_true", help="提交后回读详情页确认")
+    # ★ 加这个开关的理由：`--fields` 的 help 要指向一份**真实**的键名清单，
+    #   而清单的真值只在 `descr.build_form_fields()` 的返回 dict 里
+    #   （这份表套搬过 `takeupload.php` 的字段名，手抄必然过时）。
+    #   ⇒ 不要去读源码猜，**print 出来**。
+    ap.add_argument("--list-fields", action="store_true",
+                    help="只打印 --fields 可用的键名（真值来自"
+                         " descr.build_form_fields()，不读源码猜），然后退出")
     ap.add_argument("--yes", action="store_true",
                     help="跳过批量二次确认。容器里没有 TTY，input() 会抛 EOFError，"
                          "定时任务必须加这个")
@@ -88,6 +114,32 @@ def main():
 
     config.print_runtime_info()
     db.init_db()
+
+    # ★ `--list-fields`：把 `--fields` 的可用键名**印出来**，然后退出。
+    #   真值来自真跑一次 `build_form_fields()`，不是手抄清单
+    #   （手抄的那份正是这次订正掉的错误来源）。
+    if args.list_fields:
+        tasks = db.get_published()
+        if not tasks:
+            sys.exit("❌ 库里没有已发布的记录，无法取样本渲染字段名。")
+        sample = tasks[0]
+        import publish as _pub
+        _pub.merge_mapped(sample)
+        full = descr.build_form_fields(sample, anonymous=args.anonymous,
+                                       autodetect=not args.no_autodetect)
+        full.pop("type", None)   # 编辑路永远不发这个（见下面 describe 之后的注释）
+        print(f"\n📋 --fields 可用的键名（样本 id={sample.get('site_torrent_id')}，"
+              f"共 {len(full)} 个）：\n")
+        for k in sorted(full):
+            v = full[k]
+            sv = str(v)
+            if len(sv) > 56:
+                sv = sv[:53] + "..."
+            print(f"  {k:<34} = {sv!r}")
+        print("\n★ 未列出的键**不会**被提交 ⇒ 站点上那些格子沿用现值。"
+              "\n★ 想保留站点的标题/副标题/简介，就**别把** name / small_descr / descr"
+              " 放进 --fields。")
+        return
 
     if args.torrent_id:
         tasks = db.get_published(torrent_id=args.torrent_id)

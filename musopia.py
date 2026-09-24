@@ -254,7 +254,30 @@ class MusopiaClient:
                 v = [str(x) for x in v]
             else:
                 v = "" if v is None else str(v)
-            if old != v:
+            # ★★ 2026-09-23 修：多值键（`xxx[]`）必须做**顺序无关**比较。
+            #
+            #   ★ 症状（实测）：`tags[4][]` 每次都被判成"有变化"，于是**每轮都
+            #     真提交一次**、白花 2~3 个请求，而站点上的内容其实一字未改。
+            #     实测输出：`['5','31','24','23'] -> ['5','24','23','31']` —— 集合相同。
+            #
+            #   ★ 根因（`fetch_edit_form` line 203-204）：站点读回来的多值键是
+            #     `fields.setdefault(name, []).append(val)`，顺序 = **页面上 checkbox
+            #     的 DOM 顺序**；而我们算出来的顺序 = `mapped_json` 里的顺序（再 append
+            #     `OpenCD`）。两边**天然不同** ⇒ `old != v` 恒真。
+            #
+            #   ★ 为什么是"比较时排序"而不是"构造时排序"：
+            #     `tags[4][]` 是 **checkbox 多值**，站点按**集合**语义处理 ⇒ 顺序**无意义**。
+            #     但 `fields[k] = v` 仍要写**原顺序**（保持与 `mapped_json` 可对照，
+            #     且 `descr` 的注释专门讲过不要 join 成一个值）。⇒ 只改**判等**，不改**载荷**。
+            #
+            #   ★ 判据（阴性对照）：改前，对一条**站点内容已与本地一致**的条目
+            #     跑 `--apply`，会打印 `· tags[4][]: [...] -> [...]` 并 `edited=1`；
+            #     改后同一操作应打印 `ℹ️ 无字段变化` 且返回「无需修改」。
+            if isinstance(old, list) and isinstance(v, list):
+                same = sorted(old) == sorted(v)
+            else:
+                same = (old == v)
+            if not same:
                 changes.append((k, old, v))
             fields[k] = v
 
