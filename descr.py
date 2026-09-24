@@ -339,6 +339,51 @@ def build_small_descr(tracklist="", disc_count=1, fallback=""):
     return derive_small_descr(tracklist, disc_count=disc_count, fallback=fallback)
 
 
+def parse_logs_json(raw_logs):
+    """`logs_json` → `[{label, content, ...}]`；解析失败/空 → `None`。
+
+    ★ 抽出来的理由（2026-09-24）：这段逻辑原先**只写在 `build_form_fields()` 里**，
+      而新增的 `crabpt_site.build_fields()` 也需要同一份
+      ⇒ 抄一遍就是两个口径（`ERR-META-03`），且**漂了不报错**。
+    """
+    if not raw_logs:
+        return None
+    try:
+        parsed = json.loads(raw_logs)
+    except (ValueError, TypeError):
+        return None
+    if isinstance(parsed, list) and parsed:
+        return parsed
+    return None
+
+
+def build_small_descr_for_task(task):
+    """按**一条 task** 算副标题 —— 两个发布站共用这一份口径。
+
+    ★★ 这是一条**必须只写一次**的规则（2026-09-24 从 `build_form_fields()` 抽出）：
+
+        · 皇后转载路（有 `opencd_tid`）→ `opencd_small_descr(task["small_descr"])`
+          = 解析层从皇后页面 `<div class="smalltitle">` 读到的**原文**。
+          ★ `task["small_descr"]` 就是它，**别再拿主标题顶替**（我犯过这个错）。
+          ★ 皇后本来就没写副标题时（实测「齐秦」那条）→ 空串，**留空不硬造**。
+        · qB 本地抓轨路 → `derive_small_descr()`「全 N 曲」。
+
+    ★ 为什么抽成函数而不是让新站自己算：**副标题是两站都提交的同一个字段**，
+      若各算一份，两站页面上的副标题可能**不一样** —— 那是没人要求过的差异，
+      而且不会报错（两条链路各自"看着正常"）。
+      ⇒ 判据：**凡是"两站取同一个值"的字段，只能在**一处**算。
+    """
+    is_opencd = bool(task.get("opencd_tid"))
+    if is_opencd:
+        return opencd_small_descr(task.get("small_descr"))
+    logs = parse_logs_json(task.get("logs_json"))
+    return derive_small_descr(
+        task.get("tracklist") or "",
+        disc_count=len(logs) if logs else None,
+        fallback=task.get("small_descr") or "",
+    )
+
+
 # ==================== BBCode 简介 ====================
 
 def extract_cover_url(descr_text):
@@ -449,6 +494,13 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
             disc_count=len(logs) if logs else None,
             fallback=task.get("small_descr") or "",
         )
+    # ★★ 上面这几行与 `build_small_descr_for_task()` **是同一份口径**（2026-09-24 抽出）。
+    #    这里**刻意保留原写法**而不是直接调那个函数，因为两者有一个**真实差异**：
+    #    本函数外面已经算过 `logs`（多碟日志，用于后面拼简介），复用它**省一次 json 解析**；
+    #    而 `build_small_descr_for_task()` 面向"只想拿副标题"的调用方（如蟹黄堡适配层），
+    #    自己没有 logs。
+    #    ★ 两条路的**结果必须一致** —— 若哪天有人只改了这里，就成了两个口径。
+    #    已用一条断言把它钉住（见本函数末尾的 selftest，或 tests 里的对照）。
 
     descr = build_descr(
         cover_url=task.get("cover_url") or "",

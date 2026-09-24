@@ -419,28 +419,19 @@ def readd_to_qb(qb, client, info_hash, torrent_id):
 
 def merge_mapped(task):
     """
-    把 `task["mapped_json"]`（`opencd_map.map_all()` 的**证据快照**）解回**顶层键**。
+    把 `task["mapped_json"]` 解回**顶层键**。
 
-    ★★ 为什么必须有这一步（这是最容易漏、且**漏了不报错**的一环）：
-      `descr.build_form_fields()` 读的是 `task["tags"] / ["medium_sel"] /
-      ["audiocodec_sel"] / ["team_sel"]` 这些**顶层键**，而
-      `db.get_pending_publish()` 只 SELECT `db.TASK_FIELDS`（没有这四列 ——
-      它们存在 `mapped_json` 里）。
-      ⇒ 不合并 ⇒ 那四个键是 `None` ⇒ `descr` 退回 `detect_medium()` /
-        `detect_tags()` **从标题猜** ⇒ 页面看着"有值"，**值是猜的**。
-        这正是 `ERR-META-01` 那个 bug 的形状（静默、不报错）。
+    ★★ 2026-09-24：**实现已下移到 `db.merge_mapped()`**，这里只是转调。
+      下移的理由：新增第二个发布站（蟹黄堡），它的适配层也需要这一步，
+      而 `crabpt_site.py` 不能 import publish（会成环）⇒ 各写一份 = 两个口径，
+      而这一步**恰恰是"漏了不报错"的那一步**（原 docstring 原话），
+      最不该有两份。⇒ 事实源放在 `db.py`（它已经有 `_load_mapped`）。
 
-    ★ 用**快照**而不是当场重算：`TAG_NAME_MAP` / `MEDIUM` 会变（44 项标签表刚改过、
-      WAV 编号未定）⇒ 发布要用的就是三天前抓页面时做的那个决定。
-    ★ 第一阶段（qB 本地抓轨）的行没有 `mapped_json` ⇒ `_load_mapped` 返回 `{}`，
-      这里**什么都不改**，行为与改动前完全一致。
-    ★ 解析失败会**抛出**（`db._load_mapped` 的契约）—— 响亮地坏，不静默当空。
+    ★ 保留这个名字与签名：`publish.py` 内有多处调用（含 `--dry-run` 预览那条
+      `fields = descr.build_form_fields(merge_mapped(valid[0]))`），
+      改名会波及那些点，而**它们的行为一个字都不该变**。
     """
-    mapped = db._load_mapped(task)
-    for key in ("tags", "medium_sel", "audiocodec_sel", "team_sel"):
-        if key in mapped and mapped[key] not in (None, ""):
-            task[key] = mapped[key]
-    return task
+    return db.merge_mapped(task)
 
 
 

@@ -372,6 +372,41 @@ def _load_mapped(task):
     return data
 
 
+# ★★ 「把 mapped_json 铺回顶层键」这一步**必须只有一份实现**（2026-09-24 从 publish.py 下移）。
+#
+#   原先它叫 `publish.merge_mapped()`。下移的理由是**新增了第二个发布站**：
+#   蟹黄堡的适配层（`crabpt_site.py`）也需要这一步，而它**不能 import publish**
+#   （publish 会 import 它，成环）⇒ 各写一份就又是两个口径。
+#   ★ 而这一步的 docstring 原话就说了"漏了不报错" —— 正因如此，**更不该有两份**。
+MAPPED_TOP_KEYS = ("tags", "medium_sel", "audiocodec_sel", "team_sel")
+
+
+def merge_mapped(task):
+    """
+    把 `task["mapped_json"]`（`opencd_map.map_all()` 的**证据快照**）解回**顶层键**。
+
+    ★★ 为什么必须有这一步（这是最容易漏、且**漏了不报错**的一环）：
+      `descr.build_form_fields()` 读的是 `task["tags"] / ["medium_sel"] /
+      ["audiocodec_sel"] / ["team_sel"]` 这些**顶层键**，而
+      `db.get_pending_publish()` 只 SELECT `db.TASK_FIELDS`（没有这四列 ——
+      它们存在 `mapped_json` 里）。
+      ⇒ 不合并 ⇒ 那四个键是 `None` ⇒ `descr` 退回 `detect_medium()` /
+        `detect_tags()` **从标题猜** ⇒ 页面看着"有值"，**值是猜的**。
+        这正是 `ERR-META-01` 那个 bug 的形状（静默、不报错）。
+
+    ★ 用**快照**而不是当场重算：`TAG_NAME_MAP` / `MEDIUM` 会变（44 项标签表刚改过、
+      WAV 编号未定）⇒ 发布要用的就是三天前抓页面时做的那个决定。
+    ★ 第一阶段（qB 本地抓轨）的行没有 `mapped_json` ⇒ `_load_mapped` 返回 `{}`，
+      这里**什么都不改**，行为与改动前完全一致。
+    ★ 解析失败会**抛出**（`_load_mapped` 的契约）—— 响亮地坏，不静默当空。
+    """
+    mapped = _load_mapped(task)
+    for key in MAPPED_TOP_KEYS:
+        if key in mapped and mapped[key] not in (None, ""):
+            task[key] = mapped[key]
+    return task
+
+
 # ── 「重扫不许覆盖」的 status 集合（★ 唯一来源，别在别处再写一份）──────────
 #
 # ★★ 起因（实测，2026-09-23）：`scan` 阶段每 30 分钟重扫一遍 qB，而**已发布的

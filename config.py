@@ -43,6 +43,23 @@ MUSOPIA_URL = os.getenv("MUSOPIA_URL", "https://www.musopia.vip")
 MUSOPIA_COOKIE = require_env("MUSOPIA_COOKIE")
 MUSOPIA_PASSKEY = require_env("MUSOPIA_PASSKEY")
 
+# ==================== 蟹黄堡站点（第二发布目标，2026-09-24 加）====================
+#
+# ★★ 为什么用 `os.getenv` 而**不是** `require_env`：
+#   `require_env` 在缺失时 `sys.exit`（见文件头）⇒ 若这里也 require，
+#   **只要配了蟹黄堡这一个新站，乌托邦那条老链路就会在本机直接起不来**
+#   （本机 `.env` 里没有 CRABPT_COOKIE，见 ERR-ENV-02：新增键要在 NAS 手工加）。
+#   ⇒ 老站**必须继续 require**（缺了就是真故障），新站**允许暂时缺**（还没启用）。
+#   ★ 真要用它时（`publish.py --site crabpt`）由 `crabpt_client()` 检查并给出**明确报错**，
+#     而不是让整个 `import config` 挂掉 —— 那是"缺一个可选键"升级成"全站不可用"。
+CRABPT_URL = os.getenv("CRABPT_URL", "https://crabpt.vip")
+CRABPT_COOKIE = os.getenv("CRABPT_COOKIE", "")
+# ★ 音乐分类 id（实测 `type=408`，见 PLAN-crabpt.md 附录 C.1）
+CRABPT_MUSIC_CATEGORY = os.getenv("CRABPT_MUSIC_CATEGORY", "408")
+# ★ 蟹黄堡的 qB 分类：★ 与乌托邦**分开**，这样"哪一站的种子"在 qB 里一眼可辨，
+#   也便于按站统计（本项目已有 PUBLISH_CATEGORY=Musopia）。
+CRABPT_PUBLISH_CATEGORY = os.getenv("CRABPT_PUBLISH_CATEGORY", "CrabPT")
+
 # ==================== PicGo 图床 ====================
 PICGO_API_KEY = require_env("PICGO_API_KEY")
 PICGO_UPLOAD_URL = os.getenv("PICGO_UPLOAD_URL", "https://www.picgo.net/api/1/upload")
