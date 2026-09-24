@@ -29,6 +29,26 @@ SNAP = pathlib.Path(__file__).with_name(".nas_health_last.json")
 #   last_finish → 本地 CST；data.db.updated_at → UTC。
 CST = 8 * 3600
 
+# ★★ 心跳阈值：**它不是"daemon 的生死判据"，只是"该不该往下看阶段表"的提示**。
+#
+#   ★ 为什么 120s 这个数**必然误报**（2026-09-24 实测）：
+#     `daemon.py` 主循环是  beat() → 遍历阶段（`run_stage()` **同步阻塞**）→ sleep(tick)。
+#     ⇒ 心跳间隔 = tick(30s) **+ 本轮到期阶段的耗时**，而单个阶段的
+#       `STAGE_TIMEOUT` 可达 3600s ⇒ 阶段运行期间心跳**本就不写**。
+#     实测：`scan` 一轮跑了 ~40 分钟，期间心跳静默 640s ⇒ 被报成
+#     「★★ daemon 可能已停/卡住」，而进程完全正常（下一采样就跳到 3s 前）。
+#     ★ 这个数（640s）**既不是"故障"也不是"正常"** —— 它只是"距上次心跳多久"，
+#       而那次心跳之后的静默是**运行阶段的代价**。
+#
+#   ★★ 那为什么不把阈值调大（如 3600）？因为那会**把真停瞒一小时** —— 是拿
+#      假阳性换假阴性，两个都不对。
+#
+#   ★★★ 真正的判据只有一条（`ERR-SQL-04`）：**看它有没有在*前进*** ——
+#     即"两次采样之间心跳值有没有变化"。而**单次巡检给不出这个结论**
+#     （单点只是一个数，不包含"变没变"）。⇒ 本脚本改用两次采样（`SNAP`），
+#     并且**在拿不到上一次采样时如实说不判**，不再用一个阈值假装能判。
+HEARTBEAT_FRESH = 120        # 秒；仅用于"是否需要提醒"，**不是**生死判据
+
 # ★★ 必须与 `daemon.build_stages()` 的 6 个阶段**一一对应**（2026-09-22 补齐 crawl）。
 #    这里**曾经漏了 crawl**，后果是它从不进入下面的检查循环 —— 一个被门控关掉的阶段
 #    看起来"正常"，因为你根本没查它。而"没查"和"查了没事"在报告里长得一模一样
@@ -39,7 +59,7 @@ CST = 8 * 3600
 INTERVALS = {"scan": 1800, "publish": 1800, "sync": 86400,
              "covers": 21600, "edit": 21600, "crawl": 1800}
 EDIT_COOLDOWN = 60
-HEARTBEAT_FRESH = 120        # 秒；超过就认为 daemon 不活着
+# ★ 旧的 `HEARTBEAT_FRESH = 120` 挪到上面（连同"为什么它不是生死判据"的实测依据）。
 
 # ★★ 哪些阶段"关着"（last_run 长期不动是**预期内**的）。
 #
@@ -309,23 +329,95 @@ def main():
         rows.append((stage, age, iv, st, verdict))
 
     hb_age = now - max(hb_mtime, hb_content or 0)
-    alive = hb_age < HEARTBEAT_FRESH
+
+    # ---------- ★★★ 心跳判活：两次采样比「有没有前进」 ----------
+    #
+    # ★ 为什么不用"年龄 < 阈值"当判据（2026-09-24 实测踩过，见文件头）：
+    #   阶段运行期间心跳**不写**（beat() 在循环头、run_stage() 同步阻塞）
+    #   ⇒ 年龄大**不蕴含**进程停。实测误报过一次：640s 被报成"可能已停/卡住"，
+    #   而下一采样 3s 前刚跳。
+    #
+    # ★★ 所以判据是 `ERR-SQL-04` 的原话：**看它有没有在*前进*** ——
+    #   与上一次采样（`SNAP`）比 `hb_content` 有没有**变化**：
+    #     · 变了        ⇒ ✅ 活着（**这是唯一正向判据**）
+    #     · 没变、且已经过了足够长的窗口 ⇒ ★★ 可疑（不再是"可能"，是"两次采样间没动"）
+    #     · 没有上一次采样 ⇒ ❔ **不判**（单点给不出这个结论，不自称能判）
+    #
+    # ★ 窗口：`SCHED_TICK`(30s) 是心跳的**下限**间隔，但一轮可能被阶段阻塞很久
+    #   ⇒ 保守取 `HEARTBEAT_FRESH`(120s) 作为"没变就值得说一声"的窗口。
+    #   ★ 窗口**长于**心跳周期是必须的（`ERR-META-09`：窗口短于静默期，
+    #     "没动"就是个假信号）。
+    prev_snap = json.loads(SNAP.read_text(encoding="utf-8")) if SNAP.exists() else None
+    prev_hb = (prev_snap or {}).get("heartbeat_epoch")
+    prev_at = (prev_snap or {}).get("checked_at")
+    if hb_content is None:
+        hb_verdict = ("⚠️ 心跳内容不是数字（读到 " + repr(hb_content) + "）"
+                      " ⇒ 无法判前进，只看文件 mtime")
+        alive = None
+    elif prev_hb is None or prev_at is None:
+        hb_verdict = ("❔ 不判：没有上一次采样的心跳值可比"
+                      "（★ 单次采样给不出「有没有前进」，不要用一个阈值假装能判）")
+        alive = None
+    else:
+        # ★★ 判据只用**两个同源的量**：心跳值「有没有前进」+ 心跳**自身**的年龄。
+        #
+        #   ★ 第一版拿 `now - prev_at`（距上次采样的间隔）当窗口，是**量错了对象**：
+        #     那个间隔只说明"**我**多久没来采样"，与 daemon 状态**无关**。
+        #     实测它造出一句自相矛盾的话：「600s 内心跳没前进（距今 21s）」——
+        #     一个 21 秒前刚写心跳的进程不可能同时"静默了 600s"。
+        #     第二版改成 `max(gap, hb_age)` 也没用：gap=600 一乘就把 hb_age=21 盖住了。
+        #     ⇒ 根因不是阈值，是**判据里混进了一个与结论无关的量**（ERR-META-13）。
+        #
+        #   ★★ 正确的三态（全部只用心跳自己的时间戳）：
+        #     前进过                     → ✅ 活着（唯一正向判据）
+        #     没前进，且 hb_age 已够大   → ★★ 可疑（它**真的**静默了这么久）
+        #     没前进，但 hb_age 还小     → ❔ 判不了（只是我没等到；它刚动过）
+        #
+        #   ★ 阈值 `HEARTBEAT_FRESH`(120s) 相对"单阶段最长耗时"（STAGE_TIMEOUT 可达
+        #     3600s）**明显偏小** ⇒ 它是"宁可多报一次待查"的保守值，不是精确边界。
+        #     拿不到 STAGE_TIMEOUT（不在快照白名单）⇒ 只能如实标注这个保守性。
+        if hb_content > prev_hb:
+            hb_verdict = (f"✅ 活着：心跳前进过 {hb_content - prev_hb}s"
+                          f"（上次 {cst(prev_hb)} → 本次 {cst(hb_content)}）")
+            alive = True
+        elif hb_age < HEARTBEAT_FRESH:
+            hb_verdict = (f"❔ 判不了：心跳与上次采样相同，但它**刚刚**写过"
+                          f"（距今 {hb_age:.0f}s < {HEARTBEAT_FRESH}s）"
+                          f"⇒ 只是本次没等到它动")
+            alive = None
+        else:
+            hb_verdict = (f"★★ 可疑：心跳没前进（停在 {cst(hb_content)}，"
+                          f"距今 {fmt_age(hb_age)}）且已超 {HEARTBEAT_FRESH}s"
+                          f" ⇒ 两次采样间它没动过。★ 阈值偏保守，"
+                          f"若恰有长阶段在跑（STAGE_TIMEOUT 可达 3600s）会误报，"
+                          f"请隔 2 分钟再采一次定论")
+            alive = False
 
     # ---------- 与上次比对：只报变化 ----------
     cur_snap = {
+        # ★★ 存心跳值**本身**（不是一个布尔）—— 布尔把"有没有前进"这个信息丢了，
+        #    而那正是唯一的正向判据（ERR-SQL-04）。留 `heartbeat_alive` 只为兼容
+        #    **旧快照**的比对（旧文件里没有 `heartbeat_epoch`）。
+        "checked_at": now,
+        "heartbeat_epoch": hb_content,
         "heartbeat_alive": alive,
         "state_last_run": {k: (state.get(k) or {}).get("last_run")
                            for k in INTERVALS},
         "db": db,
     }
-    prev = json.loads(SNAP.read_text(encoding="utf-8")) if SNAP.exists() else None
+    prev = prev_snap          # ★ 上面判心跳时已读过一次，不重复读（同一次运行内必须同一份）
 
     changes = []
     if prev is None:
         changes.append("（首次运行，无基线可比 —— 下面是全量）")
     else:
-        if prev.get("heartbeat_alive") != alive:
-            changes.append(f"心跳存活状态翻转：{prev.get('heartbeat_alive')} → {alive}")
+        # ★ 只在**两次都能判**时才报翻转；`None`（不判）不参与"翻转"叙事 ——
+        #   否则会把"从不判 → 活着"说成一次状态翻转，那是凭空制造事件。
+        if alive is not None and prev.get("heartbeat_alive") is not None \
+                and prev.get("heartbeat_alive") != alive:
+            changes.append(f"心跳「有没有前进」的判定翻转："
+                           f"{prev.get('heartbeat_alive')} → {alive}"
+                           f"（★ 判据是两次采样的心跳值比较，不是年龄阈值）")
         for k in INTERVALS:
             a = (prev.get("state_last_run") or {}).get(k)
             b = cur_snap["state_last_run"][k]
@@ -333,8 +425,17 @@ def main():
                 changes.append(f"{k}.last_run 推进了：{cst(a) if a else '(无)'} → "
                                f"{cst(b) if b else '(无)'}")
         for k in ("stale", "exists", "total"):
-            if (prev.get("db") or {}).get(k) != db[k]:
-                changes.append(f"库 {k}：{prev['db'].get(k)} → {db[k]}")
+            # ★ 取值到局部变量，条件与消息体**共用同一个值**。
+            #   原写法是 `if (prev.get("db") or {}).get(k) != db[k]` 配
+            #   `prev['db'].get(k)` —— 条件用了安全取值、消息体却裸下标
+            #   ⇒ 只要快照**缺 `db` 键**（旧 schema / 文件被截断）：
+            #     条件里 `{} != db[k]` 几乎必真 ⇒ 进分支 ⇒ `KeyError` 崩溃。
+            #   ★ 崩在一个**只有一条错信息**的地方，而错信息的两个来源不同源
+            #     —— 这正是不该用两种写法取同一个值的原因（ERR-META-13 一族）。
+            prev_db = (prev.get("db") or {})
+            old_v = prev_db.get(k, "(快照无此键)")
+            if old_v != db[k]:
+                changes.append(f"库 {k}：{old_v} → {db[k]}")
 
     # ---------- 输出 ----------
     print("=" * 72)
@@ -344,8 +445,11 @@ def main():
     print("\n【心跳】daemon_heartbeat")
     print(f"  内容 epoch   {hb_content}  → {cst(hb_content) if hb_content else '(非数字)'}")
     print(f"  文件 mtime   {cst(hb_mtime)}")
-    print(f"  年龄         {fmt_age(hb_age)}   (阈值 {HEARTBEAT_FRESH}s)")
-    print(f"  ⇒ {'✅ daemon 活着' if alive else '★★ daemon 可能已停/卡住'}")
+    # ★ 年龄照报，但**不把它当判据** —— 它的含义是"距上次心跳多久"，
+    #   而阶段运行期间心跳本就不写。判据在下一行（两次采样比前进）。
+    print(f"  年龄         {fmt_age(hb_age)}   (参考值：> {HEARTBEAT_FRESH}s "
+          f"只说明'可能有阶段在跑'，**不**等于 daemon 停了)")
+    print(f"  ⇒ {hb_verdict}")
 
     print("\n【各阶段】state 里该动的有没有动")
     print(f"  「关着」的判据来源：{disabled_src}")
