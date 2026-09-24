@@ -4,15 +4,77 @@
 改动要点：建表/查询走 db.py，简介渲染走 descr.py，HTTP 走 musopia.py。
 发布成功后立刻用 edit.php 回读一次，确认站点上的内容跟本地一致——发布接口
 拿到 302 只代表种子进库了，简介有没有正确落地是另一回事。
+
+★★ 安全模型：每个保险里都放**一把**钥匙（2026-09-24 定，ERR-META-12）。
+
+   发布是**本项目唯一不可逆**的动作（站点上没有"批量撤回"，详见 readd_to_qb
+   上方与 ERRATA.md 的 ERR-META-12：**"没有被禁止" ≠ "被允许"**）。原设计有
+   三道独立保险，但**它们的钥匙都放在同一处** —— 只要 `ENABLE_PUBLISH=true`
+   且 `DRY_RUN=false`，daemon 就会**无人值守地把当前队列自动发出去**，
+   人根本不在回路里：
+
+     · 保险 ① `ENABLE_PUBLISH`  —— 容器的长期开关
+     · 保险 ② `DRY_RUN=false`   —— 同容器，同一个 `.env`
+     · 保险 ③ `preflight()`     —— 只拦"**空库** + publish 开着"这一种组合
+       （为什么不够：`db.py` 的 `preflight` 明写它要防的是
+        "/data 卷挂错或被重建" ⇒ 只对 total==0 报警；而这里最危险的
+        **恰恰不是空库** —— 是库好好的、闸门①~④ 都判"可以发"、于是
+        无人值守地发出去。闸门回答的是"**这行该不该发**"，它不回答
+        "**现在该不该发**"。两件事，混在一起就会以为"有闸门 = 安全"。）
+
+    ⇒ 从 2026-09-24 起加**第二把、独立的**钥匙：**`PUBLISH_I_AM_HERE`**。
+      它由 `guard_auto_key()` 在**无人值守路径**（`--auto`，daemon 恒带）上
+      校验，通过才发。
+      ① 它不是"把 `ENABLE_PUBLISH` 挪个地方" —— 那把钥匙仍在容器里（安全）；
+      ② 答错的**唯一后果是这一轮不发**，不污染数据；
+      ③ ★ 而且"**根本没配**"（= 变量不存在）与"**配错了**"**分开报**：
+         `ERR-ENV-02` 的教训是"缺键"最容易被静默当成某一种默认值
+         （`iter_my_uploads` 的 uid 就是这么错的）。"没配"要说成"你还没配"，
+         不能含糊成"校验失败"。
+
+    ★★ 判据是**显式开关 `--auto`**，不是 `sys.stdin.isatty()`。
+      为什么换掉 isatty：**它会因环境而变** —— 同一条命令 `docker compose run`
+      在 CI、管道、重定向下 isatty 为假，`docker exec -t` 下为真。
+      ⇒ 把"有没有人"绑在 TTY 上，等于让保险的成败取决于**调用者怎么挂终端**，
+      而不是取决于**我们是不是在无人值守地发**。`--auto` 是我们在 daemon 里
+      **写死的**，判据只有一个来源（`ERR-META-03` 的味道）。
+    ★ 人工路径（人在终端前敲 `publish.py`）不受影响：不带 `--auto` ⇒ 不查钥匙。
+    ★★ 改这一道**不动闸门①~④**：那四道管"该不该发"（`db.PENDING_PUBLISH_WHERE`），
+      这一道只管"**有没有人在场**"。两次发布之间**没有任何闸门被放松**。
+    ⚠️ 已知缺口：它挡的是"**忘了 / 以为**"，**不是**"要作恶" —— 拿到容器命令行
+      的人可以显式去掉 `--auto`。同 `--i-have-stopped-the-container` 的定位。
+
+★★ 节流：两道**互补**的旋钮（2026-09-24 加，别把它们读成同一件事）
+
+   ① `PUBLISH_MAX_PER_CYCLE`（daemon 侧，**每轮条数**）—— 决定**日上限**
+      `日上限 = 86400 / PUBLISH_INTERVAL × PUBLISH_MAX_PER_CYCLE`
+      实测口径：`1800s × 1` ⇒ **48 条/天**。
+   ② `PUBLISH_MIN_GAP`（本文件，**条间隔秒数**）—— 决定**突发形态**
+
+   ★★ 为什么两个都要、且**不能合并成一句**：`MIN_GAP` **压不住日总量**。
+      5 条 × 120s = 10min，而一轮的周期是 30min ⇒ **闸门永远轮不到触发**。
+      它真正的用场是**手工 `--limit N`**（或将来把①调大）时，
+      把"N 条在 7.5 秒内连打站点"摊平开。
+      ⇒ 把两者说成"限速"一个词，就是 `ERR-META-03`（判据漂移）的形状：
+        读的人会以为调了②就把①也管住了。**各管各的，分开写。**
+
+   ★ 为什么**不是**把 `musopia.py` 的 `request_interval` 调大：
+      那是**单次 HTTP 请求**之间的地板（1.5s），而**一条发布 = 多个请求**
+      （`upload_torrent` + `fetch_edit_form` 回读 + `download_torrent` + qB 回加）
+      ⇒ 2 分钟要包住的是**整条记录**，只能在**发布循环层**表达。
+      ★ 写在 `musopia.py` 里做不到这件事 —— 那里看不见"一条记录"的边界。
 """
 import argparse
+import io
 import json
 import os
 import sys
+import time
 
 import config
 import db
 import descr
+import torf
 from musopia import LoginExpired, MusopiaClient, SiteError
 
 
@@ -22,19 +84,265 @@ def parse_args():
     ap.add_argument("--limit", type=int, default=0, help="最多发布多少条")
     ap.add_argument("--no-readd", action="store_true", help="发布后不回加到 qBittorrent")
     ap.add_argument("--dry-run", action="store_true", help="只列出将要发布的内容，不提交")
+    # ★★ 2026-09-23 新增 `--only`：**只发显式点名的 hash**，其余一律不发。
+    #
+    #   ★ 为什么需要它（不是"方便"，是"安全默认"）：
+    #     `db.get_pending_publish()` 是个**查询**，它返回的集合随闸门判据变化而变化。
+    #     用户要的是"**手动发十来个看看网页效果**" —— 那是一个**点名的集合**，
+    #     不是"当前队列"。没有这个开关，"发十条"就只能靠 `--limit 10`，
+    #     而那等于**取队列前 10 条**（顺序由 SQL 决定、不由人决定）。
+    #   ★☆ 判据：`--only` 给的是**交集**，不是"另开一条路"：
+    #         点名 ∧ 仍满足 `PENDING_PUBLISH_WHERE` ⇒ 才发。
+    #         ⇒ 若某条因闸门（如 `transfer_rule != 'ALLOW'`）进不了队列，
+    #           点名它也**发不出去**，并会**逐条报出原因**（不静默跳过）。
+    #   ★ 与 `--limit` 可叠加：先按 `--only` 收窄，再取前 `--limit` 条。
+    ap.add_argument("--only", default="",
+                    help="只发布这些 info_hash（前缀即可，逗号分隔）。"
+                         "★ 是与待发布队列取**交集**：点名但被闸门拦下的会被报出，"
+                         "不会因此绕过闸门。默认空 = 不限制。")
     # ★ 2026-09-17：匿名改为**默认开启** —— 想具名发布要显式 --no-anonymous。
     #   两个参数共用 dest="anonymous"，后加的那个覆盖前者（argparse 以最后一次为准）。
     ap.add_argument("--anonymous", action="store_true", default=True,
                     help="匿名发布（**默认**；保留此参数只为向后兼容，脚本里若显式传它也无害）")
     ap.add_argument("--no-anonymous", dest="anonymous", action="store_false",
                     help="★ 具名发布（覆盖默认的匿名）")
+    # ★★ 2026-09-24：`--auto` 是**无人值守**路径的显式标记，由 **`daemon.py` 在
+    #   拼命令行时**加上（`apply_flag("--yes", "--auto")`）。
+    #
+    #   ★★ 注意：它**不**由本文件内部的某个"自动入口"注入 —— 本文件**只有一个
+    #     入口 `main()`**（曾经那个 `run_auto()` 是死代码，已删除，
+    #     理由见下面 `readd_to_qb` 上方那段）。
+    #   ★★ 所以无人值守时**两个 flag 都要有，少一个都是 bug**：
+    #        `--yes`  跳过 `main()` 里的 `input()` ⇒ **没有它 = EOFError 崩掉**
+    #        `--auto` 声明无人值守 ⇒ 校验第二把钥匙 ⇒ **没有它 = 保险被关掉**
+    #      （2026-09-24 实测：只传 `--auto` ⇒ `EOFError`，阶段退出码 1。见 daemon.py 那段。）
+    #
+    #   ★ 为什么要这个开关（不是"多余的自我声明"）：它让**保险 ②** 的判据
+    #     「**自动路径 ⇒ 必须过钥匙**」在**代码里有名字**，而不是只能靠
+    #     "调用方保证加了 --yes"。★ 顺序想清楚了才定：必须是
+    #     `--auto` 为**真**才查钥匙（即"钥匙 = 自动路径的**附加**要求"）。
+    #     反过来说：**只要带 `--auto`，钥匙就没得商量** ——
+    #     所以 `--yes --auto` 这个组合（daemon 用的那个）恒被拦到钥匙通过为止。
+    #   ★ 反过来**绝不能**写成"没带 --auto 才查钥匙"：那样任何人只要手敲一条
+    #     带 `--auto` 的命令，就把钥匙**绕过去了** —— 一个能靠"多打一个词"
+    #     关掉的保险，不是保险。`--yes` 同理（下面 main() 里那段）。
+    ap.add_argument("--auto", action="store_true",
+                    help="★ 无人值守路径（由 daemon.py 拼命令行时加上）。带它 ⇒ "
+                         "**必须**通过 PUBLISH_I_AM_HERE 校验，否则拒绝发布。"
+                         "人类在终端前手敲时不要用它。"
+                         "★ 无人值守还必须同时带 --yes（否则 input() 会拿到 EOF 崩掉）。")
 
     return ap.parse_args()
 
 
+# ---- ★★ 第二把钥匙：自动发布前，「人必须在回路里」 ----
+#
+# ★ 为什么把它抽成模块级函数、而不是写在 main() 里：
+#   "多处各写一份同样的判据"就是 `ERR-META-03`（判据漂移）的标准产地 ——
+#   一处放宽、另一处没跟，而两边都"看着对"。
+#   ★★ 2026-09-24：本文件现在**只有一个入口 `main()`**（交互与无人值守都走它，
+#     差别只在传了哪些 flag）⇒ 这个函数**只有 `main()` 一处调用**。
+#     原注释说"两处会真正提交（main 与 run_auto）"—— 那是错的，`run_auto()`
+#     从来没人调用（它正是 17:02 那次崩溃的成因）。详见下面那段。
+#
+# ★ 返回值是**三元组**，因为"配错了"与"没配"必须分开说：
+#   (True,  "",                    "")            → 校验通过
+#   (False, "值不对（已脱敏）",      "值不对")      → 用户配了，但配错
+#   (False, "还没配置这个变量",      "根本没配")    → 压根没这回事
+AUTO_KEY_ENV = "PUBLISH_I_AM_HERE"
+AUTO_KEY_VALUE = "i-am-here"
+
+
+# ---- ★★ 条间隔（突发保护）：两条发布之间至少隔这么久 ----
+#
+# ★ 与 `PUBLISH_MAX_PER_CYCLE` 的分工见模块 docstring「节流：两道互补的旋钮」。
+#   一句话：**那个管日上限，这个管突发形态**；这个**压不住**日总量。
+#
+# ★ 为什么默认是 **0（关）**：本参数是**加法**，不是修正。
+#   不填就该等于"行为与加它之前完全一致"（`ERR-ENV-02` 的味道：缺键最容易被
+#   静默当成某个默认值，所以那个默认值必须是**中性的**）。生产由 `.env` 显式给 120。
+#
+# ★ 为什么**不加** `--min-gap` 这种 CLI 开关：那会让同一个判据有**两个真值来源**
+#   （env 与 argv），正是 `ERR-META-03` 的标准产地。要临时关就 `PUBLISH_MIN_GAP=0`
+#   （`.env` 里改，或 `docker compose run -e PUBLISH_MIN_GAP=0 ...`）。
+#
+# ★ 生效范围 = **手工与自动都生效**（不带 `--auto` 条件）：
+#   它防的是"站点被连打"，而手工 `--limit 10` 恰恰是突发最可能的来源。
+#   ⇒ 凭"人在不在场"来放行突发保护是**反的**（人在场不代表站点更挨得住）。
+#   ★ 而且 `--auto` 是**归责**判据（"有没有人在场"），不是**限速**判据；
+#     让一个开关同时管两件事，就是 `ERR-ENV-03` 那个形状。
+PUBLISH_MIN_GAP_ENV = "PUBLISH_MIN_GAP"
+PUBLISH_MIN_GAP_DEFAULT = 0
+# ★ 站点请求的兜底地板（与 `musopia.py` 的 `request_interval` 同值）。
+#   这里只用于**打印**"距上一条多久了"，不参与判据 —— 不抄第二份真值。
+MUSOPIA_REQUEST_INTERVAL = 1.5
+
+
+def publish_min_gap():
+    """读 `PUBLISH_MIN_GAP`（秒）。0 / 负 / 非数字 ⇒ 0（= 关）。
+
+    ★ 非数字**不** sys.exit —— 一个可选的节流参数不该让整个发布阶段起不来。
+      那会把 `ERR-META-01`「检测手段失效比不检测更危险」**反过来**踩：
+      为了一个"更安全"的参数，把唯一能发种的路径整个打挂。
+      而且退出非 0 ⇒ `fails["publish"] += 1` ⇒ **指数退避**
+      （`MAX_BACKOFF=21600`，最长 6 小时一轮）⇒ 一个配置**笔误**会让
+      **真正的发布**停摆半天。⇒ 只**报警 + 退回中性默认**。
+    ★ 负数按 0 处理（不是取绝对值、不是报错）：`time.sleep(-1)` 会直接
+      抛 ValueError；而"等一个负数秒"唯一合理的读法是"不等"。
+    """
+    raw = os.getenv(PUBLISH_MIN_GAP_ENV)
+    if raw is None or str(raw).strip() == "":
+        return PUBLISH_MIN_GAP_DEFAULT
+    try:
+        val = int(float(raw))
+    except ValueError:
+        print(f"⚠️  {PUBLISH_MIN_GAP_ENV}={raw!r} 不是数字，"
+              f"本条间隔按 {PUBLISH_MIN_GAP_DEFAULT}s（= 关）处理", flush=True)
+        return PUBLISH_MIN_GAP_DEFAULT
+    if val < 0:
+        print(f"⚠️  {PUBLISH_MIN_GAP_ENV}={val} 是负数，按 0（= 关）处理", flush=True)
+        return 0
+    return val
+
+
+def wait_publish_gap(gap, i, total, last_upload_ts):
+    """等到"距上一条**上传**满 `gap` 秒"再返回。返回本次的上传时间戳基准不变。
+
+    ★★ 为什么按"距上次上传"算、而不是直接 `sleep(gap)`：
+      一条发布**本身**要花几秒（3 个站点请求 × 1.5s 地板 + qB 回加 + SQLite）。
+      直接 sleep ⇒ 实际间距变成 `gap + 耗时`，旋钮的名字就成了假话，
+      且它是**不可预测**的（随网络/站点快慢漂）。
+      ⇒ 睡**余额**，与 `musopia.py:_throttle()` 同一个写法，只是"上一次请求"
+        换成"上一次上传"（高一层）。副作用是**好的**：若上一条本来就够慢，
+        这一条会**完全不睡**（不产生无意义的等待）。
+
+    ★ `gap` 已保证 > 0（`publish_min_gap()` 归一过），`i > 1` 才调用
+      ⇒ N 条恰好产生 **N-1 段**间隔，末尾**不会**多睡一次。
+    """
+    elapsed = time.time() - last_upload_ts
+    if elapsed >= gap:
+        print(f"    ⏳ [{i}/{total}] 距上一条已 {elapsed:.1f}s（≥ {gap}s），不等待",
+              flush=True)
+        return
+    need = gap - elapsed
+    # ★ flush=True 是**承重**的：容器里 stdout 是**块缓冲**（非 tty），
+    #   不 flush 的话这一行要等缓冲区满才出现 —— 而它恰恰是在"卡住 120 秒"
+    #   的那段时间里唯一能安慰人的输出。daemon.log() 同样用 flush=True。
+    print(f"    ⏳ [{i}/{total}] 距上一条已 {elapsed:.1f}s，"
+          f"再等 {need:.1f}s（{PUBLISH_MIN_GAP_ENV}={gap}）", flush=True)
+    time.sleep(need)
+
+
+def guard_auto_key():
+    """无人值守发布前的第二把钥匙。返回 (放行?, 打印原因, 机器可读的原因)。"""
+    got = os.getenv(AUTO_KEY_ENV) or ""
+    if got == AUTO_KEY_VALUE:
+        return True, "", ""
+    if not got.strip():
+        return False, (f"还没配置环境变量 {AUTO_KEY_ENV}"
+                       f"（当前值：{'空' if got == '' else '只有空白'}）"), "根本没配"
+    # ★ 绝不回显值本身。哪怕它只是个"短语"，回显就等于把它印进 docker logs，
+    #   而 logs 是本项目里**最容易被抄走的那份**（见 daemon.save_env_snapshot
+    #   为何按白名单落盘）。这里只报"对不对"，不报"是什么"。
+    return False, f"{AUTO_KEY_ENV} 的值不对（★ 不在此回显，避免写进日志）", "值不对"
+
+
+def explain_key_reason(why):
+    """把上面第三种返回值翻成一句人话 —— 两种"不发"的修法**完全不同**。"""
+    if why == "根本没配":
+        return ("   ⇒ 这是「还没配」：请在**容器**的 `.env` 里加一行\n"
+                f"        {AUTO_KEY_ENV}={AUTO_KEY_VALUE}\n"
+                "      然后 `docker compose up -d --build`"
+                "（★ 不是 restart，见 deploy.sh 里那段）。\n"
+                "      ★ 字面量里的连字符**不需要转义**；这是**值**"
+                "（compose 只展开 `.env` 的**值**，不展开键名）。")
+    return ("   ⇒ 这是「配错了」：变量存在但值不是约定值（常见：多了引号/空格、"
+            f"或抄了模板里的占位符）。改成 `{AUTO_KEY_ENV}={AUTO_KEY_VALUE}` 即可。")
+
+
+# ⚠️⚠️ 这里**曾经**有一个 `run_auto()` —— 已删除（2026-09-24）。别把它加回来。
+#
+#   它当时的写法是"自己查一遍钥匙，再拼 `--yes --auto` 调 `main()`"，
+#   而 docstring 写着「无人值守入口（daemon 的 publish 阶段）」。
+#
+#   ★★ 问题：**daemon 根本不调它**。`daemon.py` 的 publish 阶段是起**子进程**：
+#      `subprocess.Popen(["python", "publish.py", "--yes", "--auto", ...])`
+#      ⇒ 走的是模块级 `if __name__ == "__main__": main()`。
+#      ⇒ `run_auto()` 是个**没人调用的死函数**，而它让上一轮的推理"看着很完整"：
+#        "`run_auto()` 会补上 `--yes`" ⇒ 于是 `daemon.py` 那边把 `--yes` 删了
+#        ⇒ **真实路径上没人补** ⇒ `main()` 走进 `input()` ⇒ 容器无 stdin
+#        ⇒ `EOFError` ⇒ 阶段崩（2026-09-24 17:02 实测，退出码 1，一条都没发）。
+#
+#   ★★★ 这是 `ERR-META-01` 的一个**新形状**，记在这里：
+#      **判据"看着对"不等于"它覆盖的是那条路"**。上一轮验的是 `run_auto()`
+#      （读它、信它），却**从未**验"daemon 到底往命令行传了什么"。
+#      ⇒ 纪律：**改"谁传什么参数"时，去查真实调用链**（`grep` 调用点，
+#        或直接看 daemon 拼出来的 `cmd`），**不要信函数名或它自己的文档**。
+#
+#   ★ 为什么是"删掉"而不是"把 daemon 改成调它"：
+#     那会让"谁按的确认"多出一条**并行**入口，两个入口各自拼参数
+#     = 判据漂移的标准产地（`ERR-META-03`）。
+#     ⇒ 现在**只有一个入口 `main()`**：daemon 与人都走它，
+#       差别只在**传了哪些 flag**（`--yes` 跳过确认 / `--auto` 查钥匙）。
+#   ★★ `--yes` 与 `--auto` **两件不同的事，无人值守时要**都传**
+#      （`daemon.py` 的 publish 阶段已改回 `apply_flag("--yes", "--auto")`）：
+#        · `--yes`  跳过 `main()` 里的 `input()`（**没有它 ⇒ EOFError ⇒ 崩**）
+#        · `--auto` 声明无人值守 ⇒ 校验第二把钥匙（**没有它 ⇒ 保险被关**）
+
+
 def readd_to_qb(qb, client, info_hash, torrent_id):
-    """把站点上的新种子下载回来加进 qB，做种路径沿用原种子的。"""
+    """把站点上的新种子下载回来加进 qB，做种路径沿用原种子的。
+
+    ★★★ **不要给 `torrents_add()` 传 layout 参数**（2026-09-24 修，别再"顺手加回"）
+
+    这里曾写 `is_root_folder=False`，造成**种子已上站、但从不做种**：qB 显示
+    `state=missingFiles`、`content_path` 退化成光秃秃的 `/downloads`。
+    实测影响 `Musopia` 260 条中的 5 条（全部 2026-09-24 新发）。
+
+    **为什么 `False` 会错**（依据是 pin 住的库源码，非推测）——
+    `qbittorrent-api==2024.9.67` 的 `torrents_add()` 在 Web API ≥ 2.7 上会把该参数
+    **改写**掉：
+
+        if content_layout is None and is_root_folder is not None and api_version >= v("2.7"):
+            content_layout = "Original" if is_root_folder else "NoSubfolder"
+            is_root_folder = None          # ⇒ 真正发出去的是 contentLayout
+
+    ⇒ `is_root_folder=False` **≡ 发 `contentLayout=NoSubfolder`**
+    （实测表单：`savepath=%2Fdownloads&contentLayout=NoSubfolder&category=Musopia`）。
+    而 `run.py` 用 `torf` 生成的种子是**多文件**结构 —— `info['name']` 是目录名、
+    但 `info['files'][].path` **不含**该前缀（`torf._torrent._set_files`）。
+    「要不要把 `name` 补回文件路径前」**正是 `contentLayout` 在管的事**：
+    `NoSubfolder` ⇒ 不补 ⇒ qB 去 `/downloads/01.Hurricane.flac` 找，
+    而文件实际在 `/downloads/<专辑名>/01.Hurricane.flac` ⇒ **错位** ⇒ 从不做种。
+
+    **为什么"不传"是对的**：不传 ⇒ `content_layout` 与 `is_root_folder` 都是 `None`
+    ⇒ 这两个字段**根本不进 HTTP 表单**（实测：lib 用 `(None, value)` 二元组装配，
+    这是 `requests` 的 multipart 约定，值为 `None` 时字段被丢弃）
+    ⇒ **完全交给 qB 按种子自己的 metainfo 决定**。
+
+    ★ 这么做的**关键好处**：qB 是唯一掌握"每个种子内部结构"的一方，判据交给它，
+    我们**不必去猜**、也不必自己读 `.torrent` 反推。两种结构各按各的还原：
+      · `milet - Made of Glass`（单层，`01.flac` 直接在根）⇒ `name` 就是真实目录名
+      · `[260909] 岩崎太整…`（2CD，`Disc 1/`+`Disc 2/`）⇒ `name` 是不落地的容器名
+    没有**任何**固定取值能同时伺候这两种 —— 所以"不传"不是偷懒，是唯一正解。
+
+    ⚠️ **一处仍未验证的未知**（如实写下，别让本函数的输出显得比实际可信）：
+    qB 对**多根目录**种子（上面 2CD 那类）具体如何摆放，**没有实测过**
+    （只测过 2 个单根目录样本）。⇒ 本函数**不为此加代码**（那等于重新去猜结构），
+    而是让下面的复核**如实报出**结果；若真出问题，**那时才有据可依地处理**。
+
+    ★★ 同时**不要传 `is_skip_checking=True`**（原先也传了）：
+    它让 qB **跳过哈希校验**，而校验**正是唯一**能发现"文件对不上"的机制
+    —— 正因为它被关掉，那 5 条才**静默**变成 `missingFiles` 而无人察觉。
+    去掉后文件对则秒进做种、不对则**立刻**报出来（**响亮地坏**）。
+    代价是大种首次校验要读一遍文件（`BIGBANG` 那种 100GB+ 会慢），
+    但这是"慢"换"静默错误"，符合本项目 `ERR-META-01` 的成文纪律
+    「**没报错 ≠ 成立**」。★ 若将来实测撞上 `STAGE_TIMEOUT=3600` 再单独取舍。
+    """
     if qb is None:
+        # ★ 原先这里**静默 return** ⇒ "没做"与"做了"在日志里都可能看着正常。
+        #   现在把**原因**说出来（同 `nas_health.py` 的三态纪律：缺位要说清是哪种）。
+        print("    ⚠️  回加跳过：本次没有可用的 qB 连接（启动时未连上，见上方警告）")
         return
     try:
         orig = qb.torrents_info(torrent_hashes=info_hash)
@@ -48,15 +356,63 @@ def readd_to_qb(qb, client, info_hash, torrent_id):
             print("    ❌ 从站点下载种子文件失败，跳过回加")
             return
 
+        # ★★ 参数**只有这三个**：save_path / is_paused / category。
+        #   ★ 别加 layout（见 docstring）、别加 is_skip_checking（见 docstring）。
         qb.torrents_add(
             torrent_files=content,
             save_path=save_path,
-            is_skip_checking=True,
             is_paused=False,
-            is_root_folder=False,
             category=config.PUBLISH_CATEGORY,
         )
-        print(f"    ✅ 已回加至 qB（做种路径: {save_path}）")
+        print(f"    ✅ 已提交回加至 qB（做种路径: {save_path}）")
+
+        # ★★★ 发布后复核 —— 把"没报错"变成"有判据"。
+        #
+        # ★ 为什么要按**另一个** hash 查：站点那个种子是 `run.py` 用新 announce
+        #   **重新生成**的 ⇒ 它的 infohash **不等于**库里的 `info_hash`
+        #   （`info_hash` 是皇后的**原种**）。⇒ 从刚下载的字节里读出真正的 infohash。
+        #   （`torf` 已在镜像里，`Dockerfile` 锁 `torf==4.2.7`）
+        #
+        # ★ 判据是 `state` **配合**它自己报的路径，**不是**单看"没抛异常"
+        #   —— 原先那行 `✅ 已回加至 qB` 只证明 `torrents_add()` 没抛，不证明做种成立。
+        #
+        # ★ 失败**不算阶段失败**（不 `sys.exit` ⇒ 不触发 daemon 退避）：
+        #   种子**已经上站了**（不可逆），回加失败是**本地问题**，退避重试没意义
+        #   （下一轮不会再发同一条）。★ 与 `main()` 里 `fetch_edit_form` 回读校验
+        #   **同一模式**：只醒目打印，不动 `fail` 计数、不影响退出码。
+        #
+        # ★★★ 关于"查不到"这句措辞（2026-09-24 **实测踩过，别改回去**）：
+        #   `torrents_add()` 是**异步**的 —— qB 收下后**在后台**校验入库，
+        #   **不会**在 HTTP 返回前完成。实测那一次：`publish` 阶段全程 **6.2 秒**，
+        #   这里查 ⇒ **必然查不到**（日志原话当时是"可能还没入库"）。
+        #   ⇒ ★ 那句话**把两种截然不同的情况混成了一个词**：
+        #       (a) qB 还没入库（**正常**）      (b) 回加**根本没发生**（**故障**）
+        #     故障被"可能还没入库"盖住 ⇒ 这正是「没报错 ≠ 成立」的同族毛病。
+        #   ⇒ 现在**分开说**：明确"此刻查不到 ⇒ 无法区分 (a) 与 (b)"，
+        #     并指向**延迟复核**（不要在阶段里 sleep —— 拖长阶段没有意义，
+        #     且 `STAGE_TIMEOUT=3600` 是硬上限）。
+        try:
+            new_hash = torf.Torrent.read_stream(io.BytesIO(content)).infohash
+            got = qb.torrents_info(torrent_hashes=new_hash)
+            if not got:
+                print(f"    ⚠️  回加复核：此刻 qB 里查不到 {new_hash[:12]}…")
+                print("        ★ 注意：本复核是**同步**跑的，而 qB 入库是**异步**的"
+                      "（阶段常只跑数秒）")
+                print("        ⇒ 查不到**无法区分**「还没入库」（正常）"
+                      "与「回加根本没发生」（故障）。")
+                print("        ⇒ 要定论请**延迟后**再查一次（如隔几分钟，"
+                      f"按 infohash {new_hash[:12]}… 查 state）")
+            else:
+                t = got[0]
+                ok = t.state != "missingFiles"
+                mark = "✅" if ok else "★★"
+                print(f"    {mark} 回加复核：state={t.state}  "
+                      f"content_path={t.content_path!r}")
+                if not ok:
+                    print("        ★★ 文件没对上 ⇒ **这条种子不会做种**（已上站，不可逆）。"
+                          "见 readd_to_qb 的 docstring。")
+        except Exception as e:                              # noqa: BLE001
+            print(f"    ⚠️  回加复核失败（不影响发布本身）: {type(e).__name__}: {e}")
     except Exception as e:
         print(f"    ❌ 回加 qB 出错: {e}")
 
@@ -87,6 +443,44 @@ def merge_mapped(task):
     return task
 
 
+
+# ★ 闸门判据的**逐条**解释器：只读、不发请求。
+#
+# ★ 为什么不手抄 `PENDING_PUBLISH_WHERE`：手抄必然漂（本项目的成文纪律，
+#   `ERR-META-03`）。这里用**单条件累加**的方式问库 —— 每一问都只回答
+#   "这一条是卡在哪个条件上"，而最后一个条件就是真闸门本身。
+#   ★ 仍然只读（`PRAGMA query_only=1`），`--only` 的预检不会写任何东西。
+def explain_not_queued(prefix):
+    """给一个 hash 前缀，用**同一个库连接**逐条问：它卡在哪个闸门上。"""
+    import sqlite3
+    con = sqlite3.connect(config.DB_PATH, timeout=30)
+    try:
+        con.execute("PRAGMA query_only=1")
+        rows = con.execute(
+            "SELECT info_hash, status, site_status, publish_after, "
+            "       opencd_tid, mapped_json, transfer_rule "
+            "  FROM tasks WHERE info_hash LIKE ?", (prefix + "%",)).fetchall()
+        if not rows:
+            return "库里没有这个 hash（打错了？）"
+        if len(rows) > 1:
+            return f"前缀歧义，命中 {len(rows)} 行（给长一点的前缀）"
+        (h, st, ss, pa, tid, mj, rule) = rows[0]
+        reasons = []
+        if st != "SUCCESS":
+            reasons.append(f"status={st!r} ≠ 'SUCCESS'")
+        if ss == "EXISTS":
+            reasons.append("site_status='EXISTS'（已在站上）")
+        import datetime
+        if pa and pa > datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"):
+            reasons.append(f"publish_after={pa}（还在 3 天反悔窗口内）")
+        if tid and not (mj or "").strip():
+            reasons.append(f"opencd_tid={tid} 非空但 mapped_json 空（闸门③：想读皇后却没读）")
+        if (rule or "") != "ALLOW":
+            reasons.append(f"transfer_rule={rule!r}（闸门④：只有 'ALLOW' 放行）")
+        return "；".join(reasons) if reasons else "（各闸门都过 —— 应该已在队列里，请复核）"
+    finally:
+        con.close()
+
 def main():
     args = parse_args()
 
@@ -97,6 +491,43 @@ def main():
     if not tasks:
         print("💡 当前没有需要发布的任务。")
         return
+
+    # ★★ `--only`：与队列取**交集**，并**逐条报出**被拦下的（不静默跳过）。
+    #
+    #   ★ 为什么"报出"是承重的：用户点名 10 条时，若其中 1 条因闸门进不了队列，
+    #     `--limit 10` 会**默默多发一条队列里的别的**（用户以为发的是自己点的那 10 条）
+    #     —— 那是"发出去的东西和以为发出去的不一样"，本项目最忌讳的形状。
+    #   ★ 所以先算**差集**并打出来，再继续。
+    if args.only:
+        want = tuple(s.strip().lower() for s in args.only.split(",") if s.strip())
+        if not want:
+            sys.exit("❌ --only 给了但解析出 0 个 hash")
+        hit, miss = [], []
+        for t in tasks:
+            h = (t.get("info_hash") or "").lower()
+            (hit if any(h.startswith(w) for w in want) else miss).append(t)
+        # 队列里没有 = 被闸门拦下（或 hash 打错）——两件事都要报
+        in_queue = {(t.get("info_hash") or "").lower() for t in tasks}
+        absent = []
+        for w in want:
+            if not any(h.startswith(w) for h in in_queue):
+                absent.append(w)
+        print()
+        print("=" * 60)
+        print(f"★ --only：点名 {len(want)} 个 ⇒ 命中队列 {len(hit)} 条")
+        print("=" * 60)
+        for t in hit:
+            print(f"   ✅ {(t.get('info_hash') or '')[:12]}  {t.get('formatted_title')}")
+        for w in absent:
+            # ★ 把"为什么没进来"查出来 —— 这条比"没命中"有用得多
+            print(f"   ❌ {w} 不在待发布队列里（被闸门拦下 或 hash 打错）")
+        if absent:
+            print("\n   ★ 逐条查为什么没进队列（同一份判据，不做手抄）：")
+            for w in absent:
+                print(f"      {w}: {explain_not_queued(w)}")
+        if not hit:
+            sys.exit("❌ --only 与队列**零交集** ⇒ 拒绝执行（不会去发队列里的别的）")
+        tasks = hit
 
     print("\n" + "=" * 60)
     print(f"📋 发现 {len(tasks)} 条待发布任务，预检清单：")
@@ -152,6 +583,40 @@ def main():
     if args.limit:
         valid = valid[:args.limit]
 
+    # ★★ 条间隔（`PUBLISH_MIN_GAP`）：在这里**先算出并报出来**，再走后面任一条路径。
+    #   ★ 为什么在 dry-run 之前：dry-run 也要能看见"真实发布会隔多久"，
+    #     否则"看效果"看到的节奏是假的（`ERR-META-01`：判据只覆盖一部分）。
+    #   ★ N=1 时 `gap` 会算出 0 段间隔 —— **照实报**（"本条不等待"是事实，
+    #     不是"没配"）。别把它说成"已启用"。
+    gap = publish_min_gap()
+    n_gap = max(len(valid) - 1, 0)
+    if gap > 0 and n_gap > 0:
+        est = n_gap * gap
+        print(f"\n⏳ 发布间隔：每条之间至少 {gap}s（{PUBLISH_MIN_GAP_ENV}）"
+              f" ⇒ 本次 {len(valid)} 条 = {n_gap} 段 ≈ {est / 60:.1f} 分钟"
+              f"（★ 另有每条约几秒的请求耗时）")
+        # ★ STAGE_TIMEOUT 是**daemon 侧的**开关（`daemon.py` 的 `env_int`），
+        #   `config.py` 里没有它 ⇒ 这里只能从 env 读，且**手工跑时它通常不存在**
+        #   （那时根本没有超时，所以下面的告警要说清"仅当在 daemon 里跑"）。
+        #   ★ 不把 3600 抄成第二个真值来源：读 env，兜底值只用于**提示**。
+        try:
+            stage_timeout = int(float(os.getenv("STAGE_TIMEOUT", "3600")))
+        except ValueError:
+            stage_timeout = 3600
+        if est > stage_timeout:
+            print(f"⚠️  预计纯等待就 {est / 60:.1f} 分钟，超过 STAGE_TIMEOUT="
+                  f"{stage_timeout}s（{stage_timeout / 3600:.1f} 小时）。\n"
+                  f"    在 daemon 里跑的话，它会在**提交中途**把本进程杀掉：\n"
+                  f"    · ★ **已发出去的种子不受影响**（每条自己就落了库）；\n"
+                  f"    · 但**汇总与退出码会丢** ⇒ 会被记成阶段失败 ⇒ 触发**指数退避**"
+                  f"（最长 6 小时一轮），进而**拖慢真正的自动发布**。\n"
+                  f"    ⇒ 请减小 `--limit`，或调小 `{PUBLISH_MIN_GAP_ENV}`。")
+    elif gap > 0:
+        print(f"\n⏳ 发布间隔：{gap}s（{PUBLISH_MIN_GAP_ENV}）"
+              f"，但本次只有 {len(valid)} 条 ⇒ 无条间等待")
+    else:
+        print(f"\n⏳ 发布间隔：不限（{PUBLISH_MIN_GAP_ENV} 未配或为 0）")
+
     if args.dry_run:
         print(f"\n🔍 dry-run：以下 {len(valid)} 条会被发布，简介预览（第一条）：")
         # ★ 与真实发布走**同一个 merge_mapped**，否则预览与实际不一致
@@ -168,6 +633,31 @@ def main():
         if answer != "y":
             print("🚫 已取消，未向站点提交任何数据。")
             return
+
+    # ★★★ 第二把钥匙（保险 ③）—— 就在这里，**在建立任何客户端之前**。
+    #
+    #   ★ 位置是刻意的：必须在 `MusopiaClient()` 之前。钥匙没通过时
+    #     **一个请求都不该发出去**（连 `check_login()` 也不发）——
+    #     "拒绝"要真的什么都没做，而不是"打了个招呼再拒绝"。
+    #
+    #   ★ 触发条件 = `--auto` **为真**。⇒
+    #     · daemon 的路径：`daemon.py` 拼的命令带 `--auto`（**且必须同时带
+    #       `--yes`**，否则会在下面 BEFORE 这里就先撞上 `input()` 的 `EOFError`）
+    #       ⇒ **恒被拦到钥匙通过**；
+    #     · 人手工敲 `publish.py --yes`：不带 `--auto` ⇒ 不查钥匙。
+    #       ★ 这是**刻意**的、也**不算洞**：人在终端前手敲就是"人在回路里"
+    #         —— 无头/定时路径才是本保险要覆盖的那一条。
+    #     · 把 `--auto` 去掉就能绕过？⇒ 能，但那需要**有权限进容器敲命令**，
+    #       而那种情况本来就不是"无人值守"了（同 `--i-have-stopped-the-container`
+    #       的定位：它是**纪律的显式声明**，挡的是"忘了/以为"，不是"要作恶"）。
+    if args.auto:
+        key_ok, key_detail, key_why = guard_auto_key()
+        if not key_ok:
+            print("=" * 60)
+            print(f"🛑 拒绝自动发布：第二把钥匙没通过 —— {key_detail}")
+            print(explain_key_reason(key_why))
+            print("=" * 60)
+            sys.exit(3)
 
     client = MusopiaClient()
     try:
@@ -186,12 +676,30 @@ def main():
             print(f"⚠️  连不上 qBittorrent ({e})，本次不做回加")
 
     ok = fail = 0
+    # ★★ 上一次**上传**的时刻 —— `PUBLISH_MIN_GAP` 按它算"距上一条多久"。
+    #   ★ 用 `None` 而不是 0：`time.time()` 是个大数，用 0 会让第一条算出
+    #     "距上一条已有 50 年 ⇒ 不用等"——**结论对，但推理是假的**
+    #     （`ERR-META-01`：判据要能说清它为什么对）。
+    last_upload_ts = None
     for i, task in enumerate(valid, 1):
+        # ★★★ 条间隔（突发保护）—— 放在**循环开头**、且 `i > 1` 才等。
+        #
+        #   ★★ 为什么**不能**放在循环末尾（"发完再等"）：本循环体里有**两处
+        #     `continue`**（上传抛异常 / 上传返回空）—— 放在末尾的话，那两处
+        #     会**跳过等待**，于是"连续两条失败"就变成**背靠背打站点**，
+        #     只受 `musopia.py` 的 1.5s 地板约束。放在开头则**必然**生效：
+        #     无论上一条成功还是失败，下一条都先等。
+        #   ★ 放在开头还让"睡多少"可测：间距 = 距上次**上传**的时间，
+        #     而不是"sleep(120) + 上一条耗时"（那会让旋钮名不副实）。
+        if i > 1 and gap > 0 and last_upload_ts is not None:
+            wait_publish_gap(gap, i, len(valid), last_upload_ts)
+
         title = task.get("formatted_title")
         print(f"\n[{i}/{len(valid)}] 🚀 发布: {title}")
 
         fields = descr.build_form_fields(merge_mapped(task),
                                          anonymous=args.anonymous)
+        last_upload_ts = time.time()
         try:
             torrent_id, msg = client.upload_torrent(task["torrent_file"], fields)
         except (SiteError, LoginExpired) as e:
