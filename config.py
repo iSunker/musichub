@@ -64,6 +64,33 @@ CRABPT_PUBLISH_CATEGORY = os.getenv("CRABPT_PUBLISH_CATEGORY", "CrabPT")
 PICGO_API_KEY = require_env("PICGO_API_KEY")
 PICGO_UPLOAD_URL = os.getenv("PICGO_UPLOAD_URL", "https://www.picgo.net/api/1/upload")
 
+# ==================== Lsky Pro 图床（★ 蟹黄堡专用，2026-09-25 加）====================
+#
+# ★★ 为什么蟹黄堡要**另一个**图床（用户 2026-09-25 明确要求「要用专用的图链」）：
+#   两站各有自己的图链，**不能混用** —— 拿 picgo 的链去发蟹黄堡就是跨站引用，
+#   用户已明确否掉。⇒ 封面按站各存一份（见 `db.site_publish` 的 `cover_url`）。
+#
+# ★ 接口规格**实测**自蟹黄堡站内「接口」页
+#   （`opencdhtml/蟹黄宝图链接口-Lsky Pro.html`）：
+#     base = `https://img.crabpt.vip/api/v1`，上传 `POST <base>/upload`
+#     鉴权 `Authorization: Bearer <token>`，字段 `file`
+# ★★ 默认值**写死 base 而不是完整 upload URL**：接口页把 `/api/v1` 称为「接口URL」，
+#   而 `/upload` 是它下面的一个端点 —— 将来若还要用本接口别的端点（如
+#   `/profile` 查容量），有 base 就够了，写死完整路径反而要再拆一次。
+LSKY_API_URL = os.getenv("LSKY_API_URL", "https://img.crabpt.vip/api/v1")
+# ★★ 用 `os.getenv` **不是** `require_env`：理由逐字同上面的 `CRABPT_COOKIE` ——
+#   它是**新站**（蟹黄堡）才需要的键，require 会让配了蟹黄堡的机器上
+#   **乌托邦那条老链路也起不来**。
+#   ★ 真要用它时由 `assets.upload_to_lsky()` 检查并给出**明确报错**（空 token ⇒ 不上传），
+#     而不是让整个 `import config` 挂掉。
+# ★★★ 它是**凭据**：绝不打印、绝不进 SMB 分享。`deploy.sh` 的 NEVER 已含 `.env`；
+#   `daemon.save_env_snapshot` 是**白名单**制 ⇒ 本键**默认不外溢**
+#   （代价：巡检看不见它，见 PLAN 的未决项）。
+LSKY_TOKEN = os.getenv("LSKY_TOKEN", "")
+# ★ 可选：储存策略 id。留空 = 由站点用默认策略（接口页把它列为**可选**）。
+#   ★ 我们**不猜**这个 id —— 猜错会传到别的策略/桶里，而那是"写错事实"的一种。
+LSKY_STRATEGY_ID = os.getenv("LSKY_STRATEGY_ID", "")
+
 # ==================== 状态与产物存储 ====================
 # 统一挂载点：`docker-compose.yml` 里所有 service 都把**同一个 bind mount**
 # 挂到这里 —— 形如 `${STATE_DIR:-.}:/data`（默认就是 compose 文件所在目录本身）。

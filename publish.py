@@ -65,6 +65,7 @@
       ★ 写在 `musopia.py` 里做不到这件事 —— 那里看不见"一条记录"的边界。
 """
 import argparse
+import ast as _ast
 import io
 import json
 import os
@@ -157,6 +158,11 @@ def parse_args():
                          "`crabpt` = 蟹黄堡，走 crabpt_site.py 的字段层与客户端；"
                          "★ 两站共用 --only/--limit/闸门/dry-run/两把钥匙，"
                          "只有**字段与提交地址**不同。")
+    # ★ 负向自检（不碰站点、不碰库）。见 `selftest_crabpt_isolation`。
+    ap.add_argument("--selftest", action="store_true",
+                    help="只跑本文件的负向自检：断言蟹黄堡那条路**不碰**乌托邦的 "
+                         "`site_status`/`site_torrent_id`、且确实写 `site_publish`。"
+                         "★ 不发任何请求、不读库。")
 
     return ap.parse_args()
 
@@ -498,6 +504,64 @@ def explain_not_queued(prefix):
     finally:
         con.close()
 
+def _crabpt_cover(task, *, dry_run=False):
+    """确保这条种子在**蟹黄堡**上有一份**属于蟹黄堡的**封面 URL。返回 `(url, 说明)`。
+
+    ★★ 为什么必须单独一步（用户 2026-09-25 明确要求「蟹黄堡要用专用的图链」）：
+      两站的封面**各自一份** —— 乌托邦是 picgo（`tasks.cover_url`），
+      蟹黄堡是 Lsky Pro（`db.site_publish.cover_url`，site='crabpt'）。
+      ⇒ 拿 picgo 的链去发蟹黄堡 = **跨站引用**，用户已否掉。
+      ⇒ 也不能反过来"就地改 `tasks.cover_url`" —— 那会把乌托邦页面上的封面顶掉
+        （`ERR-META-13` 的那个形状：一个值在两个位置含义不同）。
+
+    ★★ 三步，**每一步失败都返回空**（调用方据此**放弃发布**，见下面）：
+      ① `site_publish` 里已有 ⇒ **直接用，不重传**
+         （★ Lsky 没有 picgo 那种"重复上传 400 + 可回收 URL"的宽恕路径，
+           重传就是真占两份容量；而 Lsky 只有 500MB）
+      ② 去本地封面缓存找那张图（`cover_fetch._cached_file`，按 URL 的 sha1 前缀）
+         ★ **复用既有函数**，不新写下载逻辑；★ 也**绝不**去 picgo 重传
+         （那会得到一条**不该出现在蟹黄堡**的链）
+      ③ `assets.upload_to_lsky()` 传上去
+
+    ★ 为什么"失败就不发"而不是"退回用 picgo"：退回 = 往蟹黄堡写一条跨站图链，
+      是**用户明确不要**的东西；而"发一条没封面的"会让页面成空壳。
+      ⇒ 两个都不行 ⇒ **停下来**（发布不可逆，宁可少发一条）。
+    ★ 返回 `(url, 说明)`：说明是给人看的**这一格从哪来**（同 `build_fields` 的 audit 纪律）。
+    """
+    h = task["info_hash"]
+    site = db.SITE_CRABPT
+
+    # ① 蟹黄堡那侧已有
+    have = db.site_cover_url_of(h, site)
+    if have:
+        return have, f"已有蟹黄堡专用封面（site_publish）⇒ 复用，不重传：{have}"
+
+    # ② 本地缓存里找原图。★ 本地图是用**乌托邦那个 URL** 做 key 缓存的
+    #   （封面当初就是为乌托邦抓的）⇒ 拿它当 key 去查，**只查本地、不联网**。
+    src = (task.get("cover_url") or "").strip()
+    if not src:
+        return "", "★ 库里连 cover_url 都没有 ⇒ 无源可传"
+    try:
+        import cover_fetch
+        local = cover_fetch._cached_file(src)
+    except Exception as e:                                  # noqa: BLE001
+        return "", f"★ 查本地封面缓存出错: {type(e).__name__}: {e}"
+    if not local:
+        return "", (f"★ 本地封面缓存里没有这张图（key={src[:60]}…）⇒ "
+                    f"没有可上传的源")
+    if dry_run:
+        # ★ dry-run **不真上传**（那是外部副作用而且是不可撤销的写）。
+        #   但也**不能说"封面就绪"** —— 那是个假判据。如实报"会传这一张"。
+        return src, (f"dry-run：**不会**真上传。验证通过后会传这一张上去：{local}")
+
+    # ③ 真传
+    import assets
+    url = assets.upload_to_lsky(local)
+    if not url:
+        return "", f"★ Lsky 上传失败（本地图 {local}）—— 见上面图床那行输出"
+    return url, f"新传到 Lsky：{local} ⇒ {url}"
+
+
 def _crabpt_fields(task, anonymous):
     """第 3 个字段层（详见 `crabpt_site.py` 文件头与 `PLAN-crabpt.md` 附录 C）。
 
@@ -560,6 +624,134 @@ def _crabpt_readback(client, torrent_id, fields):
                       "（不等于没落地）—— 别据此下结论。")
     except Exception as e:                                  # noqa: BLE001
         print(f"    ⚠️  回读详情页出错（不影响发布本身）: {type(e).__name__}: {e}")
+
+
+# ---- ★★ 负向自检：蟹黄堡这条路**不许**碰乌托邦那两列 ----
+#
+# ★★★ 为什么需要它（`ERR-META-01` 的形状，"检测方法失效比不检测更危险"）：
+#   2026-09-25 之前，`run_crabpt` 的落库调的是 `db.set_site_id(..., site_status=...)`,
+#   而那是**乌托邦**的列 ⇒ 发一条蟹黄堡就污染四个真实判据（发布队列 / 已发布集合 /
+#   `run.py` 的 scan 跳过 / 巡检计数）。★ 这个错**不报错、不抛异常**，
+#   页面还说"发布成功"，只有别的判据会悄悄错掉。
+#   ⇒ 修法不能只是"这次改对了"，要**留一条判据让它以后也错不了**。
+#
+# ★ 判据取自**本文件自己的源码**（不是手抄一份清单 —— 那必然漂移，`ERR-META-03`）。
+#   范式照 `flip_status.py` 的 `selftest()`：它就是这么拿 AST 抽 `publish.py`
+#   的预检体去断言的（那边有条同族判据：「`site_status` 不在发布预检里」）。
+_CRABPT_FORBIDDEN = ("site_status", "site_torrent_id")
+
+
+def _code_only(node):
+    """取出 `node` 的**代码**（丢掉注释与字符串字面量）。用于负向自检。
+
+    ★★★ 这个函数是**必须**的，而我第一版漏了它 —— 漏掉的后果是自检当场报了个
+      **假阳性**：`run_crabpt` 里那三段**注释**（"绝不碰 `site_status`"、
+      "改之前这里调的是 `db.set_site_id(..., site_status=...)`"、
+      "不用 `set_site_id`"）本身**就是在解释为什么不能用它们的产品**，
+      而按"源码文本"去搜就把这些注释也算成了违规。
+      ⇒ ★ 而假阳性比假阴性更坏：它会让人**把一条有效的判据删掉**
+        （"这个自检老是误报"）—— 这条判据就永久失效了。
+      ⇒ 判据必须只看**代码**：字符串与注释都是"说这件事"的地方，
+        不是"做这件事"的地方（这句区分正是本函数的全部意义）。
+
+    ★ 做法：把 `Constant`（字符串/数字字面量）与 docstring 整段替换成空，
+      然后 `ast.unparse()` 回源码文本。⇒ 注释**天然**不在 AST 里，
+      字符串被替换掉 ⇒ 剩下的就是真正的代码。
+    """
+    class _Strip(_ast.NodeTransformer):
+        def visit_Constant(self, n):
+            # ★ 保留数字（如 `408`），只清掉字符串 —— 我们要查的是**名字**，
+            #   而 `"site_status"` 这种字符串**正是**要抓的（它可能是 getattr 的参数）。
+            if isinstance(n.value, str):
+                return _ast.copy_location(_ast.Constant(value=""), n)
+            return n
+
+        def visit_Expr(self, n):
+            # docstring：`Expr` 里只有一个字符串常量 ⇒ 整句删掉
+            if (isinstance(n.value, _ast.Constant)
+                    and isinstance(n.value.value, str)):
+                return None
+            return self.generic_visit(n)
+
+    return _ast.unparse(_Strip().visit(_ast.parse(_ast.unparse(node))))
+
+
+def _column_offenders(node, names):
+    """在 `node` 的 AST 里找出**会被求值的位置**上出现的那些列名。
+
+    ★★★ 为什么是"按位置找"而不是"按源码文本搜" —— 这是本自检**两次**修正后的结论：
+      ① 第一版按**源码文本**搜 ⇒ 把三段**注释**（"绝不碰 `site_status`"、
+         "改之前调的是 `db.set_site_id(..., site_status=...)`"）算成了违规
+         ⇒ **假阳性**。而假阳性比假阴性更坏：它让人**把一条有效判据删掉**。
+      ② 第二版把字符串全抹掉再搜 ⇒ 修好了假阳性，但把
+         `t.get("site_status")` 这种**真读法**也一起放了 ⇒ **假阴性**。
+         （两个方向都试过、都被实测打脸 —— 记在 `ERR-META-01` 那一族里。）
+      ⇒ ③ 现在的判据：**注释根本不在 AST 里**（天然放行），
+        而字符串只有在**会被求值的位置**上才算数：
+          · 下标 `t["site_status"]`
+          · 关键字实参 `site_status="EXISTS"`
+          · 属性 `db.site_status`
+          · 位置实参 `t.get("site_status")`
+        ★ 这四条覆盖了"读一列"的全部常规写法，而**纯注释/文档里的提及**不落在其中。
+    ★ ★ 已知局限（如实写下，别让判据显得比实际管用）：
+      `getattr(db, "site_" + "torrent_id")` 这类**拼出来的名字**抓不到。
+      ★ 本自检挡的是"顺手多写一列"/"忘了写新表"这类**直白**的错，不是蓄意绕过。
+    """
+    hits = []
+    for n in _ast.walk(node):
+        if (isinstance(n, _ast.Subscript) and isinstance(n.slice, _ast.Constant)
+                and n.slice.value in names):
+            hits.append(f"下标 [{n.slice.value}]")
+        elif isinstance(n, _ast.keyword) and n.arg in names:
+            hits.append(f"关键字 {n.arg}=")
+        elif isinstance(n, _ast.Attribute) and n.attr in names:
+            hits.append(f"属性 .{n.attr}")
+        elif isinstance(n, _ast.Call):
+            for a in n.args:
+                if isinstance(a, _ast.Constant) and a.value in names:
+                    hits.append(f"实参 {a.value!r}")
+    return hits
+
+
+def selftest_crabpt_isolation(verbose=True):
+    """断言 `run_crabpt` 的**代码**里不出现乌托邦那两列。返回 `(是否通过, 明细)`。
+
+    ★ 判据取自**本文件自己的源码**（不是手抄一份清单 —— 那必然漂移，`ERR-META-03`）。
+      范式照 `flip_status.py` 的 `selftest()`：它就是这么拿 AST 抽 `publish.py`
+      的预检体去断言的（那边有条同族判据：「`site_status` 不在发布预检里」）。
+    ★★ 具体判据与两次修正史见 `_column_offenders` 的 docstring；
+      局限（拼名字抓不到）也在那里如实写明了。
+    """
+    src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    tree = _ast.parse(src)
+    fn = next((n for n in _ast.walk(tree)
+               if isinstance(n, _ast.FunctionDef) and n.name == "run_crabpt"), None)
+    if fn is None:
+        return False, ["★ 找不到 run_crabpt —— 函数被改名了？本条自检失效"]
+    code = _code_only(fn)
+    # ★★ 判据分**三层**，因为"污染"有三种写法，一层拦不住另一种：
+    #   ① 列名出现在会被求值的位置（`t["site_status"]` / `t.get("site_status")` / …）
+    #   ② 调了 `set_site_id`（它内部写那两列）
+    #   ③ 完全没写新表（"改了但没落库"）
+    bad = _column_offenders(fn, set(_CRABPT_FORBIDDEN))
+    detail = []
+    if bad:
+        detail.append(f"★★ run_crabpt 里读了/写了乌托邦的列：{bad} ⇒ "
+                      f"改用 `db.site_publish_set(...)` / `db.site_*_of(...)`"
+                      f"（见 `_crabpt_cover` 与落库那两段）")
+    if "set_site_id" in code:
+        detail.append("★★ run_crabpt 里调了 `db.set_site_id` —— 它会写乌托邦那两列")
+    # ★ 正向上还要求它**必须**写新表（否则"改了但没落库"也过得了上面两条）
+    if "site_publish_set" not in code:
+        detail.append("★★ run_crabpt 里**没有** `db.site_publish_set` ⇒ "
+                      "发布结果没落到 site_publish（新表会缺蟹黄堡的行）")
+    if verbose:
+        mark = "✅" if not detail else "❌"
+        print(f"{mark} 蟹黄堡隔离自检：run_crabpt 不碰 site_status/site_torrent_id、"
+              f"且确实写 site_publish")
+        for d in detail:
+            print(f"    {d}")
+    return (not detail), detail
 
 
 def run_crabpt(args):
@@ -726,6 +918,18 @@ def run_crabpt(args):
         print("\n" + "=" * 60)
         print(f"🔍 dry-run：{t.get('formatted_title')}")
         print("=" * 60)
+        # ★★ 封面也要**走一遍**（`dry_run=True` ⇒ 只查不传）。
+        #   ★ 为什么不能跳过这一步：不跑它就看不出一件最要紧的事 ——
+        #     **本地到底有没有那张图**。而"没有图"正是真发布时会**拒绝发**的原因。
+        #     ⇒ 跳过 = 预览说"一切就绪"、真跑时却在最后一步退出（假绿色）。
+        #   ★ 但 `dry_run=True` 分支**不真上传**（那是不可撤销的外部写）。
+        cover, cover_why = _crabpt_cover(t, dry_run=True)
+        print(f"封面 ← {cover_why}")
+        if not cover:
+            print("   ★★ 注意：按现在的状态**真发布会在这里停下**（不发）—— 见上。")
+        else:
+            t = dict(t)
+            t["cover_url"] = cover
         try:
             fields, audit = crabpt_site.build_fields(t, anonymous=args.anonymous)
         except ValueError as e:
@@ -766,6 +970,24 @@ def run_crabpt(args):
             sys.exit(3)
 
     # ---- 提交 ----
+    #
+    # ★★ 封面必须在**渲染字段之前**解决 —— `descr` 是提交内容的一部分，
+    #   而封面就写在 `descr` 里（`[img]…[/img]`）。顺序反了就等于没换。
+    #   ★ 而且这里**失败就退出**（不发）：见 `_crabpt_cover` 的 docstring
+    #     —— 两个退路（退回 picgo 的链 / 发一条没封面的）都被用户否掉了。
+    crabpt_cover, cover_why = _crabpt_cover(t)
+    print(f"   · 封面 ← {cover_why}")
+    if not crabpt_cover:
+        sys.exit("❌ 蟹黄堡封面没准备好 ⇒ **拒绝发布**（发布不可逆，宁可少发一条）。\n"
+                 "   ★ 修法：先让这条种子在本地有封面（`python backfill_covers_opencd.py`），\n"
+                 "     或检查 NAS `.env` 里的 `LSKY_TOKEN`（见 ERR-ENV-02）。")
+    # ★ 只覆盖**这一份 task 拷贝**的 `cover_url`，`build_fields` 会用它渲染 `descr`。
+    #   ★ 不改 `build_fields` 的签名 —— "用哪个封面"是**调用方的决定**，
+    #     而它只管渲染（两站共用同一个渲染函数喂不同的 URL，见 PLAN 7b）。
+    #   ★ 也**不**回写 `tasks.cover_url`（那是乌托邦那一份，别顶掉它）。
+    t = dict(t)
+    t["cover_url"] = crabpt_cover
+
     fields = _crabpt_fields(t, args.anonymous)
     print(f"\n🚀 向蟹黄堡提交：《{t.get('formatted_title')}》")
     try:
@@ -780,11 +1002,24 @@ def run_crabpt(args):
         sys.exit(f"❌ 蟹黄堡发布未取得站点 id：{msg}")
 
     print(f"    🎉 已提交，站点 ID = {tid}")
-    # ★ 落库（与 main() 同一对调用）。★ 只说这次真的做了什么、没做什么：
-    #   下面这三句**不写进 reason**（reason 是库里的字段，落进去就成了"事实"，
-    #   而这三件都是**已知缺口**）—— 缺口记在 PLAN-crabpt.md 附录 D.5。
-    db.set_site_id(t["info_hash"], tid, site_status="EXISTS",
-                   status="PUBLISHED", reason=f"crabpt_published_id:{tid}")
+    # ★★★ 落库：**只写蟹黄堡那一行**，绝不碰 `site_status`/`site_torrent_id`
+    #   （2026-09-25 修 —— 这两列是**乌托邦**的）。
+    #
+    #   ★ 改之前这里调的是 `db.set_site_id(..., site_status="EXISTS")`，
+    #     它写的是 `tasks` 上那**唯一一列** ⇒ 发一条蟹黄堡就等于对乌托邦宣称
+    #     "这条已发过"，于是**四个真实判据**同时被污染（发布队列 / 已发布集合 /
+    #     `run.py` 的 scan 跳过 / 巡检计数）。详见 `db.SITE_PUBLISH_TABLE` 那段。
+    #   ⇒ 现在"发到哪个站"存在**它自己的表**里 `(info_hash, site)`。
+    #
+    #   ★ `cover_url` 也一并落在这里（**每站一份**）：`_crabpt_cover()` 传进来的
+    #     是 Lsky 的链，与乌托邦那份 picgo 的链**互不影响**。
+    db.site_publish_set(t["info_hash"], db.SITE_CRABPT, tid,
+                        cover_url=crabpt_cover or None)
+    # ★ `status` / `reason` 仍走 `save_task`：它们是**本地处理状态**（与站点无关），
+    #   而 `flip_status.py` 的分类判据依赖 `status`。
+    #   ★ 不用 `set_site_id` —— 那会顺手写乌托邦那两列（就是上面刚修掉的 bug）。
+    db.save_task(info_hash=t["info_hash"], status="PUBLISHED",
+                 reason=f"crabpt_published_id:{tid}")
     db.mark_synced(t["info_hash"])
     print("    ℹ️  未做（已知缺口，见 PLAN-crabpt.md 附录 D.5）："
           "technical_info 留空 · 日韩拆不出 · 不回加 qB（蟹黄堡尚未接线）")
@@ -800,6 +1035,19 @@ def run_crabpt(args):
 
 def main():
     args = parse_args()
+
+    # ★★ `--selftest`：跑**本文件的负向自检**（不碰站点、不碰库）。
+    #   ★ 为什么给它一条 CLI：自检如果只能靠"记得去 import 它"，
+    #     那它跟没有一样（本项目的老毛病：判据存在但没人跑）。
+    #   ★ 判据 = **阴性对照也要跑**（见 `selftest_crabpt_isolation` 的 docstring）：
+    #     把原 bug 的形状塞回去，自检**必须**报错。没做过阴性对照的自检不算验证过。
+    if args.selftest:
+        ok, _ = selftest_crabpt_isolation()
+        # ★★ 必须 `sys.exit`，**不能 `return`** —— `main()` 是被
+        #   `if __name__ == "__main__": main()` 调的，那个写法的返回值**会被丢掉**
+        #   ⇒ 退出码恒为 0 ⇒ **自检报红也没人看得见**（阴性对照实测踩到这一条）。
+        #   ★ 这是 `ERR-META-01` 的形状：判据算对了，但**没接到能让人看见的地方**。
+        sys.exit(0 if ok else 1)
 
     # ★ 站点分流（2026-09-25）。★ 只有这一处 if —— 分流点越少，
     #   "某条路漏了某个不变量"的机会越少。两条路各自**完整**：
@@ -1039,6 +1287,16 @@ def main():
         print(f"    🎉 发布成功，站点 ID = {torrent_id}")
         db.set_site_id(task["info_hash"], torrent_id, site_status="EXISTS",
                        status="PUBLISHED", reason=f"published_id:{torrent_id}")
+        # ★★ 2026-09-25：**同步写新表**（`site_publish`）—— 这是**双写**，不是替换。
+        #
+        #   ★ 为什么是双写：上面那句 `set_site_id` 是**乌托邦**的既有写法，
+        #     而 278 条已发记录 + 15 个读点都依赖它 ⇒ **不动它**（回归面 ≈ 0）。
+        #   ★ 为什么必须也写新表：否则"一条种子在哪些站上"这个问题**只在新表里答得全**，
+        #     而乌托邦的行不进新表就答不全 —— 那正是本次要修的病
+        #     （`ERR-SQL-07`：汇总口径与实际会写的集合必须同口径）。
+        #   ★ `cover_url` 传 `task` 那一份（就是 picgo 的链，本就是乌托邦在用的）。
+        db.site_publish_set(task["info_hash"], db.SITE_MUSOPIA, torrent_id,
+                            cover_url=(task.get("cover_url") or None))
         db.mark_synced(task["info_hash"])
 
         # 回读确认简介真的落地了。takeupload.php 返回 302 只说明种子进库，

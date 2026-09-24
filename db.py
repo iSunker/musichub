@@ -156,6 +156,61 @@ LEDGER_COLUMNS = [
 LEDGER_PK = "PRIMARY KEY (day_key, kind)"
 
 
+# ==================== 多站点发布身份（`site_publish`）====================
+#
+# ★★★ 为什么需要这张表（2026-09-25 加，起因是加蟹黄堡第二个发布站）：
+#
+#   `tasks.site_status` / `tasks.site_torrent_id` 各**只有一列**，语义是
+#   **"在乌托邦上"**。它写在列名底下是隐形的 —— 列名里**没有站点**
+#   （`ERR-META-06` 那句"单看一个数字无法判断它属于谁"的又一次实例）。
+#   ⇒ 一旦第二个站（蟹黄堡）也往这两列写，会**污染四个真实判据**：
+#       ① 发布队列        `PENDING_PUBLISH_WHERE`（上面）
+#       ② 已发布集合      `_published_where()` / `get_missing_cover()`
+#       ③ ★ scan 跳过     `run.py` 的 `status=='SUCCESS' and site_status=='EXISTS'`
+#                         ⇒ 本地抓轨不再重做，而这条在乌托邦上根本不存在
+#       ④ 计数/巡检       `stats()` / `tools/nas_health.py` / `tools/gen_counts.py`
+#
+#   ★★ 最危险的不是"会互相覆盖"，是**判据看着还能用** —— 加站那天差点
+#      拿 `site_status` 去筛蟹黄堡（那是拿乌托邦的结论否掉另一个站）。
+#
+#   ⇒ 判据：**"发到哪个站"是 (种子, 站点) 这个二元组上的属性**，
+#     所以它该是一张**关联表**，不是 `tasks` 上的一列。
+#     ★ 用复合主键而不是"每站一列"：**加第三个站只需 INSERT 一行，不改 schema**
+#       （加一列的做法每来一个站就要改表 + 改所有查询）。
+#
+#   ★★ 与旧两列的关系（**刻意如此**）：
+#     `site_status` / `site_torrent_id` **保留、继续写**，语义收窄为
+#     **"乌托邦那一侧"**。⇒ 15 个文件里的旧读点**一个都不用改**，回归面 ≈ 0。
+#     新代码不许再读那两列去判别的站，改用本节的 `site_*_of()` 函数。
+#
+#   ★★ 为什么**不**做成 SQL 视图：SQLite 视图**只读**、且**不能替代表名**，
+#     而写入路径写的是表 ⇒ 读写会分叉；生产库又是 daemon 在写的活库（WAL），
+#     加视图有并发风险。⇒ 保留真实列 + 只加读函数。
+SITE_PUBLISH_TABLE = "site_publish"
+
+# ★ 站点名**只有这两个常量是唯一真值源**，别在别处手抄字符串
+#   （`ERR-META-03`：两处各写一份必然漂移，而这里的漂移会让"查不到"长得像"没发过"）。
+SITE_MUSOPIA = "musopia"
+SITE_CRABPT = "crabpt"
+
+SITE_PUBLISH_COLUMNS = [
+    ("info_hash", "TEXT NOT NULL"),
+    ("site", "TEXT NOT NULL"),          # SITE_MUSOPIA / SITE_CRABPT
+    ("torrent_id", "TEXT"),             # 该站的页面 id（details.php?id=）
+    ("status", "TEXT"),                 # 'EXISTS' / ...
+    # ★★ 封面是**每站一份**的 —— 蟹黄堡用专用图床（Lsky Pro，见 `assets.py`），
+    #    乌托邦用 picgo。若两站共用一个 `cover_url`（`tasks` 上那列），
+    #    后发的那个会把先发的顶掉 ⇒ 与上面 site_status 是**同一个形状**的问题，
+    #    所以它必须一起进这张表。
+    #   ★ 也正因为它是"每站一份"的，`cover_url` 留在 `tasks` 上的那一列
+    #     语义同样收窄为"乌托邦那一侧"。
+    ("cover_url", "TEXT"),
+    ("synced_at", "TIMESTAMP"),
+    ("updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+]
+SITE_PUBLISH_PK = "PRIMARY KEY (info_hash, site)"
+
+
 def connect():
     conn = sqlite3.connect(config.DB_PATH, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -194,6 +249,46 @@ def init_db():
         f"CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (\n"
         f"            {_led_cols},\n            {LEDGER_PK}\n        )"
     )
+
+    # ---- 多站点发布身份表（见上面 SITE_PUBLISH_* 那一节的理由）----
+    _sp_cols = ",\n            ".join(f"{n} {d}" for n, d in SITE_PUBLISH_COLUMNS)
+    cur.execute(
+        f"CREATE TABLE IF NOT EXISTS {SITE_PUBLISH_TABLE} (\n"
+        f"            {_sp_cols},\n            {SITE_PUBLISH_PK}\n        )"
+    )
+    cur.execute(
+        f"CREATE INDEX IF NOT EXISTS idx_site_publish_site "
+        f"ON {SITE_PUBLISH_TABLE}(site, status)"
+    )
+
+    # ★★ 回填：把 `site_status='EXISTS'` 的行灌成 `site='musopia'` 的行。
+    #
+    #   为什么可以直接拷贝、不求人确认（2026-09-25 实测）：
+    #     `site_status='EXISTS'` 与 `site_torrent_id` 非空**完全一致**（各 278 条、
+    #     不一致 0 条）⇒ 没有"有状态没 id"这种需要人工判断的行。
+    #   为什么放在 `init_db()`：每个脚本启动都调它，**幂等** ⇒ 谁先跑都行。
+    #
+    #   ★★ 幂等靠的是 `NOT EXISTS` 子查询，**不是**"只在表为空时回填" ——
+    #      后者会让"表非空但漏了几行"永远修不好（`ERR-SQL-07`：汇总口径与
+    #      "实际会写的集合"必须同口径）。
+    #   ★ `status` 沿用 `site_status` 的值（都是 'EXISTS'）；`synced_at` 沿用
+    #      `site_synced_at`，让新表一出生就带着"上次同步"的历史，而不是从空开始。
+    #   ★ `torrent_id` 用 `!= ''` 判非空：`site_torrent_id` 的空值是 `''` 不是 NULL
+    #     （实测 `EXISTS 但 id 空` = 0 条，但判据要写对，将来才拦得住）。
+    cur.execute(
+        f"INSERT INTO {SITE_PUBLISH_TABLE} "
+        f"(info_hash, site, torrent_id, status, cover_url, synced_at) "
+        f"SELECT t.info_hash, ?, t.site_torrent_id, t.site_status, "
+        f"       t.cover_url, t.site_synced_at "
+        f"  FROM tasks t "
+        f" WHERE t.site_status = 'EXISTS' "
+        f"   AND t.site_torrent_id IS NOT NULL AND t.site_torrent_id != '' "
+        f"   AND NOT EXISTS (SELECT 1 FROM {SITE_PUBLISH_TABLE} p "
+        f"                    WHERE p.info_hash = t.info_hash AND p.site = ?)",
+        (SITE_MUSOPIA, SITE_MUSOPIA),
+    )
+    if cur.rowcount:
+        print(f"🔧 {SITE_PUBLISH_TABLE}：回填 musopia 行 {cur.rowcount} 条")
 
     conn.commit()
     conn.close()
@@ -829,3 +924,124 @@ def ledger_prune(keep_days=7, kind=None):
     conn.commit()
     conn.close()
     return int(n or 0)
+
+
+# ==================== 多站点发布身份（读写）====================
+#
+# 与 `ledger_*` 同规矩：**无状态**，每次自己开连接、自己关。
+# 理由同上：调用方是短命进程，持有长连接只会留下没关的 WAL。
+
+def site_publish_set(info_hash, site, torrent_id=None, status="EXISTS",
+                     cover_url=None, synced=False):
+    """写/更新**某一个站点**上这条种子的记录。返回 `(torrent_id, status, cover_url)`。
+
+    ★★ 必须是**单条原子 UPSERT**，不能"先 SELECT 再 UPDATE"：
+      后者中间留着窗口 —— 两个写者都读到旧值、都写回，**后写的赢**，
+      而这里丢的是"这条发到哪个站了"这个**事实**（同 `ERR-META-07`：
+      落库的值必须记它的来源判据；写丢了就等于没记）。
+      故用 `ON CONFLICT(info_hash, site) DO UPDATE`，与 `save_task`/`ledger_add`
+      **同一套写法**。
+
+    ★★ `cover_url=None` 表示**不动这一格**（`COALESCE` 保住旧值）：
+      绝不能"因为这次没传就把已存的封面抹成空" —— 那是本项目**真的踩过**的事故
+      （`assets.upload_to_picgo` 的 docstring 记着：重做任务时把 `cover_url`
+      覆盖成空，连锁导致站点页面封面被抹掉）。★ 要清空就显式传 `cover_url=""`。
+
+    ★ `status` 默认 `'EXISTS'`；`synced=True` 时同时把 `synced_at` 刷成现在 ——
+      ★ 但这个刷新是**判据相关**的：`STALE_CONDITION` 就是
+      `site_synced_at IS NULL OR updated_at > site_synced_at`，
+      它决定"这条要不要重推到站点"。⇒ **发布/回填时才刷**，别在只读路径上顺手刷
+      （`ERR-SQL-06`：回填一列时绝不能顺带刷 `updated_at`）。
+    """
+    conn = connect()
+    conn.execute(
+        f"INSERT INTO {SITE_PUBLISH_TABLE} "
+        f"(info_hash, site, torrent_id, status, cover_url, synced_at) "
+        f"VALUES (?, ?, ?, ?, ?, "
+        f"        CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END) "
+        f"ON CONFLICT(info_hash, site) DO UPDATE SET "
+        # ★ torrent_id/status：**显式传了才更新**（None 表示"这次不声明这一格"）。
+        #   与下面 cover_url 同一个道理 —— 别让"没传"变成"清空"。
+        f"  torrent_id = COALESCE(excluded.torrent_id, {SITE_PUBLISH_TABLE}.torrent_id), "
+        f"  status     = COALESCE(excluded.status,     {SITE_PUBLISH_TABLE}.status), "
+        f"  cover_url  = COALESCE(excluded.cover_url,  {SITE_PUBLISH_TABLE}.cover_url), "
+        f"  synced_at  = COALESCE(excluded.synced_at,  {SITE_PUBLISH_TABLE}.synced_at), "
+        f"  updated_at = CURRENT_TIMESTAMP",
+        (str(info_hash), str(site),
+         None if torrent_id is None else str(torrent_id),
+         status,
+         None if cover_url is None else str(cover_url),
+         1 if synced else 0),
+    )
+    conn.commit()
+    row = conn.execute(
+        f"SELECT torrent_id, status, cover_url FROM {SITE_PUBLISH_TABLE} "
+        f" WHERE info_hash = ? AND site = ?",
+        (str(info_hash), str(site)),
+    ).fetchone()
+    conn.close()
+    return tuple(row) if row else (None, None, None)
+
+
+def site_publish_get(info_hash, site=SITE_MUSOPIA):
+    """取某一行在某站上的 `(torrent_id, status, cover_url)`。
+
+    ★★ **查不到返回 `(None, None, None)`，而不是抛、也不是 `("", ...)`**：
+      "这个站上没有记录"是**正常状态**（还没发过去），不是错误。
+      ★ 但调用方**必须**分清它与"记录在、但 id 为空" —— 后者是**异常**
+        （说明写坏了）。⇒ 判据：`status is None` ⇒ 压根没这条记录；
+        `status is not None and not torrent_id` ⇒ 记录坏了，要报出来。
+    """
+    conn = connect()
+    row = conn.execute(
+        f"SELECT torrent_id, status, cover_url FROM {SITE_PUBLISH_TABLE} "
+        f" WHERE info_hash = ? AND site = ?",
+        (str(info_hash), str(site)),
+    ).fetchone()
+    conn.close()
+    return tuple(row) if row else (None, None, None)
+
+
+def site_publishes(info_hash):
+    """取该行在**所有**站点上的记录，返回 `{site: {"torrent_id","status","cover_url"}}`。
+
+    ★ 给报告/诊断用（"这条到底发过哪些站"）。★ 返回 dict 而不是列表：
+      调用方几乎总是按站点名取，而列表会逼他们写 `for` + `if`，
+      那正是"漏掉一个站也不报错"的形状。
+    """
+    conn = connect()
+    rows = conn.execute(
+        f"SELECT site, torrent_id, status, cover_url FROM {SITE_PUBLISH_TABLE} "
+        f" WHERE info_hash = ? ORDER BY site",
+        (str(info_hash),),
+    ).fetchall()
+    conn.close()
+    return {r[0]: {"torrent_id": r[1], "status": r[2], "cover_url": r[3]}
+            for r in rows}
+
+
+def site_torrent_id_of(info_hash, site=SITE_MUSOPIA):
+    """只要 id（`site_publish_get` 的窄版）。★ 没记录 / id 为空 ⇒ 都返 `""`。
+
+    ★ 这个"都返 `''`"是刻意的、也**必须**如此：本函数的调用方是
+      "拿 id 去站点操作"的路径，它的判据只能是"有没有 id"。
+      ⇒ ★ **判"这条发过没有"不许用本函数**，要用 `site_publish_get`
+         —— 两者在"记录在但 id 为空"这种**异常**上给出相同结果（都是 `''`），
+         而那种异常是必须看得见的（`ERR-META-14`：兜底值与真实结果要分开报）。
+    """
+    return site_publish_get(info_hash, site)[0] or ""
+
+
+def site_status_of(info_hash, site=SITE_MUSOPIA):
+    """只要 status。★ 没记录 ⇒ `None`（不是 `'UNKNOWN'` —— 那会与"记录说它是 UNKNOWN"混）。"""
+    return site_publish_get(info_hash, site)[1]
+
+
+def site_cover_url_of(info_hash, site=SITE_MUSOPIA):
+    """该站**自己那份**封面 URL。★ 没记录 ⇒ `""`（不是 None，调用方一律当"没有"）。
+
+    ★★ 为什么必须按站取：两站的图床**不同**（乌托邦 picgo / 蟹黄堡 Lsky Pro）。
+      拿乌托邦那份去发蟹黄堡 ⇒ 蟹黄堡页面上挂着别的图床的链
+      （用户 2026-09-25 明确否掉了这个做法）。
+    """
+    return site_publish_get(info_hash, site)[2] or ""

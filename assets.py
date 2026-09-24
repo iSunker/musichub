@@ -258,6 +258,133 @@ def upload_to_picgo(image_path, retries=2):
     return ""
 
 
+def _lsky_extract_url(data):
+    """从 Lsky Pro 响应 JSON 里抠出图片 URL。
+
+    ★ 路径是**实测**的（蟹黄堡站内「接口」页，`opencdhtml/蟹黄宝图链接口-Lsky Pro.html`）：
+
+        {"status": true, "message": "上传成功",
+         "data": {"key": "...", "links": {"url": "...", "bbcode": "...",
+                                          "markdown": "...", ...}}}
+
+    ⇒ 正确路径是 `data.links.url`。
+    ★ **不要**照抄 picgo 那边的 `image.url` / `result.url` —— 那是 Chevereto 系的结构
+      （且 `result` 那一支专为"重复上传回收"而生，Lsky 没有对应物，见下）。
+    ★ 返回的是**裸 URL**，不带 BBCode —— 因为调用方（`descr.build_descr`）
+      自己会套 `[img]…[/img]`；这里若返回 `bbcode` 就会**嵌套两层**。
+    """
+    if not isinstance(data, dict):
+        return ""
+    d = data.get("data")
+    if isinstance(d, dict):
+        links = d.get("links")
+        if isinstance(links, dict):
+            url = links.get("url") or ""
+            if url:
+                return url
+        # 少数版本可能把 url 直接挂在 data 下，认了它（但**不**去猜别的结构）
+        if d.get("url"):
+            return str(d["url"])
+    return ""
+
+
+def upload_to_lsky(image_path, retries=2, api_url=None, token=None):
+    """上传图片到**蟹黄堡的专用图床**（Lsky Pro），返回 URL 或 ""。
+
+    ★★ 为什么单独一个函数、不复用 `upload_to_picgo`（2026-09-25 用户要求
+      「蟹黄堡要用专用的图链」）。三处**实质性**不同，逐条列清免得下次有人来合并：
+
+        项           picgo（乌托邦）                    Lsky（蟹黄堡）
+        ----------   ------------------------------     ---------------------------
+        鉴权头       `X-API-Key: <key>`                 ★ `Authorization: Bearer <token>`
+        文件字段名   `source`                           ★ `file`
+        取 URL       `image.url` / `result.url`         ★ `data.links.url`
+        接口地址     `.../api/1/upload`                 ★ `<base>/upload`（base 已含 /api/v1）
+
+    ★★ **Lsky 没有"重复上传"这条回收路径** —— 别把 picgo 那段 400-Duplicated
+      的回收逻辑照抄过来：Lsky 上传同一张图会**直接再存一份**（也可能因策略去重，
+      但**没有**约定俗成的 400 + 可回收 URL）。
+      ⇒ 照抄的代价是：把一个**真错误**（如 401/403）当成"已存在、复用 URL"而静默吞掉
+        —— 那正是 `ERR-META-01`「检测方法失效比不检测更危险」的形状。
+      ⇒ 所以这里**只认 `HTTP 200 + status:true + data.links.url`** 这一条成功判据，
+        其余一律当失败（返 `""` 并打原因）。
+
+    ★★ 返回 `""` 表示**失败**，调用方**必须**当成"没有封面"处理
+      —— **绝不能**退回用 picgo 的链去发蟹黄堡（用户明确否掉了跨站图链），
+      也**绝不能**因此把库里已存的封面覆盖成空（`upload_to_picgo` docstring
+      记着的那次事故）。
+
+    ★ `token` 为 None 时从 `config.LSKY_TOKEN` 取；**空 token 直接返 `""`**
+      （不带鉴权头去传 = 站点按「游客上传」处理，行为不明、且可能把图传到
+       别人的账下 ⇒ 宁可不传）。★ token **绝不打印**（同 `guard_auto_key` 的纪律：
+      值不进日志，而 docker logs 是本项目最容易被抄走的那份）。
+    """
+    if not image_path or not os.path.exists(image_path):
+        return ""
+
+    token = config.LSKY_TOKEN if token is None else token
+    if not (token or "").strip():
+        print("    [Lsky 图床] 没配 LSKY_TOKEN（空）⇒ **不上传**。"
+              "★ 见 ERR-ENV-02：新增的 .env 键要在 **NAS 上手工加**。")
+        return ""
+
+    base = (api_url or config.LSKY_API_URL).rstrip("/")
+    url = f"{base}/upload"
+    # ★ Accept 是接口页**明确要求**的（不是可选）：不设它站点可能回 HTML 而不是 JSON。
+    headers = {
+        "Authorization": f"Bearer {token.strip()}",
+        "Accept": "application/json",
+    }
+    last_err = ""
+
+    for attempt in range(retries + 1):
+        try:
+            with open(image_path, "rb") as f:
+                # ★ 字段名是 `file`（实测）。★ 不传 `strategy_id` ⇒ 由站点用默认策略
+                #   （接口页把它列为**可选**；我们不掌握策略 id，猜一个反而可能传错桶）。
+                res = requests.post(
+                    url,
+                    headers=headers,
+                    files={"file": (os.path.basename(image_path), f)},
+                    timeout=60,
+                )
+            if res.status_code == 200:
+                try:
+                    data = res.json()
+                except ValueError:
+                    last_err = f"HTTP 200 但响应不是 JSON: {res.text[:150]}"
+                    continue
+                # ★★ 两道判据都要：HTTP 200 **且** status 为真。
+                #   Lsky 在业务失败时也回 200（`status:false` + message），
+                #   只看状态码就会把"上传被拒"读成"成功"。
+                if not data.get("status"):
+                    last_err = f"status=false: {str(data.get('message'))[:150]}"
+                    continue
+                u = _lsky_extract_url(data)
+                if u:
+                    return u
+                last_err = f"响应里没有 data.links.url: {res.text[:150]}"
+            elif res.status_code == 401:
+                # ★ 单独认这一条：这是**最可能**的失败（token 过期/抄错），
+                #   而它的修法与别的原因**完全不同**（去 NAS 换 .env）。
+                last_err = ("HTTP 401 授权失败 —— LSKY_TOKEN 不对或已失效。"
+                            "★ 去蟹黄堡「接口」页重新生成 token，"
+                            "再改 **NAS 的 .env**（deploy.sh 不带 .env，见 ERR-ENV-02）")
+            elif res.status_code == 403:
+                last_err = "HTTP 403 —— 蟹黄堡管理员关闭了接口功能"
+            elif res.status_code == 429:
+                last_err = (f"HTTP 429 —— 超出请求配额"
+                            f"（X-RateLimit-Remaining="
+                            f"{res.headers.get('X-RateLimit-Remaining')!r}）")
+            else:
+                last_err = f"HTTP {res.status_code}: {res.text[:150]}"
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+
+    print(f"    [Lsky 图床失败] {os.path.basename(image_path)} -> {last_err}")
+    return ""
+
+
 def read_logs(folder_path):
     """
     收集目录下**全部** .log 抓轨日志，返回 [{"label","filename","content"}, ...]。
