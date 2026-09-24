@@ -68,10 +68,12 @@ import argparse
 import io
 import json
 import os
+import re
 import sys
 import time
 
 import config
+import crabpt_site
 import db
 import descr
 import torf
@@ -131,6 +133,30 @@ def parse_args():
                          "**必须**通过 PUBLISH_I_AM_HERE 校验，否则拒绝发布。"
                          "人类在终端前手敲时不要用它。"
                          "★ 无人值守还必须同时带 --yes（否则 input() 会拿到 EOF 崩掉）。")
+
+    # ★★★ 站点分流（2026-09-25 新增）—— 走 `--site` 而不是"两个脚本"。
+    #
+    #   ★ 为什么**不**新开一个 `publish_crabpt.py`：
+    #     两站共享的**不是**字段（字段全不同，见 crabpt_site.py 文件头），
+    #     而是**安全不变量**：`--only` 交集语义、`--limit` 有界、
+    #     闸门（`PENDING_PUBLISH_WHERE`）、dry-run 默认列出、两把钥匙、
+    #     逐条落库（`db.set_site_id`）、说真话的退出码。
+    #     ⇒ 抄一份脚本 = 把六个**已经调对**的判据复制成两份，而它们必然漂移
+    #       （`ERR-META-03`）。★ 更坏的是漂移方向：安全不变量漂移 = 某一条
+    #       悄悄放宽，且**不报错**。
+    #   ★ 为什么不用 `--crabpt` 这种布尔开关：布尔只能表达"是不是蟹黄堡"，
+    #     加第三个站时就得再加一个，**两个布尔同时为真**时无定义。
+    #     枚举值把这个状态排除在设计里（`ERR-ENV-03` 那个"多开关=一把钥匙"的教训）。
+    #
+    #   ★ 默认值的选择是刻意的：**默认仍是 musopia**。
+    #     它是生产上跑了几个月的站点（254 条在做种），改默认 = 改变既有行为；
+    #     而"新增一个站"不该顺手改动老站的行为（本项目的 `ERR-ENV-02` 同理：
+    #     缺键时的默认值必须**中性**）。
+    ap.add_argument("--site", choices=("musopia", "crabpt"), default="musopia",
+                    help="发布到哪个站（默认 musopia = 保持既有行为）。★ "
+                         "`crabpt` = 蟹黄堡，走 crabpt_site.py 的字段层与客户端；"
+                         "★ 两站共用 --only/--limit/闸门/dry-run/两把钥匙，"
+                         "只有**字段与提交地址**不同。")
 
     return ap.parse_args()
 
@@ -472,8 +498,314 @@ def explain_not_queued(prefix):
     finally:
         con.close()
 
+def _crabpt_fields(task, anonymous):
+    """第 3 个字段层（详见 `crabpt_site.py` 文件头与 `PLAN-crabpt.md` 附录 C）。
+
+    ★ 为什么不写成 `lambda t: crabpt_site.build_fields(t, anonymous=anonymous)[0]`：
+      那样会**丢掉 audit**，而 audit 是这个站点唯一能在提交前发现"值全是兜底"
+      的东西（本文件在 2026-09-24 就吃过一次：漏 `merge_mapped` ⇒ 六个字段全变 1，
+      而**审计行的排版与"映射成功"完全相同**）。⇒ 有 audit 就**打出来**。
+    """
+    fields, audit = crabpt_site.build_fields(task, anonymous=anonymous)
+    for line in audit:
+        print(f"      · {line}")
+    return fields
+
+
+def _crabpt_readback(client, torrent_id, fields):
+    """提交后回读（判据层，不是日志层）。
+
+    ★★ 与乌托邦那份 `fetch_edit_form` 回读的**角色相同**，但**判据不同**：
+      乌托邦比的是「发出 vs 回读」（它有编辑页可读）；
+      蟹黄堡这份**只能证明"页面存在"** —— 因为详情页（详情表格）与编辑页是
+      两套视图，字段值不一定都露在详情页上。
+    ⇒ ★ 所以这里**如实分层**：
+        「详情页 200 ⇒ 这条种子确实建出来了」 ← **真判据**
+        「字段值逐项比对」                  ← **没有**，不假装有
+      ★ 若将来要逐字段比对，得先**采一次 `takeedit.php?id=<自己发的种>`
+        的基线**（先前的采集计划正是死在这里：一条种子都没发过 ⇒ 没有编辑页；
+        现在发过一条之后，这条路才**第一次**可达）。
+    ★ 失败**不算阶段失败**（不 `sys.exit`）—— 与 `readd_to_qb` 的复核同一模式：
+      种子**已经上站了**（不可逆），回读失败是本地问题，让 daemon 退避没有意义。
+    """
+    try:
+        r = client.get(f"/details.php?id={torrent_id}")
+        if r.status_code == 401:
+            print("    ⚠️  回读详情页被拒（401）—— 但**提交已经发出**，"
+                  "请手动打开站点核对")
+            return
+        if r.status_code != 200:
+            print(f"    ⚠️  回读详情页失败：HTTP {r.status_code}")
+            return
+        body = r.text or ""
+        # ★ 判据要"正向证据"，不能只看"没报错"：详情页上必须有那个 id 的下载链接。
+        has_dl = re.search(rf"download\.php\?id={re.escape(str(torrent_id))}", body)
+        print(f"    🔎 详情页 {client._url(f'/details.php?id={torrent_id}')} "
+              f"HTTP 200，{len(body)} 字节，"
+              f"下载链接{'在' if has_dl else '★ 不在'}")
+        if not has_dl:
+            print("        ★ 页面 200 但找不到该 id 的下载链接 ⇒ 这条可能不是"
+                  "刚发布的那条（或页面版式变了）。请手动核对。")
+            return
+        # ★ 有封面就查一次（这是**我们能查的唯一一个字段**：它在简介 HTML 里，
+        #   而简介在详情页上是渲染出来的）。
+        cover = (fields.get("descr") or "")
+        m = re.search(r'\[img\]([^\[\]]+)\[/img\]', cover)
+        if m:
+            url = m.group(1).strip()
+            print(f"        · 简介里的封面 {'已出现' if url in body else '★ 未出现'}"
+                  f"：{url[:80]}")
+            if url not in body:
+                print("          ★ 可能只是详情页没渲染 BBCode 的 [img]"
+                      "（不等于没落地）—— 别据此下结论。")
+    except Exception as e:                                  # noqa: BLE001
+        print(f"    ⚠️  回读详情页出错（不影响发布本身）: {type(e).__name__}: {e}")
+
+
+def run_crabpt(args):
+    """蟹黄堡（crabpt.vip）发布路径。★ 与 `main()` 的乌托邦路径**并列**，不互相调用。
+
+    ★★★ 为什么**不**共用 `main()` 那个循环：见 `parse_args()` 里 `--site` 的注释
+      —— 共用的是**不变量**（都在本函数里逐条照做），而不是**字段与提交**。
+      本函数里属于"不变量"的每一处都**明写了它对应 `main()` 的哪一段**，
+      将来改一边就能立刻看出另一边要不要跟。
+
+    ★★ 本函数**没有**接进 daemon（`daemon.py` 的 publish 阶段仍只调
+      `publish.py --yes --auto`，即默认的 musopia）。这是**刻意的**：
+      在"发一条、回读一条"验证通过之前，不让它进入每 30 分钟跑一次的无人值守路径。
+      接线是下一步，且那时要同时决定 `PUBLISH_CATEGORY` 与 qB 做种路径。
+    """
+    import crabpt_site
+
+    print("=" * 60)
+    print("🌐 站点 = 蟹黄堡（crabpt.vip）★ 与乌托邦完全独立的一条路径")
+    print("=" * 60)
+
+    # ---- ★★ 两个安全护栏：先立起来，再干别的 ----
+    #
+    # ① `--only` **必须**有（与乌托邦不同：那边是可选的）。
+    #
+    #   ★ 理由：乌托邦已经发过 254 条、常规批量发布是**它的日常**；
+    #     蟹黄堡**一条都没发过** —— 第一条的意义是"验证字段层到底对不对"，
+    #     而"发什么"必须由人**点名**，不能由 SQL 的排序决定。
+    #   ★ 这正是 `--only` 当初被加进来的理由（见它的 help）：**发布不可逆**，
+    #     所以"发十条"只能是"点名的十条"，不能是"队列前十条"。
+    #     ⇒ 对这条**从未验证过**的路径，把"可选"收紧成"必须"。
+    if not args.only:
+        sys.exit("❌ --site crabpt 必须带 --only <info_hash 前缀>：\n"
+                 "   ★ 蟹黄堡这条路**一次都没跑过**，第一条必须由人点名，\n"
+                 "     不能是「队列里排序最靠前的那条」（发布不可逆，无批量撤销）。\n"
+                 "   ⇒ 例：python publish.py --site crabpt --only 3f2a91c8… "
+                 "--limit 1 --yes")
+
+    # ② ★ **硬杀只读闸门** —— `--dry-run` 是本函数唯一会自己加上的 flag。
+    #
+    #   ★ 为什么要"硬杀"而不是"提示用户别忘"：
+    #     它**只影响这一条路径**（乌托邦那边一个字都不改），且方向**单向**
+    #     ——（关掉 dry-run = 真提交，**不可逆**）。
+    #     一个"不可逆动作的开关"如果默认是关的（= 会真发），那就等于没有开关。
+    #   ★ 反过来"不小心发了一次"是**不可逆**的 ⇒ 宁可多一步显式确认。
+    if not args.dry_run:
+        print("\n★★ 安全默认：`--site crabpt` **强制先走 dry-run**。")
+        print("   本次**不会**向蟹黄堡提交任何数据（只是把表单字段与来源打出来）。")
+        print("   ★ 看过字段没问题之后，去掉 `--dry-run` 再跑一次才会真发布。")
+        args.dry_run = True
+    else:
+        print("\n★ 显式 dry-run：不会向站点提交任何数据。")
+
+    # ---- 闸门与队列：★ 与 main() 同一份判据，不手抄 SQL（ERR-META-03）----
+    tasks = db.get_pending_publish()
+    if not tasks:
+        print("💡 当前没有需要发布的任务（`PENDING_PUBLISH_WHERE`）。")
+        return
+
+    want = tuple(s.strip().lower() for s in args.only.split(",") if s.strip())
+    hit = [t for t in tasks
+           if any((t.get("info_hash") or "").lower().startswith(w) for w in want)]
+    in_queue = {(t.get("info_hash") or "").lower() for t in tasks}
+    absent = [w for w in want if not any(h.startswith(w) for h in in_queue)]
+
+    print("\n" + "=" * 60)
+    print(f"★ --only：点名 {len(want)} 个 ⇒ 命中队列 {len(hit)} 条")
+    print("=" * 60)
+    for t in hit:
+        print(f"   ✅ {(t.get('info_hash') or '')[:12]}  {t.get('formatted_title')}")
+    for w in absent:
+        print(f"   ❌ {w} 不在待发布队列里（被闸门拦下 或 hash 打错）")
+    if absent:
+        # ★ 同一份判据（`explain_not_queued`），不另写一套。
+        #   ★ 蟹黄堡最可能撞上的是闸门④：皇后的 `transfer_rule`
+        #     —— 我们在蟹黄堡发之前**必须先确认皇后允许转载**。
+        print("\n   ★ 逐条查为什么没进队列（同一份判据，不做手抄）：")
+        for w in absent:
+            print(f"      {w}: {explain_not_queued(w)}")
+    if not hit:
+        sys.exit("❌ --only 与队列**零交集** ⇒ 拒绝执行（不会去发队列里的别的）")
+
+    # ---- 预检：★ 与 main() 同一套（缺封面 / 种子文件 / 无 log）----
+    valid, blocked = [], []
+    for i, t in enumerate(hit, 1):
+        reasons = []
+        if not (t.get("cover_url") or "").strip():
+            reasons.append("缺封面")
+        tf = t.get("torrent_file")
+        if not tf or not os.path.exists(tf):
+            reasons.append("种子文件缺失")
+        # ★★ 蟹黄堡**允许无 LOG**（实测：站点规则不要求），这一点**与乌托邦不同**。
+        #   ⇒ 这里**不拦**无 log。★ 但要说清"没有"与"没拦"是两回事：
+        #     不拦不等于有数据 —— 无 log 时 `build_descr()` 会少一段，
+        #     这是**已知且可接受**的差异，不是缺陷被忽略。
+        has_log = bool((t.get("log_content") or "").strip())
+        if not has_log:
+            try:
+                lj = json.loads(t.get("logs_json") or "null")
+                has_log = bool(lj) and any(
+                    (x.get("content") or "").strip()
+                    for x in lj if isinstance(x, dict))
+            except (ValueError, TypeError):
+                pass
+        # ★ 蟹黄堡的**必填**项里有一项乌托邦没有：简介（`descr`）。
+        #   空简介发上去 = 一条不可撤销的、页面是空壳的种子 ⇒ 拦在这里。
+        if not (t.get("cover_url") or "").strip() and not (t.get("tracklist") or "").strip():
+            reasons.append("简介与封面都为空 ⇒ 蟹黄堡的 descr 会是空壳")
+
+        flag = "✅ 可发布" if not reasons else "❌ " + "、".join(reasons)
+        print(f"\n[{i}] {t.get('formatted_title')}")
+        print(f"    副标题: {t.get('small_descr') or '(空)'}")
+        print(f"    log: {'有' if has_log else '无（★ 蟹黄堡不要求，不拦）'}")
+        print(f"    {flag}")
+        (valid if not reasons else blocked).append(t)
+
+    if blocked:
+        print(f"\n⚠️  {len(blocked)} 条被拦下（见上）。")
+    if not valid:
+        print("没有符合发布条件的任务，退出。")
+        return
+    if args.limit:
+        valid = valid[:args.limit]
+    # ★★ 蟹黄堡这条路**再加一道**：一次最多 1 条。
+    #
+    #   ★ 这不是"保守"，是**不可逆操作的正确默认**：这条路**从未验证过**
+    #     （字段层是照实测表单写的，但"提交之后站点上长什么样"没人看过）。
+    #     第一条发出去、回读确认之后，才谈得上第二条。
+    #   ★ 想多发就得显式改这个数 —— 而改它的人必然看到这段注释
+    #     （与"一个能靠多打一个词关掉的保险不是保险"同一个思路，
+    #       这里反过来：**能靠多打一个词放开的上限，至少得让人问一句为什么**）。
+    if len(valid) > 1:
+        print(f"\n★★ 蟹黄堡路径一次只发 1 条（本次点名命中 {len(valid)} 条 "
+              f"⇒ 只发第一条）。★ 理由：这条路从未验证过，发布不可逆。")
+        print("   ⇒ 若确实要发多条，请逐条点名、逐条确认。")
+        valid = valid[:1]
+
+    # ---- 提交前：读发布页（★ 唯一能在提交前发现"没有发种权限"的判据）----
+    client = crabpt_site.CrabptClient()
+    if not client.have_cookie():
+        sys.exit("❌ CRABPT_COOKIE 是空的 ⇒ 拒绝提交。\n"
+                 "   ★ 必须在 **NAS 的 .env** 里加（`deploy.sh` 的白名单不含 `.env`，"
+                 "见 ERR-ENV-02），然后 `sudo docker compose up -d --build`。")
+
+    form_info = None
+    if not args.dry_run:
+        try:
+            uid = client.check_login()
+            print(f"✅ 蟹黄堡 Cookie 有效，user_id = {uid or '(页面上没读到，不影响发布)'}")
+            form_info = client.fetch_upload_form()
+            print(f"   · 发布页 OK：action={form_info['action']!r}、"
+                  f"enctype={form_info['enctype']!r}、"
+                  f"{len(form_info['actions'])} 个字段、"
+                  f"csrf={list(form_info['csrf']) or '（站点没给）'}")
+            if "multipart" not in form_info["enctype"]:
+                print(f"   ★ 注意：发布页的 enctype={form_info['enctype']!r} 不是 "
+                      f"multipart ⇒ 上传文件可能不被识别，**先停下来人工确认**。")
+        except SiteError as e:
+            sys.exit(f"❌ {e}")
+
+    # ---- dry-run：把字段与**来源**逐项打出来 ----
+    if args.dry_run:
+        t = valid[0]
+        print("\n" + "=" * 60)
+        print(f"🔍 dry-run：{t.get('formatted_title')}")
+        print("=" * 60)
+        try:
+            fields, audit = crabpt_site.build_fields(t, anonymous=args.anonymous)
+        except ValueError as e:
+            sys.exit(f"❌ 渲染字段失败: {e}")
+        print("字段来源（每一格从哪来）：")
+        for line in audit:
+            print(f"  · {line}")
+        print("\n将要提交的表单：")
+        for k, v in fields.items():
+            shown = v if not isinstance(v, str) else v.replace("\n", "\\n")
+            if isinstance(shown, str) and len(shown) > 160:
+                shown = shown[:160] + f"…（共 {len(v)} 字符）"
+            print(f"  {k} = {shown!r}")
+        print(f"\n  file = {t.get('torrent_file')}")
+        print("\n★ 以上仅为预览，**没有向蟹黄堡提交任何数据**。")
+        print("★ 看过之后去掉 --dry-run 再跑同一条命令才会真发布。")
+        return
+
+    # ---- 确认（★ 与 main() 同一处语义：`--yes` 跳过，`--auto` 另查钥匙）----
+    t = valid[0]
+    if not args.yes:
+        answer = input(f"\n确认向**蟹黄堡**发布这 1 条吗？(y/N): ").strip().lower()
+        if answer != "y":
+            print("🚫 已取消，未向站点提交任何数据。")
+            return
+
+    # ★★★ 第二把钥匙 —— **在建立任何客户端 / 发任何请求之前**。
+    #   位置与判据**逐字**沿用 `main()`（同一份 `guard_auto_key()`）：
+    #   钥匙没通过时一个请求都不该发出去。★ 蟹黄堡这条路虽然现在只有人手工跑，
+    #   但将来接进 daemon 时它**必然**带 `--auto` ⇒ 这段现在就得在。
+    if args.auto:
+        key_ok, key_detail, key_why = guard_auto_key()
+        if not key_ok:
+            print("=" * 60)
+            print(f"🛑 拒绝自动发布（蟹黄堡）：第二把钥匙没通过 —— {key_detail}")
+            print(explain_key_reason(key_why))
+            print("=" * 60)
+            sys.exit(3)
+
+    # ---- 提交 ----
+    fields = _crabpt_fields(t, args.anonymous)
+    print(f"\n🚀 向蟹黄堡提交：《{t.get('formatted_title')}》")
+    try:
+        tid, msg = client.upload_torrent(t.get("torrent_file"), fields, form_info)
+    except (SiteError, LoginExpired) as e:
+        sys.exit(f"❌ {e}")
+
+    if not tid:
+        # ★ 说真话的退出码（同 `main()` 末尾那段纪律）：有失败 ⇒ 非 0。
+        #   而且这条路径必须非 0：**站点可能已经建了种子而我们没读到 id**，
+        #   非 0 会让调用方**停下来**而不是"照常重来"。
+        sys.exit(f"❌ 蟹黄堡发布未取得站点 id：{msg}")
+
+    print(f"    🎉 已提交，站点 ID = {tid}")
+    # ★ 落库（与 main() 同一对调用）。★ 只说这次真的做了什么、没做什么：
+    #   下面这三句**不写进 reason**（reason 是库里的字段，落进去就成了"事实"，
+    #   而这三件都是**已知缺口**）—— 缺口记在 PLAN-crabpt.md 附录 D.5。
+    db.set_site_id(t["info_hash"], tid, site_status="EXISTS",
+                   status="PUBLISHED", reason=f"crabpt_published_id:{tid}")
+    db.mark_synced(t["info_hash"])
+    print("    ℹ️  未做（已知缺口，见 PLAN-crabpt.md 附录 D.5）："
+          "technical_info 留空 · 日韩拆不出 · 不回加 qB（蟹黄堡尚未接线）")
+
+    _crabpt_readback(client, tid, fields)
+    print("\n★ 下一步（人工）：打开详情页逐字段复核，"
+          "并**顺便把 `takeedit.php?id=%s` 采下来** ——" % tid)
+    print("  那条编辑页是先前采集计划里**唯一**拿不到、"
+          "而现在已经可达的东西（先得自己发过一条）。")
+    print("★ 它同时是回填 `PLAN-crabpt.md` 附录 C.6 的依据。")
+    return
+
+
 def main():
     args = parse_args()
+
+    # ★ 站点分流（2026-09-25）。★ 只有这一处 if —— 分流点越少，
+    #   "某条路漏了某个不变量"的机会越少。两条路各自**完整**：
+    #   都自己查闸门、自己预检、自己落库、自己算退出码。
+    if args.site == "crabpt":
+        return run_crabpt(args)
 
     config.print_runtime_info()
     db.init_db()

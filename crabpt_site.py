@@ -41,12 +41,23 @@
    而皇后那一列**是"日韩"合并的** ⇒ **拆不出日本(5)与韩国(6)**，
    只能落到 `1 其他`。这与 `opencd_map.py` 把"映射不上显式列出"的做法一致。
 """
+import os
 import re
+import time
+
+import requests
 
 import config
 import db
 import descr
 import opencd_map
+
+# ★ 复用乌托邦那份 UA / 错误提取 —— 两站都是 NexusPHP，出错的页面形状同族。
+#   ★ 不各写一份：这两样不是"站点差异"，是"NexusPHP 共性"，各写一份就是两个口径
+#     （`ERR-META-03`），而它们**恰恰是排错时唯一能看的东西**。
+#   ★ 方向是单向的（crabpt_site → musopia），不会成环：
+#     `musopia.py` 不 import 本文件，也不 import publish。
+from musopia import SiteError, UA, _extract_error
 
 # ==================== 分类 id ====================
 # ★ 音乐 = 408（实测）。★ 必须与 config 同源，不手抄（ERR-META-03）。
@@ -220,20 +231,64 @@ def map_processing(musopia_tags):
 
 # ==================== `tags[4][]`：标签 ====================
 #
-# ★★ 只映射**两边语义明确同源**的。实测两边体系**不同类**（见文件头），
-#    所以这张表**故意很短** —— ★ **不硬凑**（凑出来的标签 = 写错的事实）。
+# ★★★ 2026-09-25 用户纠正 —— 本段原先写的是「禁转 两边同名、必须传过去」，
+#    **那是错的，而且错在根上**。用户原话：
+#        「从皇后往蟹黄堡转发，为什么要勾选蟹黄堡的禁转？」
 #
-#   乌托邦标签名 → 蟹黄堡标签值
-_CRABPT_TAGS = {
-    "禁转": 1,          # ★ 两边同名，且这是**最要紧**的一个（禁转必须传过去）
-    # ★ 「首发」在蟹黄堡**没有**对应项 ⇒ 不映射（落 unmapped）
-}
+#    ★ 为什么错（这是**方向**问题，不是映射问题）：
+#      我们是**转载方**。皇后那条种子的发布者说"欢迎转载"，我们才转出来；
+#      转出来之后，在**蟹黄堡**这一侧勾「禁转」的意思是
+#      「**禁止别人再转载这条蟹黄堡种子**」—— 那是**我们自己**对下游加的限制，
+#      而我们的种子是**转载来的**，根本没资格、也没理由加这个限制。
+#      ⇒ ★ 勾上它是**假数据**（写了一个我们无权主张的事实）。
+#
+#    ★★ 而这个错误**本项目早就解决过**，就在 `descr.TAG_NEVER_FORWARD`
+#       （2026-09-21 用户拍板，乌托邦那一侧）：
+#          「禁转(1)/首发(2) —— **语义相反**：我们是**转载**过去的」
+#       ⇒ 我在写蟹黄堡这个**新调用方**时，**没有把那条既有判据带过来**
+#         —— 这正是 `ERR-META-16`（"同一个语义来自哪一列/哪一份判据，
+#         换了调用方不能凭印象"）的又一次实例，而且这次的代价是**往站点写假数据**。
+#       ⇒ 修法不是"这里再写一份黑名单"，而是**复用 `descr.filter_forward_tags()`**
+#         —— 两站共用一份"转发方向白名单"，将来改一处两站都跟。
+#
+#    ★★ 顺带纠正一个我先前说错的判断：
+#      我说过「标了 = 违背用户『怎么起就怎么起』的拍板」。**那句话是错的**
+#      —— 用户那个拍板说的是**标题**（`formatted_title` 原样透传），
+#      与**标签**无关。而且用户当时的语境**本身就是「不要勾禁转」**。
+#      ⇒ 所以这条**根本不是"取舍"**，是**单方向的对错**：不该勾，就是不勾。
+#
+#    ★ 蟹黄堡**页面里确实有**「禁转」标签（也正因为它存在，才有"勾不勾"的问题）。
+#      结论是：**它存在，但我们不用它** —— 这一格我们本来就不该填。
+#
+# 乌托邦标签名 → 蟹黄堡标签值
+#   ★ 蟹黄堡的 `tags[4][]` 以**影视属性**为主（剧情/战争/犯罪/惊悚/科幻/动画…），
+#     与音乐几乎无交集 ⇒ 实测**没有一个**乌托邦标签名能在蟹黄堡找到语义同源的项。
+#     ⇒ 这张表**故意是空的**，而**空表比硬凑一张表安全**：
+#       硬凑出来的每个标签都是写错的事实，而空表只会让页面少几个标签。
+#   ★ 唯一还想勾的是 `OpenCD`（来源标记，蟹黄堡有没有这一项**未实测**）——
+#     所以它**不在这里猜**（见 `build_fields` 里那条显式 TODO）。
+_CRABPT_TAGS = {}
 
 
 def map_tags(musopia_tags):
-    """乌托邦标签编号列表 → (蟹黄堡 `tags[4][]` 值列表, 未映射的乌托邦标签名)。"""
+    """乌托邦标签编号列表 → (蟹黄堡 `tags[4][]` 值列表, 未映射的乌托邦标签名)。
+
+    ★★ 本函数**先过一遍 `descr.filter_forward_tags()`**（转发方向白名单），
+       再查蟹黄堡自己的映射表。两道是**串联**的，各管一件事：
+         · `filter_forward_tags` 管**方向**：「皇后有」≠「该勾上」
+           （禁转/首发语义相反、友站标记、站内运营标记）
+         · `_CRABPT_TAGS`        管**落点**：这个标签蟹黄堡有没有对应项
+       ★ 顺序不能反：先方向、后落点。"蟹黄堡有没有禁转这一项"是个无关的问题
+         —— 就算有，我们也不勾（见上）。
+    """
+    # ★★ 方向过滤：★ 复用乌托邦那份既有判据，**不在这里再写一份黑名单**
+    #    （`ERR-META-03`：两处各写一份必然漂移，而这次漂移的代价是**写假数据**）。
+    #    ★ `dropped` 要**返回给调用方**并打印 —— 不静默丢（同 `map_tags` 的契约）。
+    values = [str(x) for x in (musopia_tags or [])]
+    kept, dropped = descr.filter_forward_tags(values)
+
     out, unmapped = [], []
-    for v in musopia_tags or []:
+    for v in kept:
         want = _norm(v)
         name = None
         for k, val in descr.TAGS.items():
@@ -248,6 +303,12 @@ def map_tags(musopia_tags):
                 out.append(cv)
         else:
             unmapped.append(name)
+    # ★★ 被方向过滤剔掉的，**并进 unmapped 一起报**（不静默丢）。
+    #   ★ 但**带上理由**：它们没落上**不是**因为"蟹黄堡没有这一项"，
+    #     而是因为**我们本来就不该勾**。两种"没落上"混成一个列表会让人误判
+    #     （`ERR-META-14`：兜底与映射结果必须分开说）。
+    for v, nm, why in dropped:
+        unmapped.append(f"{nm}（★ 方向过滤：{why}）")
     return out, unmapped
 
 
@@ -339,7 +400,16 @@ def build_fields(task, *, anonymous=False):
     audit.append(f"codec_sel[4] = {CODEC_OTHER}（Other，同上）")
     audit.append(f"team_sel[4] = {TEAM_OTHER}（Other，同上）")
     audit.append(f"tags[4][] ← {ct}"
-                 + (f"　★ 未映射：{unmapped_tags}" if unmapped_tags else ""))
+                 + (f"　★ 未映射/未勾：{unmapped_tags}" if unmapped_tags else ""))
+
+    # ★★ 一条**显式的 TODO**（不是"忘了"）：
+    #   乌托邦那一侧会给每条种子勾上 `OpenCD`（来源标记，2026-09-21 用户点名
+    #   「opencd 勾上」）。蟹黄堡**有没有这一项，未实测** ⇒ ★ 这里**不猜**。
+    #   ★ 想要补上它，判据是**一次真实观测**：在蟹黄堡发布页的 `tags[4][]` 选项里
+    #     找有没有一个叫 `OpenCD` / 含义为"来自 OpenCD"的项。
+    #     —— 而这件事**下一次 dry-run 就能顺手做完**（发布页已经在读了）。
+    audit.append("tags[4][] 的 OpenCD 来源标记：★ 未实测蟹黄堡有无此项 ⇒ 本次不勾"
+                 "（补它的判据 = 读一次发布页的 tags 选项）")
 
     # ★★★ 「四个键是不是空的」必须**显式报出来** —— 这是本文件唯一会"静默出错"的地方。
     #
@@ -427,3 +497,257 @@ def music_list_url(base=None):
     """音乐分类的浏览页（★ 用于回读复核：发布后能从列表里找到吗）。"""
     b = (base or config.CRABPT_URL).rstrip("/")
     return f"{b}/torrents.php?cat={MUSIC_TYPE}"
+
+
+# ============================================================================
+# 客户端 —— 只做三件事：验登录 / 取发布页基线 / 提交发布
+# ============================================================================
+#
+# ★★ 为什么**不**继承 `MusopiaClient`、也不去改它加个 `site=` 参数：
+#    乌托邦那份是**主发布线**（254 条已在做种、`update_metadata.py` 的编辑路径
+#    也走它）。把蟹黄堡塞进同一个 class ⇒ 每次动本文件都可能改到那条线的行为，
+#    而那条线的回归代价是"已经在做种的种子被改坏"。
+#    ⇒ ★ 共用**数据**（`build_fields` / `_norm` 等），不共用**连接与提交**。
+#
+# ★★ 「基线」这件事两站**完全不同**，这是本 class 比乌托邦那份简单的原因：
+#    · 乌托邦 `update_metadata.py` 要「读表单 → 覆盖指定字段 → 整表提交」，
+#      因为 `takeedit.php` 是**整表覆盖**语义（没提交的字段当空）。
+#    · 蟹黄堡走的是**发布**（`takeupload.php`），我们是**从零构造**整张表
+#      （`build_fields()` 把每一个字段都填了）⇒ **不需要读表单当基线**。
+#      ⚠️ 将来若要**编辑**已有的蟹黄堡种子，那条路径**必须**先读一次
+#      `takeedit.php?id=` 取基线 —— 否则会重现乌托邦踩过的"每编辑一次就抹掉
+#      一批属性"。★ 现在没有这条路径，所以这里**没有** `fetch_edit_form`，
+#      而不是"忘了写"。
+class CrabptClient:
+    """蟹黄堡（crabpt.vip）客户端。★ 只读 + 一次 POST，不碰 qB、不碰库。"""
+
+    def __init__(self, base_url=None, cookie=None, request_interval=1.5):
+        self.base = (base_url or config.CRABPT_URL).rstrip("/")
+        self.cookie = cookie if cookie is not None else config.CRABPT_COOKIE
+        self.interval = request_interval
+        self._last_request = 0.0
+
+        self.sess = requests.Session()
+        self.sess.headers.update({
+            "User-Agent": UA,
+            "Cookie": self.cookie,
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        })
+
+    # ---------- 底层 ----------
+
+    def _throttle(self):
+        """站点是别人的，别把人家打疼。每次请求之间留间隔。"""
+        elapsed = time.time() - self._last_request
+        if elapsed < self.interval:
+            time.sleep(self.interval - elapsed)
+        self._last_request = time.time()
+
+    def _url(self, path):
+        return path if path.startswith("http") else f"{self.base}/{path.lstrip('/')}"
+
+    def get(self, path, **kw):
+        self._throttle()
+        kw.setdefault("timeout", 30)
+        return self.sess.get(self._url(path), **kw)
+
+    def post(self, path, **kw):
+        self._throttle()
+        kw.setdefault("timeout", 60)
+        return self.sess.post(self._url(path), **kw)
+
+    def have_cookie(self):
+        return bool((self.cookie or "").strip())
+
+    # ---------- 登录态 ----------
+
+    def check_login(self):
+        """验 Cookie 有效性，返回 user_id 或 None。
+
+        ★★ 这里**故意不抄**乌托邦那份的判据，因为**两站的登录页形状不同**：
+            乌托邦失效 ⇒ 回**登录页**（body 里出现 `takelogin.php`）
+            蟹黄堡失效 ⇒ 回 **401 + Basic 认证弹窗**（NexusPHP 的 `.htaccess`
+                          保护整站；`WWW-Authenticate: Basic realm="crabpt.vip"`）
+            ★ 所以"有没有登录页"这条判据在蟹黄堡**恒为假** ⇒ 照抄过来会把
+              "Cookie 全废"报成"登录成功"（`ERR-META-01` 的经典形状）。
+          ⇒ 判据用**响应形状**：401 / 带 `WWW-Authenticate` ⇒ 判定失效并抛。
+
+        ★ 另记一条**不能当判据**的东西（实测 2026-09-25）：出错时站点回的那张
+          401 页**带一行 `setCookie('nexusphp_test', ...)`**。它**不是**登录 cookie，
+          是 NexusPHP 的探测脚本在检查"浏览器收不收 cookie"。
+          ⇒ 谁要是拿它判断"站点给我发 cookie 了 ⇒ 我登录了"，就会得到一个
+            永远为真的假判据。（已实测：正常页面 `nexusphp_test` 出现 **0** 次。）
+        """
+        r = self.get("/torrents.php")
+        if r.status_code == 401 or "WWW-Authenticate" in (r.headers or {}):
+            raise SiteError(
+                f"蟹黄堡拒绝访问（HTTP {r.status_code}，带 WWW-Authenticate）"
+                f" ⇒ CRABPT_COOKIE 已失效或没配上。请更新 NAS `.env` 的 "
+                f"CRABPT_COOKIE（见 ERR-ENV-02：新增键要在 NAS 手工加）")
+        if r.status_code != 200:
+            raise SiteError(f"访问蟹黄堡 torrents.php 失败，HTTP {r.status_code}")
+        body = r.text or ""
+        if "takelogin.php" in body or "login.php?returnto" in body:
+            raise SiteError("蟹黄堡 Cookie 已失效（页面退回登录页），"
+                            "请更新 NAS `.env` 里的 CRABPT_COOKIE")
+        # ★ 优先从 userdetails 链接抠 uid；抠不到**不抛** ——
+        #   提交发布**不需要** uid（不是靠 uid 发种的），抛在这里会把
+        #   "取不到 uid"（页面版式微调）误判成"登录失败"。
+        m = re.search(r"userdetails\.php\?id=(\d+)", body)
+        return m.group(1) if m else None
+
+    # ---------- 发布页（★ 基线 + 可用性预报）----------
+
+    def fetch_upload_form(self):
+        """GET `takeupload.php`，返回 `(form, actions, action, csrf)`。
+
+        ★★ 为什么发布前**必须**先读一次这张页面（两个理由，第二个才是关键）：
+          ① 它是**基线**：`build_fields()` 产出的是 12 个字段，而站点那张表单
+             还有别的字段（如 `technical_info` 我们只能留空）。先读一次，
+             才能把"我们没填的"与"站点没有的"分开。
+          ② ★★★ **它是唯一能在提交前发现"账号不能发种"的判据。**
+             `ERR-SITE-01`（乌托邦实测）：Cookie 有效 ≠ 有发种权限 ——
+             权限被关后站点回的是 **HTTP 200 的普通页**，不是 302、不是报错。
+             ⇒ 若不做这一步，我们会带着一个"看着成功"的 200 走完整个提交，
+               把失败**留给不可逆的那一步**才发现。
+             本函数把三种情况**分开**报，不合并：
+               · 没有表单            ⇒ 抛（不是发布页：权限被关 / 页面版式变了）
+               · 有表单但缺必需字段  ⇒ 列出缺了哪些，仍抛
+               · 有表单且字段齐      ⇒ 返回基线，允许往下走
+
+        ★ 返回的 `form.action` 是**站点自己写的** action（相对或绝对），
+          提交要用它，不要用我们猜的路径。
+        """
+        r = self.get("/takeupload.php")
+        if r.status_code != 200:
+            raise SiteError(f"取蟹黄堡发布页失败，HTTP {r.status_code}")
+        body = r.text or ""
+        if "takelogin.php" in body:
+            raise SiteError("蟹黄堡 Cookie 已失效（发布页退回登录页）")
+
+        bs = __import__("bs4").BeautifulSoup(body, "html.parser")
+        form = bs.find("form")
+        if form is None:
+            # ★ 把"页面里究竟有什么"报出来 —— 这是 ERR-SITE-01 那个
+            #   「HTTP 200 + 看不出原因」的**解药**：至少要能看出这不是发布页。
+            looks_logged_in = "userdetails.php" in body
+            raise SiteError(
+                "蟹黄堡 takeupload.php 里**没有 <form>** ⇒ 这不是发布页。"
+                f"（HTTP 200、{len(body)} 字节、"
+                f"{'页面上有 userdetails 链接（登录态在）' if looks_logged_in else '页面上没有 userdetails 链接'}）"
+                "。★ 见 ERR-SITE-01：Cookie 有效 ≠ 有发种权限 —— "
+                "这类失败在 NexusPHP 上就是回一张 HTTP 200 的普通页。"
+                "⇒ 请确认该账号的**发种权限**（或页面版式是否已变）。")
+
+        actions = {i.get("name"): i for i in form.find_all(["input", "select", "textarea"])
+                   if i.get("name")}
+        # ★ 我们的关键文件字段叫什么 —— 不写死 `file`：NexusPHP 各站可能不同名，
+        #   而写死一个错名字的后果是**上传的是空文件**（站点多半照收）。
+        #   实测蟹黄堡是 `file`，但判据走"在不在 form 里"。
+        required = [k for k in ("type", "name", "descr", "small_descr") if k not in actions]
+        if required:
+            raise SiteError(
+                f"蟹黄堡发布页缺了这些字段：{required} ⇒ 页面版式已变，"
+                f"本适配层的字段名可能已过期（见 PLAN-crabpt.md 附录 C），"
+                f"**先复核再发布**。")
+        csrf = {k: v for k, v in actions.items()
+                if k.lower() in ("csrf_token", "csrf", "_token")}
+        return {
+            "form": form,
+            "actions": actions,
+            "action": form.get("action") or "/takeupload.php",
+            "csrf": csrf,
+            # ★ 站点自己声明的 enctype —— 用来印证"确实要 multipart"。
+            #   若哪天不是 multipart，提交时**文件会变成一个普通文本字段**。
+            "enctype": (form.get("enctype") or "").lower(),
+        }
+
+    # ---------- 提交 ----------
+
+    def upload_torrent(self, torrent_path, fields, form_info=None):
+        """发布新种子，返回 `(torrent_id 或 None, 人读消息)`。
+
+        ★★ 三点与乌托邦那份**故意不同**（不是漏写）：
+          ① **不传 `allow_redirects=False`** —— 见下面"ID 从哪来"那段。
+          ② **先验证再提交**：`torrent_path` 必须是**真 .torrent**（`torf` 能读）。
+             ★ 传个空文件/坏文件上去，站点**多半照收**（拿到一个不可撤销的空种子）。
+          ③ `action` 用**站点给的**（`form_info`），不写死路径。
+
+        ★ "ID 从哪来"—— 这是本函数唯一必须解释的技术选型：
+          乌托邦那份读的是**重定向**的 `Location: ...id=N`。这要求
+          `allow_redirects=False`，否则 `requests` 会跟到详情页、`Location` 就没了。
+          ★ 但"发布成功"与"拿到 id"在**不可逆提交**上不该绑成一件：
+            重定向没跟上 ⇒ 我们会报"失败"⇒ 而站点上**种子已经建好了**
+            ⇒ 触发重试就是**发重**。
+          ⇒ 蟹黄堡这份**让 requests 跟重定向**（默认行为），然后从**最终 URL**
+            和 **body 里的 `details.php?id=`** 两处取 id：
+              · 拿到 ⇒ 一切正常
+              · ★ 拿不到 ⇒ **仍然算提交成功**（POST 没抛异常、页面也没报错），
+                只把"没读到 id"单独报出来，让人去站点核对。
+            ★ 这**不是**把失败当成功 —— 判据分层：
+              HTTP 层（POST 有没有抛 / 有没有 5xx）与 id 层分开报，
+              而"到底成没成"的最终判据是**回读**（见 `publish.py --site crabpt`
+              的 `readback`），不是这里返回的那个数字。
+        """
+        import torf
+
+        if not os.path.exists(torrent_path):
+            raise SiteError(f"种子文件不存在: {torrent_path}")
+        try:
+            with open(torrent_path, "rb") as fh:
+                raw = fh.read()
+            torf.Torrent.read_stream(__import__("io").BytesIO(raw))
+        except Exception as e:                              # noqa: BLE001
+            raise SiteError(f"种子文件读不出（不是合法 .torrent）: "
+                            f"{torrent_path}: {type(e).__name__}: {e}") from e
+
+        # ★ 文件字段名：以发布页上实际存在的为准；页面读不到时退回 `file`
+        #   （实测蟹黄堡就是 `file`）。★ 不传一个"我们猜的名字"。
+        field_name = "file"
+        if form_info:
+            cand = [k for k in (form_info.get("actions") or {}) if k in ("file", "torrent")]
+            if cand:
+                field_name = cand[0]
+
+        action = (form_info or {}).get("action") or "/takeupload.php"
+        files = {field_name: (os.path.basename(torrent_path), raw,
+                              "application/x-bittorrent")}
+
+        r = self.post(
+            action,
+            data=fields,
+            files=files,
+            headers={"Referer": self._url("/upload.php"), "Origin": self.base},
+            # ★ 显式写出来（= requests 的默认值）：**要跟重定向**，
+            #   这样最终 URL 就是详情页。别照抄乌托邦那边的 False。
+            allow_redirects=True,
+        )
+
+        # ---- id：两处取，最终 URL 优先（它就是详情页）----
+        tid = None
+        for src in (r.url or "", r.text or ""):
+            m = re.search(r"details\.php\?id=(\d+)", src)
+            if m:
+                tid = m.group(1)
+                break
+
+        if tid:
+            return tid, "ok"
+
+        # ---- 没拿到 id：先判断这是"坏"还是"可能成了但没读到" ----
+        if r.status_code >= 400:
+            err = _extract_error(r.text or "")
+            return None, (err or f"HTTP {r.status_code}（★ 5xx 也可能发生在"
+                                 f"提交**之后**，请务必去站点核对是否已建）")
+
+        err = _extract_error(r.text or "")
+        if err:
+            return None, err
+
+        # ★ 到这里：HTTP 200、页面上没有报错、也没有 details 链接。
+        #   这正是 `ERR-SITE-01` 那个"看着正常"的形状 ⇒ **不许说成功**，
+        #   但也**不许说失败**（说了失败就会有人重试 ⇒ 发重）。
+        return None, (f"★ 无法判定：HTTP {r.status_code}，既没拿到 details 链接 "
+                      f"也没读出报错（最终 URL {r.url!r}，{len(r.text or '')} 字节）。"
+                      f"⇒ 请**立刻去站点确认这条种子建了没有**，"
+                      f"**不要重跑**（发布不可逆）。")
