@@ -186,6 +186,45 @@ def _extract_nfo_log(soup):
     return None, "divnfo 是空的"
 
 
+def _descr_text_only(div):
+    """
+    皇后简介正文：`divdescr` 的**纯文本**（`<img>` 一律剥掉，其余保真）。
+
+    ★★ 为什么要剥图（2026-09-26 实测，58 个真实详情页全查了一遍）：
+      15/58 个页面的 `divdescr` 里塞着**成堆的扫描图**，例如：
+          196878  Cover.jpg / Disc1.jpg / Booklet1~10.jpg / Inside.jpg / Back.jpg（15 张）
+          196928  Box_Front.jpg / Booklet2,17,18,20,21.jpg（10 张）
+          200609  Back.jpg / Booklet - 1,7,10.jpg / Scan1.jpg（5 张）
+      ⇒ 而且全是 `.thumb.jpg` **缩略图**（质量低），不是原图。
+      ★ 本模块早就有过告警（见 `_COVER_EXCLUDE` 那段注释）：`divdescr` 里的图
+        **不一定是封面**，实测见过 `频谱图.JPG` / `xxx-spectrogram.png` ——
+        当初正是它导致"把频谱图当封面传上图床"。
+      ⇒ 简介里只要**文字**；封面由我们自己的 `cover_url` 负责（`descr.build_descr`
+        第一块就是 `[center][img]…[/img][/center]`）。
+      ★ 在**解析层**剥，不在渲染层剥 —— 否则同一个判据两处实现，必然漂移
+        （`ERR-META-03`）。
+
+    ★ 为什么不在这里做"去掉 `[img]`/`[b]` 等 BBCode"之类的清洗：
+      `divdescr` 是**用户正文**，里面出现的方括号是**内容**，不是标记。
+      只做两件确定无损的事：① 剥 `<img>`；② 交给 `_clean_long` 保真取文本。
+    """
+    if div is None:
+        return ""
+    # ★ 复制一份再改：直接 `decompose()` 会污染调用方的 soup
+    #   （调用方 `parse_detail` 之后还要用同一个 soup 取封面候选，
+    #    `_extract_cover_candidates` 会去看 `divdescr` 作为**备选**封面来源）。
+    #   ⇒ 这点很要紧：就地删图 = 把那条兜底路径也一起删了。
+    import copy as _copy
+    d = _copy.copy(div)
+    for img in d.find_all("img"):
+        img.decompose()
+    # ★ 图片被删后常留下一串空行（每个 `<img>` 前后都有换行）⇒ 压掉连续空行，
+    #   但不压行内的空白（`_clean_long` 的纪律：保真）。
+    text = d.get_text("\n")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return _clean_long(text)
+
+
 def parse_detail(html, *, source_file=None):
     """解析一份 OpenCD 详情页 HTML，返回 TorrentInfo。**纯函数，不碰网络。**"""
     soup = BeautifulSoup(html or "", "html.parser")
@@ -230,7 +269,12 @@ def parse_detail(html, *, source_file=None):
     # ---------- 简介 / 曲目 / 日志 ----------
     # ★ 这三样一律走 `_clean_long`（保真），**不走 `_norm`** —— 理由见 _clean_long 的注释。
     div = soup.find(id="divdescr")
-    info["descr"] = _clean_long(div.get_text("\n")) if div else ""
+    # ★★ 2026-09-26 改：改走 `_descr_text_only()` —— 剥掉 `<img>`
+    #    再取文本。原先的 `_clean_long(div.get_text("\n"))` 会把 15/58 个页面里
+    #    的扫描缩略图**留在 HTML 里**（`get_text` 只是取不出标签，图本身还在
+    #    `div` 里；真正的问题是把这段正文搬去站点时图会被一起带走）。
+    #    详见 `_descr_text_only` 的 docstring（含实测的图片清单）。
+    info["descr"] = _descr_text_only(div)
     if not info["descr"]:
         missing.append("descr(divdescr)")
 

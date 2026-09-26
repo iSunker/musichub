@@ -381,6 +381,18 @@ def build_fields(task, *, anonymous=False):
         log_content=task.get("log_content") or "",
         log_filename=task.get("log_filename") or "",
         logs=logs,
+        # ★★ 皇后简介正文（2026-09-26 加）—— **两站必须传同一个值**。
+        #    ★ 为什么这里也要传：`build_descr()` 是**两站共用**的（本文件上方
+        #      那条注释已写明"格式同构、可直接复用"）。若这边不传，乌托邦页面
+        #      有皇后正文、蟹黄堡页面没有 —— 那是**没人要求过的差异**，
+        #      而且不会报错（两条链路各自"看着正常"）。
+        #      与 `build_small_descr_for_task` 抽出来的理由是**同一个**
+        #      （见 `descr.build_small_descr_for_task` 的 docstring）。
+        #    ★ `db.merge_mapped(task)` 在本函数**内部**第 349 行已跑过
+        #      ⇒ `task["descr"]` 是**快照提升后**的值（权威值）。
+        #      兜底取列 `opencd_descr`：万一将来有人把 merge 那步挪走，
+        #      这里不会**静默**变成空。
+        opencd_descr=task.get("descr") or task.get("opencd_descr") or "",
     )
     audit.append("descr（简介）← descr.build_descr()（BBCode，两站同构）")
 

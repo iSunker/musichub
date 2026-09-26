@@ -294,9 +294,17 @@ def detect_tags(*sources):
 #     · 齐秦那条**本来就是空的**（`small_descr_present=False`）⇒ 留空，不硬造
 #
 #   ★ 两条路**分开**，不再共用同一个函数的行为：
-#     · `run.py`（qB 本地抓轨）继续用 `build_small_descr()` 造「全 N 曲」——
-#       那条路的主标题是我们自己拼的，行为不变，**不受本次改动影响**。
-#     · 皇后转载路：用 `opencd_small_descr()` = **解析层读到的皇后副标题原文**。
+#     · qB 本地抓轨路（**没有** `opencd_tid`）：`derive_small_descr()` 造「全 N 曲」——
+#       那条路的主标题是我们自己拼的，行为不变。
+#     · 皇后转载路（**有** `opencd_tid`）：`opencd_small_descr()` = **皇后副标题原文**。
+#
+#   ★★ 2026-09-26 订正（本条原先写的是 "`run.py`（qB 本地抓轨）继续用
+#      `build_small_descr()`"）—— 那句**把 run.py 当成了只走抓轨路**，是错的：
+#      `run.py` 的 scan 扫的是 qB 的 `opencd` 分类，里面**两种种子都有**
+#      （既有本地抓轨成果，也有已经转载自皇后、正在做种的）⇒ 它**必须分流**。
+#      ★ 把它当成"只走抓轨路"，正是 `scan` 每轮把皇后原文覆盖成「全 N 曲」的由来
+#        （`ERR-DATA-01` 的真根因；`ERR-META-04`：改了行为要同时改文档，
+#         否则这条注释会把人引回那个 bug）。⇒ 现在走 `scan_small_descr()`。
 
 def opencd_small_descr(parsed_subtitle=""):
     """
@@ -335,7 +343,64 @@ def derive_small_descr(tracklist="", disc_count=None, fallback=""):
 
 
 def build_small_descr(tracklist="", disc_count=1, fallback=""):
-    """副标题对外入口（run.py 扫描时用）。渲染时 build_form_fields 会再重算一次。"""
+    """副标题对外入口（渲染时 build_form_fields 会再重算一次）。
+
+    ★★ 2026-09-26：`run.py`（scan 阶段）**不再**调本函数 —— 见下面 `scan_small_descr`。
+       本函数保留给"没有任何皇后信息、只知道曲目数"的调用方。
+    """
+    return derive_small_descr(tracklist, disc_count=disc_count, fallback=fallback)
+
+
+def scan_small_descr(tracklist="", disc_count=None, fallback="", mapped_json=None,
+                     is_opencd=False):
+    """★ `run.py`（scan）算副标题的入口 —— 与 `build_small_descr_for_task` **同口径**。
+
+    ═══════════════════════════════════════════════════════════════════════
+    为什么需要第三个入口（2026-09-26 实测踩到，`ERR-DATA-01` 的真根因）
+    ═══════════════════════════════════════════════════════════════════════
+    `scan` 每 30 分钟重扫 qB，**已发布的种子仍在 qB 里** ⇒ 它会把
+    `small_descr` **重算并写回列**（`run.py` 的 `save_task(small_descr=…)`，
+    两条分支都写：`status` 受保护时那一支、和一般那一支）。
+
+    原先那行是 `descr.build_small_descr(tracklist, …)` = `derive_small_descr()`
+    = **数曲目算「全 N 曲」**，它**不看 `opencd_tid`、不看 `mapped_json`**
+    ⇒ **每轮都把皇后原文覆盖成「全 N 曲」**。
+
+    ⇒ 症状：任何"一次性回写"的工具（`tools/recall_opencd_descr.py`）**跑完就被
+      scan 盖回去**，而且**不是一次全退** —— scan 每轮只扫一批，被扫到的退回
+      「全 N 曲」、没扫到的保留原文 ⇒ 反复出现「待改 N」而 N 每次都不同。
+      ★ 这正是"看起来已经修好了"的静默复发。
+
+    ═══════════════════════════════════════════════════════════════════════
+    ★★ 为什么**不能**直接调 `build_small_descr_for_task(task)`（看着最省事）
+    ═══════════════════════════════════════════════════════════════════════
+    那个函数的皇后路是 `opencd_small_descr(task["small_descr"])` —— **读列**。
+    它面向的调用方（`crabpt_site` / `update_metadata`）手里有一条**完整 task**
+    （`merge_mapped` 已把 `mapped_json` 铺到顶层）⇒ 读列是对的，列**就是**已生效值。
+
+    **但 `scan` 的处境相反**：它手里**没有**"已生效的列"，它**正要覆盖那一列**。
+    在它这里读列 = 读到自己上一轮写的值（甚至读到已经被盖坏的「全 15 曲」），
+    再写回去 ⇒ **固化错误**，而且是**假修**（改了代码、行为没变、不报错）。
+
+    ⇒ 判据：**同一个"副标题"，在三个调用点的取值来源不同**（`ERR-META-13`：
+      引用一个数字之前先确认它**是**什么）：
+        · `crabpt_site` / `update_metadata`：有完整 task ⇒ 读**列**（已生效值）
+        · **`scan`：只有证据快照 ⇒ 读 `mapped_json.small_descr`**
+    所以 `scan` 需要**它自己**的入口，而不是借用一个"读列"的函数。
+    """
+    # 皇后转载路：取**证据快照**里的原文（不是列的值）。
+    if is_opencd and mapped_json:
+        try:
+            got = json.loads(mapped_json)
+        except (ValueError, TypeError):
+            got = None
+        if isinstance(got, dict) and "small_descr" in got:
+            # ★ 取不到（皇后本来就没写副标题）⇒ 空串，**留空不硬造**
+            #   （与 `opencd_small_descr("")` 同一条纪律）。
+            return opencd_small_descr(got.get("small_descr"))
+        # ★ `mapped_json` 有值但**解析不出** `small_descr` ⇒ 落到「全 N 曲」。
+        #   刻意**不**在这里静默装作"拿到皇后原文了"（`ERR-META-14`：
+        #   "来源为空"不能印成"映射成功"）。调用方会把这一情形打出来。
     return derive_small_descr(tracklist, disc_count=disc_count, fallback=fallback)
 
 
@@ -402,14 +467,42 @@ def extract_cover_url(descr_text):
 
 
 def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
-                logs=None, extra_note=None):
+                logs=None, extra_note=None, opencd_descr=""):
     """
     生成种子页面 BBCode 简介。
-    结构：封面图 -> 曲目列表 -> 抓轨日志（折叠代码）
+
+    ★★ 结构（2026-09-26 改，用户拍板「B 并存」）：
+        ① 封面图          —— **我们的**（`cover_url`，图链）
+        ② 皇后简介正文    —— 皇后 `divdescr` 原文（`opencd_descr`，**已剥图**）
+        ③ 曲目列表        —— ★ **皇后原版**优先，退回我们的
+        ④ 抓轨日志（折叠）—— **保留**，多碟每碟一块
     末尾不追加任何程序署名兜底（旧版会写"由自动化发布程序生成。"）。
 
     专辑名称/副标题/原始名称不写进简介：站点页面顶部的表格已经展示了主标题、
     副标题和种子文件名，简介里再重复一遍纯属冗余。
+
+    ── ② 皇后简介正文（2026-09-26 加）────────────────────────────────────
+    ★ 为什么加：用户要"站上的简介和皇后一致"。原先站上**只有**我们现渲染的
+      封面+曲目+日志，皇后的正文（乐评/档案/厂牌信息）**从未上过站**。
+    ★ 为什么是"并存"而不是"替换"：皇后的 `divdescr` 里**没有**我们的封面图和
+      日志折叠块，直接替换会把这两样丢掉（页面反而更难用）⇒ 保留①④、插入②。
+    ★ 空值语义（`ERR-META-14`：来源为空不许印成"映射成功"）：
+      `opencd_descr` 为空 ⇒ **整块不出现**，而不是渲染一个空段落。
+      两 种 空 要分清：① 皇后那条本来就没写正文；② 我们没抓到页面
+      （389 条无 `mapped_json` 的行）—— 渲染层**不需要**分清，两者都该"不显示"；
+      要分清是**入库/巡检**的事（那时看 `mapped_json` 有没有）。
+
+    ── ③ 曲目列表（2026-09-26 改：优先皇后原版）────────────────────────
+    ★★ 起因：我们的 `tracklist` **列**是"残废版"。实测 tid=199947：
+        列    : "Can't Hold Me"                      ← 时长、feat. 全丢
+        快照  : "1. Can't Hold Me (02:37)"           ← 完整
+        皇后原: "1. Can't Hold Me (02:37) …"         ← 完整（divtracklist）
+      ⇒ 曲目列表**该用皇后原版**。而调用方传进来的 `tracklist` 已经是
+        `merge_mapped()` 提升过的值（有快照就是皇后原版、没有就是列）
+        ⇒ 本函数**不用再做一次分流**，用谁由 `merge_mapped` 决定
+        （`ERR-META-03`：同一判据别两处实现）。
+      ★ 所以**没有**新开关：`tracklist` 参数的含义"曲目列表文本"不变，
+        变的是**上游给它的值**（快照优先）。
 
     日志用 NexusPHP 折叠代码 [spoiler=标签][code]…[/code][/spoiler]，页面不会被
     整段抓轨日志撑爆。多 CD 时每碟一块：
@@ -418,14 +511,35 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
     """
     blocks = []
 
+    # ① 封面图 —— **我们的**图链（皇后正文里的图已在解析层剥掉）
     if cover_url and str(cover_url).strip():
         blocks.append(f"[center][img]{cover_url.strip()}[/img][/center]")
+
+    # ② 皇后简介正文 —— 原文照贴，**不做任何 BBCode 转义/包装**。
+    #    ★ 为什么不包 [quote]：皇后正文本身常含标题/列表（实测有"一、基础档案"
+    #      这种带序号的段落），再套一层引用框反而像被引用的别人家的话。
+    #    ★ 为什么不截断：曲目/日志有截断上限是因为它们**可能极长**（日志实测
+    #      69 行、曲目几百行）；简介实测最长 5784 字符（323 行），站点能受得住，
+    #      且截断一段乐评会把话说到一半 ⇒ **不截**。
+    #    ★★ 只中和**一个**东西：`[/quote]`。
+    #       实测（58 条真实页面全查过）**没有一条**正文里含 BBCode 形态的方括号
+    #       （正则扫 `[quote]/[spoiler]/[code]/[img]/[b]/…` ⇒ 命中 0）⇒ 这不是
+    #       在修一个已知的坏数据，是**兜住未来**：若哪天有人贴了 `[/quote]`，
+    #       它会**提前闭合下面那个曲目块的引用框**，把后半页排版弄乱 ——
+    #       而这种破坏**不会报错**，只是"页面看起来怪怪的"。
+    #       与日志那处 `[/code]`/`[/spoiler]` 的兜底是**同一个理由、同一个手法**
+    #       （见下面日志循环里那两行 replace）。★ 只换方括号里的斜杠为全角，
+    #       文字本身一字不动 ⇒ 万一真命中，人还能看出原文是什么。
+    if opencd_descr and str(opencd_descr).strip():
+        body = (str(opencd_descr).strip()
+                .replace("[/quote]", "［/quote］"))
+        blocks.append(body)
 
     if tracklist and str(tracklist).strip():
         body = _truncate(tracklist, TRACKLIST_MAX_CHARS, "曲目列表过长已截断")
         blocks.append(f"[quote][b]曲目列表：[/b]\n{body}[/quote]")
 
-    # 统一成 [{label, content}, ...]：优先用多碟 logs，否则退回单条 log_content。
+    # ④ 抓轨日志（**保留**）—— 统一成 [{label, content}, ...]
     items = list(logs) if logs else []
     if not items and log_content and str(log_content).strip():
         items = [{"label": "LOG", "content": log_content, "filename": log_filename}]
@@ -508,6 +622,14 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         log_content=task.get("log_content") or "",
         log_filename=task.get("log_filename") or "",
         logs=logs,
+        # ★★ 皇后简介正文（2026-09-26 加）：`merge_mapped()` 已把
+        #    `mapped_json.descr` 提升成顶层 `task["descr"]`（见 `db.MAPPED_TOP_KEYS`）。
+        #    ★ 这里读的是**提升后**的值而不是列 `opencd_descr` —— 两者理论上同值，
+        #      但**快照是权威**（`db.py` 的注释：快照 = "抓页面时做的那个决定"，
+        #      列只是副本）。与 `small_descr` 走 `merge_mapped` 完全同一个理由。
+        #    ★ 兜底：万一调用方没跑过 `merge_mapped`（如蟹黄堡适配层只传了列），
+        #      退回列值 —— 否则皇后正文会**静默消失**（那是最难发现的一类 bug）。
+        opencd_descr=task.get("descr") or task.get("opencd_descr") or "",
     )
 
     # ★★ `custom_fields[4][N]` 的**真实序号**（2026-09-21 实测自乌托邦 `takeupload.php`
@@ -743,6 +865,46 @@ def _check():
     chk("数不出曲目 → 回退 fallback",
         derive_small_descr("", fallback="旧值") == "旧值")
 
+    # ★★ ④ 2026-09-26 加：`scan` 入口（`scan_small_descr`）—— 防**回归**。
+    #    防的是这个**真的发生过**的事故：scan 每 30 分钟把皇后原文覆盖成「全 N 曲」。
+    #    实测症状：`tools/recall_opencd_descr.py` 回写 56 条后，下一轮"待改 8"，
+    #    且**每次数字都不同**（被扫到的退回、没扫到的保留原文）。
+    print("\n④ scan 入口（`scan_small_descr`）—— ★ 防「每轮 scan 覆盖皇后原文」复发")
+    _mj = json.dumps({"small_descr": "專輯 | VP Records / VPCD 1793", "title": "x"})
+    chk("皇后路 → 取 mapped_json 的原文",
+        scan_small_descr("01. a\n02. b", disc_count=1, mapped_json=_mj,
+                         is_opencd=True) == "專輯 | VP Records / VPCD 1793")
+    # ★★ 本节的**阴性对照**（`ERR-META-18`：自检要做阴性对照、并看退出码）：
+    #    scan 绝不能退回归曲目数 —— 那正是被覆盖时的形态。
+    chk("★ 阴性对照：**不等于**「全 2 曲」",
+        scan_small_descr("01. a\n02. b", disc_count=1, mapped_json=_mj,
+                         is_opencd=True) != "全 2 曲",
+        "(防「scan 覆盖皇后原文」复发)")
+    chk("皇后本来就没副标题 → 空，不硬造",
+        scan_small_descr("01. a", mapped_json=json.dumps({"small_descr": ""}),
+                         is_opencd=True) == "")
+    chk("抓轨路（无 opencd_tid）→ 行为未变「全 2 曲」",
+        scan_small_descr("01. a\n02. b", disc_count=1) == "全 2 曲")
+    chk("皇后路但 snapshot 缺失 → 退回曲目数（调用方会印出来）",
+        scan_small_descr("01. a\n02. b", disc_count=1, mapped_json=None,
+                         is_opencd=True) == "全 2 曲")
+    for _bad in (None, "", "not json", "[]", "123"):
+        try:
+            scan_small_descr("01. a", mapped_json=_bad, is_opencd=True)
+            _r = True
+        except Exception:
+            _r = False
+        chk(f"坏输入 mapped_json={_bad!r} 不抛异常", _r)
+    # ★★ 这条是本节**最重要**的一条：它证明 `scan` **不能**借用
+    #    `build_small_descr_for_task()` —— 那个函数读**列**，而 scan 正要覆盖该列
+    #    ⇒ 会把「全 15 曲」这种已被盖坏的值**再写回去**（假修：改了代码行为没变）。
+    _task = {"opencd_tid": "12345", "small_descr": "全 15 曲",
+             "tracklist": "01. a\n02. b", "logs_json": None}
+    chk("★ 阴性对照：scan 入口 ≠ build_small_descr_for_task（后者读坏列）",
+        build_small_descr_for_task(_task) != scan_small_descr(
+            "01. a\n02. b", disc_count=1, mapped_json=_mj, is_opencd=True),
+        f"(for_task={build_small_descr_for_task(_task)!r} 就是那个假修)")
+
     print("\n③ 转发白名单 —— ★「皇后有」≠「该在乌托邦勾上」")
     kept, dropped = filter_forward_tags(["1", "2", "30", "31", "44", "6"])
     chk("禁转(1)/首发(2)/Redacted(30)/种子加速(44) 被剔除",
@@ -750,6 +912,37 @@ def _check():
     chk("港台(6) 与 OpenCD(31) 保留", set(kept) == {"6", "31"})
     chk("阴性对照：全禁的一批 → 一个不剩",
         filter_forward_tags(["1", "2", "30"])[0] == [])
+
+    print("\n④ 简介简介块（`build_descr` 的②）—— ★ 皇后正文 + 我们四件套并存")
+    # ★★ 这一节钉住 2026-09-26 的改动。**负向对照是重点** ——
+    #    这个改动的风险全在"悄悄多出/少了什么"，不是"报不报错"。
+    _COVER = "https://img.example/cover.jpg"
+    _TL = "1. a (01:00)\n2. b (02:00)"
+    _LOG = "EAC log\nline 2"
+    _QDESCR = "專輯資料\nLabel: VP Records"
+
+    _out = build_descr(cover_url=_COVER, tracklist=_TL, log_content=_LOG,
+                       opencd_descr=_QDESCR)
+    chk("皇后正文进了简介", _QDESCR in _out)
+    chk("封面图仍在（★ 不是被替换掉）", f"[img]{_COVER}[/img]" in _out)
+    chk("曲目块仍在", "曲目列表：" in _out and "1. a (01:00)" in _out)
+    chk("日志折叠块仍在", "[spoiler=LOG][code]" in _out)
+    chk("★ 顺序：封面 → 皇后正文 → 曲目 → 日志",
+        _out.index("[img]") < _out.index(_QDESCR) < _out.index("曲目列表：")
+        < _out.index("[spoiler=LOG]"))
+    # ★ 阴性对照：正文为空时**不许**渲染出一个空段落/空行（389 条那种局面）
+    _out0 = build_descr(cover_url=_COVER, tracklist=_TL, log_content=_LOG,
+                        opencd_descr="")
+    chk("★ 阴性对照：皇后正文为空 ⇒ 结构退回原样（不多空块）",
+        _out0 == build_descr(cover_url=_COVER, tracklist=_TL, log_content=_LOG))
+    chk("★ 阴性对照：空白串也算空（不渲染纯空白块）",
+        "\n\n\n" not in build_descr(cover_url="", tracklist="",
+                                   opencd_descr="   \n  "))
+    # ★ `[/quote]` 中和：若不中和，它会提前闭合**下面**曲目块的引用框
+    _inj = build_descr(cover_url="", tracklist=_TL,
+                       opencd_descr="正文[/quote]后面还有话")
+    chk("★ 皇后正文里的 [/quote] 被中和（不破坏结构）",
+        "[/quote]" not in _inj.split("曲目列表")[0])
 
     return ok, fails
 

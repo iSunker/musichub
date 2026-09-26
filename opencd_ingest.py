@@ -233,6 +233,13 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
         #    `custom_fields[4][3]`，而那一格是**必填**的抓轨日志 textarea。
         #    漏了它，本步就白做（而且很可能正是「HTTP 200 + 空 body」的成因）。
         "log_content": m["log_content"] or "",
+        # ★★ 皇后简介正文（2026-09-26 补）—— 同 `small_descr` 一路：`map_all` 透传，
+        #    `descr.build_descr()` 把它作为正文块（`divdescr` 原文，解析层已剥图）。
+        #    ★ 它同时也在 `mapped_json` 快照里（`save_task` 下面那一行写整个 `m`
+        #      dict），但**必须显式写成列**：渲染读的是顶层键，而顶层键来自
+        #      `merge_mapped` 从快照提升 —— 那要求列本身也得有值（`small_descr`
+        #      当初的洞就是"只在快照里、列里是旧值"）。
+        "opencd_descr": m["descr"] or "",
         "artist": m["artist"] or "",
         "year": m["year"] or "",          # ★ 原样（带「年」字），发送前不转
         "opencd_tid": str(raw_tid or ""),

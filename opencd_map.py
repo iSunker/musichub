@@ -281,6 +281,7 @@ def map_all(info):
       · `unmapped`  —— ★ 映射不上的标签名（**调用方必须显式处理**）
       · `audiocodec_sel` / `medium_sel`
       · `title` / `small_descr` / `tracklist` / `log_content` —— 直接透传（渲染用）
+      · `descr`     —— ★ 皇后简介正文（`divdescr` 原文，**已剥图**）。见下方长注释。
       · `artist` / `year` / `source` —— 透传（★ `year` 带「年」字，站点要不要纯数字待定）
 
     ★ 本函数**不碰网络、不写库、不渲染** —— 只做字段搬运与翻译，方便单测。
@@ -298,6 +299,24 @@ def map_all(info):
         "small_descr": info.get("small_descr") or "",
         "tracklist": info.get("tracklist") or "",
         "log_content": info.get("log_content") or "",
+        # ★★ 皇后简介正文（2026-09-26 加）：`opencd_parse.py:233` 从
+        #    `<div id="divdescr">` 读到的**原文**，经 `_clean_long` 保真（不动内部空白）。
+        #
+        #    ★ 为什么现在才加：这个值**一直**被抓下来，但 `map_all` 不返回它 ⇒
+        #      `build_row()` 拿不到 ⇒ **从未落库**（实测 58 条快照里
+        #      `descr` 键出现 **0** 次；连 `unmapped` 都没有它）。
+        #      ⇒ 站上的简介一直是 `descr.build_descr()` **现渲染**的
+        #        （封面 + 曲目 + 日志），与皇后正文无关。
+        #      ★★ 这正是本项目栽过多次的形状：**抓到了、没往外传**（`ERR-DATA-01` 同族；
+        #         `db.TASK_FIELDS` 里那段"数据在手边、就是没传进来"是同一个）。
+        #
+        #    ★ 图**已由解析层剥掉**（见 `opencd_parse._descr_text_only`）——
+        #      实测 15/58 个页面的 `divdescr` 里塞着 `Cover.jpg` / `Booklet1~10.jpg`
+        #      / `Inside.jpg` 等**缩略图**（`.thumb.jpg`），且历史注释明确警告过
+        #      里面会混 `频谱图.JPG` / `xxx-spectrogram.png`。渲染侧只要文字，
+        #      图片由我们自己的 `cover_url` 负责 ⇒ 在**解析层**剥，而不是渲染层再剥
+        #      （`ERR-META-03`：同一判据两处实现必然漂移）。
+        "descr": info.get("descr") or "",
         # ★ 艺术家 / 发行年份：**透传，不改写**。落位见 descr.build_form_fields
         #   （`custom_fields[4][1]` / `[4][2]`）。取不到就是 ""，调用方原样发空。
         "artist": info.get("artist") or "",

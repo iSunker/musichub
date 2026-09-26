@@ -116,6 +116,22 @@ COLUMNS = [
     #   ★ 它**不参与** `PENDING_PUBLISH_WHERE` 的默认口径（见那里的注释理由）：
     #      `NEED_CONFIRM` 该不该拦是**产品决定**，没定之前不进 WHERE 直接改变行为。
     ("transfer_rule", "TEXT"),
+    # ★★ 皇后的**简介正文**（2026-09-26 补）—— `divdescr` 原文，**已剥图**。
+    #
+    #   ★ 为什么必须**落库**（这是本次的第四条洞）：这个值一直被抓下来
+    #     （`opencd_parse.parse_detail` 从 `<div id="divdescr">` 读），
+    #     但 `opencd_map.map_all()` 原先**不返回它** ⇒ `build_row()` 拿不到
+    #     ⇒ **从未落库**（实测 58 条 `mapped_json` 里 `descr` 键出现 **0** 次）。
+    #     ⇒ 站上的简介一直是 `descr.build_descr()` **现渲染**（封面+曲目+日志）。
+    #     ★★ 形状还是那句：**抓到了、没往外传**（`ERR-DATA-01` 同族）。
+    #
+    #   ★ 为什么**单独一列**而不只放进 `mapped_json`：
+    #     两者都要 —— `mapped_json` 是**快照**（发布时读它、不重算，见上面那条），
+    #     本列是**渲染读取口**（`merge_mapped` 从快照提升到顶层用的键名）。
+    #     `small_descr` 当初的教训正是"只在快照里、渲染读不到"。
+    #     ⚠️ 但**别**把它当成"两个真相"：权威值仍是 `mapped_json.descr`，
+    #       本列是它的**副本**（回写工具 `tools/recall_opencd_descr.py` 的同款分工）。
+    ("opencd_descr", "TEXT"),
 ]
 
 
@@ -309,7 +325,11 @@ TASK_FIELDS = (
     #    皇后行的 `tags`/`medium_sel`/… 则要从 `mapped_json` 解出来。
     #    ★ 这个坑本项目**已经栽过三次**（"数据在手边、就是没传进 task"⇒ 静默变空），
     #      所以这里逐列写明它给谁用：
-    "opencd_tid, artist, year, unmapped_json, mapped_json, publish_after"
+    "opencd_tid, artist, year, unmapped_json, mapped_json, publish_after, "
+    # ★ 皇后简介正文（2026-09-26 补）：`merge_mapped` 要把它从快照提升上来，
+    #   `descr.build_descr()` 要读它 ⇒ **不在这里 SELECT = 渲染永远读不到**
+    #   （与上面那 6 列栽的是同一个坑）。
+    "opencd_descr"
 )
 
 # ── 「待发布」的口径（★ 唯一来源，别在别处再写一份）────────────────────────
@@ -473,7 +493,48 @@ def _load_mapped(task):
 #   蟹黄堡的适配层（`crabpt_site.py`）也需要这一步，而它**不能 import publish**
 #   （publish 会 import 它，成环）⇒ 各写一份就又是两个口径。
 #   ★ 而这一步的 docstring 原话就说了"漏了不报错" —— 正因如此，**更不该有两份**。
-MAPPED_TOP_KEYS = ("tags", "medium_sel", "audiocodec_sel", "team_sel")
+#
+# ★★ 2026-09-26 补 `small_descr`（`ERR-DATA-01` 最后一环）——
+#   原清单只有上面四个键，于是**副标题**这一格漏在外面：
+#     · `descr.build_form_fields()` 皇后路读 `opencd_small_descr(task["small_descr"])`
+#       = **读列**；而 `tasks.small_descr` 列长期是「全 N 曲」（补页面那步只写了
+#       `mapped_json` 没回写列）⇒ 每次 publish/edit 都把「全 N 曲」推上站。
+#     实测（本机模拟一条：列='全 15 曲'、`mapped_json.small_descr`='專輯 | VP Records / VPCD 1793'）：
+#       `build_form_fields()` 提交的 `small_descr` == `'全 15 曲'`  ★ 错。
+#     ★ 症状的误导性：皇后原文**一直躺在库里**，只是从没被读过 ——
+#       "抓到了"≠"用上了"，这正是 `ERR-DATA-01` 的形状。
+#
+# ★ 为什么加进这张表就够（而不是去回写列）：本表的语义是**"渲染输入优先取证据快照"**，
+#   `small_descr` 与 `tags`/`medium_sel` 等完全同构（都由 `map_all()` 透传、
+#   都存在于 `mapped_json`）⇒ 它本来就**该**在这张表里，缺席是**遗漏**不是设计。
+MAPPED_TOP_KEYS = ("tags", "medium_sel", "audiocodec_sel", "team_sel",
+                   # ★★ 副标题：`mapped.small_descr` = 皇后 `<div class="smalltitle">` 原文。
+                   #    见 `descr.opencd_small_descr()` / `ERR-DATA-01`。
+                   "small_descr",
+                   # ★★ 简介正文（2026-09-26 加）：`mapped.descr` = 皇后 `divdescr` 原文
+                   #    （解析层已剥图，见 `opencd_parse._descr_text_only`）。
+                   #    ★ 与 `small_descr` **完全同构**：都由 `map_all()` 透传、
+                   #      都存在于 `mapped_json` ⇒ 缺席同样是**遗漏**不是设计。
+                   #    ★ 落位：`descr.build_descr()` 里作为正文块（见那里的分流）。
+                   "descr",
+                   # ★★ 曲目列表（2026-09-26 加）：`mapped.tracklist` = 皇后
+                   #    `<div id="divtracklist">` 的**完整**列表（**带时长、带 feat.**）。
+                   #
+                   #    ★★ 为什么必须加（这是用户明确要求的"曲目列表也用皇后的"）：
+                   #       `tasks.tracklist` 这个**列**是"残废版"。实测 tid=199947：
+                   #         列   : "Can't Hold Me"                 ← 时长、feat. 全丢
+                   #         快照 : "1. Can't Hold Me (02:37) …"     ← 完整
+                   #       ⇒ 站上曲目列表一直少了时长与客串信息。
+                   #
+                   #    ★ 为什么列会是残废版（不是随手猜的）：两个来源**本就不是一份**
+                   #       · `tracklist` 列 —— 由**本地抓轨路**（`run.py` → `assets.
+                   #         read_tracklist`）或早期写入填的，只有曲名；
+                   #       · `mapped.tracklist` —— 由**皇后路**（`opencd_parse.
+                   #         _extract_tracklist`）从页面读的，`<br/>` 分行、原样保留。
+                   #       两条路写的是**同一个列名** ⇒ 皇后行的列被谁后写谁说了算。
+                   #       ★ 这正是 `ERR-DATA-01`（"同一列被两条语义不同的路写"）的形状，
+                   #         与 `small_descr`/`descr` **完全同构** ⇒ 同样该走这张表。
+                   "tracklist")
 
 
 def merge_mapped(task):
@@ -494,6 +555,18 @@ def merge_mapped(task):
     ★ 第一阶段（qB 本地抓轨）的行没有 `mapped_json` ⇒ `_load_mapped` 返回 `{}`，
       这里**什么都不改**，行为与改动前完全一致。
     ★ 解析失败会**抛出**（`_load_mapped` 的契约）—— 响亮地坏，不静默当空。
+
+    ★★ 守卫 `mapped[key] not in (None, "")` 对 `small_descr` 的**确切语义**（别读错）：
+      · 皇后页面**写了**副标题 ⇒ 取快照原文，**盖过列**（这正是本次要修的）。
+      · 皇后页面**本来就没写**（实测「齐秦 - 我拿什么爱你」那条，
+        `small_descr_present=False`）⇒ `mapped["small_descr"] == ""`
+        ⇒ **不合并** ⇒ 保留 `task["small_descr"]`（可能是列里已有的值）。
+      ⇒ ⚠️ **已知缺口（不静默）**：这个守卫**无法区分**
+          "皇后本来就没写" 与 "列里存着一个错值（如「全 15 曲」）"——
+        两种情形它都保留列值。对后者，`merge_mapped` **救不了**；
+        要修得**回写列**（`tools/recall_opencd_descr.py`）+ 标脏重推。
+        ⇒ 判据：**"能确定推导出来的"与"只能靠猜的"必须分开处理**——
+          本函数只做前者（直接从快照取值），后者留给回写工具显式做。
     """
     mapped = _load_mapped(task)
     for key in MAPPED_TOP_KEYS:
