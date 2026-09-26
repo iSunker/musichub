@@ -27,12 +27,36 @@
     cd /volume2/docker_ssd/musopia_script2
     sudo docker compose --profile tools run --rm tools python /data/_probe_site_ids.py
 
-★ 为什么要放在 /data（= 宿主 compose 目录）而不是 tools/：
-  `tools/` 既不在 Dockerfile 的 COPY 里、也不在 deploy.sh 白名单里
-  ⇒ 容器里根本没有 tools/ 这个目录。而 `.dockerignore` 已有 `_probe_*.py` 规则，
-    所以这类**临时诊断件**照惯例直接放 compose 目录、运行时走 `/data/...`。
+★ 为什么**照旧**放在 /data（= 宿主 compose 目录）而不是 tools/：
+
+  ⚠️ 这段原先写的是「`tools/` 既不在 Dockerfile 的 COPY 里、也不在 deploy.sh
+     白名单里 ⇒ 容器里根本没有 tools/」—— **这句已经过期，别再照抄**
+     （`ERR-META-04`：改了行为要同时改文档；这里改的是**部署行为**）。
+
+  事实分两半，**必须都说清**，否则会从"以为没有"翻车成"以为有了"：
+
+  · **代码侧已修**（2026-09-26，`ERR-DOCKER-08`）：`.dockerignore` 原先有一行
+    裸 `tools` ⇒ 整个目录不进构建上下文 ⇒ `COPY tools/ ./tools/` **静默失效**。
+    现在 `.dockerignore` 只排 `tools/doc-audit` 与两个本机状态文件，
+    `Dockerfile` 里有 `COPY tools/ ./tools/`，`deploy.sh` 白名单也有 `tools`。
+  · **但镜像得重建才生效**：代码进了仓库**不等于**容器里有那个目录。
+    ⇒ 在**没跑过 `up -d --build` 的容器**里，`tools/` **仍然不存在**。
+
+  ★ 判据（别猜，去问）：`sudo docker compose run --rm tools ls tools/`
+    有输出 ⇒ 走 `tools/...` 也行；报 `No such file or directory` ⇒ 走 `/data/...`。
+  ★ 本脚本仍推荐 `/data/...`：它对**两种容器状态都成立**，不依赖"镜像新不新"。
+    临时诊断件放 compose 目录也是既有惯例（`.dockerignore` 有 `_probe_*.py` 规则）。
+
+★ 本脚本已验证能跑（2026-09-26 实测）：两次探测共 10 个 id，
+  8 个老号段回「找不到 takeedit 表单」、1 个新号段（15972）打得开且标题对得上。
 
 换 id 列表: 加 -e PROBE_IDS="14611,14612,14622"
+
+★★ 未结项（2026-09-26，别当成已解决）：实测 `check_login()` 两次都返回
+  **uid = 10427**，而本脚本下面那行判据写的是「应为 85068」（`ERR-SITE-02`）。
+  两者不一致 ⇒ **要么我们在用别人的账号、要么 85068 那个判据本身过期了**
+  —— 这两种情况的修法**完全不同**。在用户确认「10427 是不是本人的号」之前，
+  **不要**据此改动任何东西，也不要把它读成"权限不足"（那只是其中一种可能）。
 """
 import os
 import sys
@@ -70,8 +94,20 @@ def main():
     except (SiteError, LoginExpired) as e:
         sys.exit(f"❌ 登录失败：{e}")
     print(f"  ★ check_login() 返回 uid = {uid}")
-    print(f"    （★ 判据：应为 85068 —— 那才是我们真正的皇后 uid；"
-          f"会话里出现过 10427 是**别人的号**，见 ERR-SITE-02）")
+    # ★★ 2026-09-26：这里原先无条件断言「应为 85068」—— 那是**把判据当结论**。
+    #    实测两次都是 **10427**，而脚本却仍印「应为 85068」，会让人以为
+    #    "差得远 ⇒ 一定是权限问题"。★ 实际有两种可能，修法完全不同：
+    #      (a) 我们在用**别人的**账号（严重，该停手）
+    #      (b) 85068 那个判据**本身过期**（换过账号，判据没跟着改）
+    #    ⇒ 现在只**如实报数**，把"这属于哪种"交给用户确认（`ERR-SITE-02`）。
+    if str(uid) == "85068":
+        print("    （与 ERR-SITE-02 记的 85068 一致）")
+    else:
+        print("    ⚠️ 与 ERR-SITE-02 记的 85068 **不一致** —— 有两种可能，"
+              "**修法不同**：")
+        print("       (a) 本 cookie 是**别人的账号** ⇒ 严重，先停手查凭据来源")
+        print("       (b) 85068 那条判据**过期**（换过账号）⇒ 改判据即可")
+        print("       ★ 在确认之前**别**把它读成『就是权限不足』（那只是其中一种）。")
     print()
 
     # 本地库里这些 id 记的是什么（对照用；只读）
