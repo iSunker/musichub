@@ -72,12 +72,32 @@ SET_COLS = ("site_status", "site_torrent_id")
 
 def select_targets(conn, keep, only=()):
     """
-    要处理的 = `site_status='EXISTS'` 且 site_torrent_id 不在 keep 里。
+    要处理的 = `site_status='EXISTS'` **且 `status='SUCCESS'`** 且 id 不在 keep 里。
 
-    ★ `only` 非空时**只处理列出的那几个 id** ——
-      这是「先试发两条」用的：改 2 条 ⇒ 只会有 2 条进发布队列。
-      ★★ 不设 `only` 就会改 266 条 ⇒ 它们**全部**进队列 ⇒
-         publish 每 30 分钟发 5 条、一天发 240 条、**停不下来**。
+    ★★★ 为什么必须加 `status='SUCCESS'`（2026-09-26 修，**本脚本真出过这个事**）
+
+    原先口径**只看 `site_status='EXISTS'`** ⇒ 把 `status` 不是 `SUCCESS` 的行
+    也一并重置了。而"哪些行会重发"是由 `db.PENDING_PUBLISH_WHERE`
+    （`status='SUCCESS' AND (site_status IS NULL OR site_status != 'EXISTS')`）
+    决定的 —— **只改 `site_status` 的这些行根本不进队列**。
+
+    ⇒ 后果：那 10 条 `status='PUBLISHED'` 的**站点记录被无谓地抹掉**
+      （`site_status` → `UNKNOWN`、`site_torrent_id` → `''`），
+      而它们**既不会重发**（不是 SUCCESS）、**又再也不能被 `edit` 更新**
+      （`edit` 的取数口径要求 `site_status='EXISTS'`）⇒ 变成**孤儿**。
+      ★ 实测（2026-09-26）：一次 `--apply` 改掉 277 条，其中 **10 条是
+        `PUBLISHED`** —— 它们的 `site_torrent_id` 旧值**已从库里消失、找不回来**。
+
+    ★ 教训的形状（`ERR-META-05` 一族）：**"改哪几行"必须与"这个改动为谁服务"
+      同口径**。本脚本的目的是"让被删的种子重新进发布队列" ⇒ 那么它的目标集
+      就**必须是队列口径的子集**；只按 `site_status` 取，是把"状态不对的行"
+      当成了"要重新排队的行"，二者不是一回事。
+      ★ 当时我**算出了**"277 条里只有 242 条会进队列"，却没接着问
+        "那另外 35 条**还该不该改**" —— 差的就是这一问。
+
+    ★ `only` 非空时**只处理列出的那几个 id**（「先试发两条」用）；
+      它也**同样**受 `status='SUCCESS'` 约束（否则"试发"会连带改掉一个
+      不会发的行，试出来的结果就不代表真实批量行为）。
     """
     if only:
         ph = ",".join("?" * len(only))
@@ -85,6 +105,7 @@ def select_targets(conn, keep, only=()):
                f"       length(log_content), content_path, opencd_tid, formatted_title "
                f"  FROM tasks "
                f" WHERE site_status = 'EXISTS' "
+               f"   AND status = 'SUCCESS' "
                f"   AND site_torrent_id IN ({ph})")
         return list(conn.execute(sql, tuple(only)))
 
@@ -93,6 +114,7 @@ def select_targets(conn, keep, only=()):
            f"       length(log_content), content_path, opencd_tid, formatted_title "
            f"  FROM tasks "
            f" WHERE site_status = 'EXISTS' "
+           f"   AND status = 'SUCCESS' "
            f"   AND site_torrent_id IS NOT NULL AND site_torrent_id != '' "
            f"   AND site_torrent_id NOT IN ({ph})")
     return list(conn.execute(sql, tuple(keep)))
@@ -126,6 +148,11 @@ def main():
     total = conn.execute("SELECT count(*) FROM tasks").fetchone()[0]
     exists = conn.execute(
         "SELECT count(*) FROM tasks WHERE site_status='EXISTS'").fetchone()[0]
+    # ★ 口径必须与 `select_targets` 一致，否则下面那个"= EXISTS − 保留"是错的减法。
+    #   （2026-09-26 加 `status='SUCCESS'` 后，`EXISTS` 与"要改的"之间多了一层过滤。）
+    exists_success = conn.execute(
+        "SELECT count(*) FROM tasks WHERE site_status='EXISTS' "
+        "AND status='SUCCESS'").fetchone()[0]
     targets = select_targets(conn, keep, only)
 
     print("=" * 74)
@@ -138,8 +165,13 @@ def main():
         print(f"  保留（站点还在）: {list(keep)}")
     print(f"  总行数          : {total}")
     print(f"  site_status=EXISTS: {exists}")
+    print(f"  ├ 其中 status=SUCCESS: {exists_success}"
+          f"  ← ★ 只有这部分会进发布队列")
+    print(f"  └ 其余 {exists - exists_success} 条 status 不是 SUCCESS"
+          f"  ← ★ **本次不碰**（改了也不会重发，只会白丢站点记录）")
     print(f"  ★ 本次要改        : {len(targets)}"
-          + (f"  （--only 指定）" if only else f"  （= {exists} − 保留 {len(keep)}）"))
+          + (f"  （--only 指定）"
+             if only else f"  （= {exists_success} − 保留 {len(keep)}）"))
 
     if not targets:
         print("\n✅ 没有要改的。")
@@ -165,8 +197,13 @@ def main():
 
     # ★★ 把连带后果**明确打出来**
     print("\n" + "─" * 74)
+    # ★ 2026-09-26：加 `status='SUCCESS'` 过滤后，**目标集本身就是发布队列的
+    #   子集**（只差 `site_status` 这一条）⇒ 下面这句话现在是**精确的**：
+    #   要改的 N 条 == 会重发的 N 条。改口径之前这里会**夸大**（把 PUBLISHED
+    #   也算进去），而用户正是拿这句话决定要不要按 `--apply`。
     print("★★ 连带后果：改完后这 %d 条会满足 PENDING_PUBLISH_WHERE" % len(targets))
     print("   （status='SUCCESS' AND (site_status IS NULL OR site_status != 'EXISTS')）")
+    print("   ★ 已按同口径过滤 ⇒ **要改的条数 = 会重发的条数**（不再夸大）")
     print("   ⇒ **publish 会把它们重新发到站点**（每轮 PUBLISH_MAX_PER_CYCLE 条）")
     # ★★ 这里**按生效的真的值**报，不写死 —— 2026-09-24 上限从 5 改成 1，
     #   原来的 `if len(targets) > 5:` / `一天可发 240 条` 就是**必然过时的**两处
