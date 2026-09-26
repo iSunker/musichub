@@ -89,3 +89,27 @@ tools/.nas_health_last.json
 # 一次性/判据留档（会变的数字与生产标题，不进仓库）
 tools/.baseline-*.json
 opencd_tid_backfill.json
+
+# ★★ 巡检/取证的一次性读数快照（2026-09-26 补）——
+#   `x/deny-already-published.json` 是 2026-09-25 跑 `tools/` 排查脚本
+#   导出的「transfer_rule=DENY 却已上站」的**当次**行列表（含生产标题）。
+#   与 `tools/.baseline-*.json` 同族：**会变的读数**不是事实源，
+#   进仓库会让"某天的 19 条"看起来像"当前的 19 条"（`ERR-DATA-02` 的
+#   结论已经写进 `ERRATA.md`，**结论进库、读数不进库**）。
+#   ★ 注意 `x/HANDOFF-*.md` **不忽略** —— 那是**人的笔记**（判断与理由），
+#     不是读数，与本项目既有的 `SESSION-NOTES.md`/`SUMMARY.md` 同类。
+x/deny-already-published.json
+x/*.json
+
+# ★★ 本机 AI 助手会话的调度状态（2026-09-26 补）——#   `.claude/scheduled_tasks.json` 是**本机**在某个时刻排的一次性提醒/循环任务
+#   （含绝对时间戳），`.lock` 是进程锁，`.bak-*` 是它自己的回滚副本。
+#   三者都是**会变的运行时状态**，不是事实源：进仓库等于把"某天排的提醒"
+#   升级成"项目约定"，而且各人机器上的排程互不相干（同 `daemon_env.json`
+#   与 `tools/.nas_health_last.json` 的理由 —— 读写数/快照一律不进库）。
+#   ★ 注意这里**只忽略状态文件**，不是整个 `.claude/`：将来若真要放
+#     仓库级的助手配置（如共享的 skill/规范），它们该按普通文件评审后入库，
+#     不该被这条规则连坐（"整目录忽略"恰好是 `ERR-DOCKER-08` 的形状）。
+.claude/scheduled_tasks.json
+.claude/scheduled_tasks.json.*
+.claude/scheduled_tasks.lock
+.claude/*.lock

@@ -93,9 +93,44 @@ AUTO_KEY_ENV = "PUBLISH_I_AM_HERE"
 #   不是布尔真假 —— 把它按 `env_bool` 转会得到假 False（2026-09-24 实测踩过）。
 AUTO_KEY_VALUE = "i-am-here"
 
+# ★★★ 键的**类型表**（2026-09-24 第三次踩同类错后加的，见 ERR-META-13）。
+#   为什么要有这张表：`read_env_snapshot` 返回两个视图（`vals` 布尔 / `raw` 字符串），
+#   而"哪个键该用哪个视图"原先**只写在注释里**。注释不会被执行 ——
+#   2026-09-24 实测连续两轮踩错（先 `PUBLISH_I_AM_HERE` 当布尔 ⇒ 假 False；
+#   再 `PUBLISH_MAX_PER_CYCLE` / `PUBLISH_MIN_GAP` 当布尔 ⇒ `"120"` 印成 `True`）。
+#   ⇒ 把口径**从注释搬进数据结构**：下游按 `ENV_KEY_TYPE` 取视图，
+#     而不是靠读注释记得住（`ERR-META-01` 的同一个形状：判据要可执行，不能靠记忆）。
+#   取值： "bool"（开关，走 vals） / "str" / "int"（走 raw，再按自身类型解析）
+ENV_KEY_TYPE = {
+    # ---- 阶段开关：布尔 ----
+    "ENABLE_SCAN": "bool", "ENABLE_PUBLISH": "bool", "ENABLE_SYNC": "bool",
+    "ENABLE_COVERS": "bool", "ENABLE_EDIT": "bool", "ENABLE_CRAWL": "bool",
+    "DRY_RUN": "bool",
+    # ---- 第二把钥匙：**字符串**（按字符串相等判，绝不转布尔）----
+    "PUBLISH_I_AM_HERE": "str",
+    # ---- 速率/时长旋钮：**整数** ----
+    "PUBLISH_INTERVAL": "int", "PUBLISH_MAX_PER_CYCLE": "int",
+    "PUBLISH_MIN_GAP": "int",
+}
+
+
+def typed(snap_vals, snap_raw, key):
+    """按 `ENV_KEY_TYPE` 取**正确视图**的值；类型未声明 ⇒ 返回 None 并**不猜**。
+
+    ★ 这是"先问这个键是什么类型，再决定用哪个视图"的**可执行版本**。
+    ★★ 类型表里没有的键 ⇒ 返回 `None`（= 未声明），**绝不**默认按布尔取 ——
+      默认按布尔正是那两次实测踩错的成因。调用方必须显式处理 None。
+    """
+    t = ENV_KEY_TYPE.get(key)
+    if t == "bool":
+        return None if not snap_vals else snap_vals.get(key)
+    if t in ("str", "int"):
+        return None if not snap_raw else snap_raw.get(key)
+    return None
+
 
 def read_env_snapshot(dst=None):
-    """读容器落下的开关快照，返回 (values: dict, age_s: float, note: str)。
+    """读容器落下的开关快照，返回 (values: dict, raw: dict, age_s, note: str)。
 
     ★ 判"真假"的口径**照抄 `daemon.env_bool`**（`strip().lower() in ("1","true","yes","on")`），
       只有一处实现错误的地方就全错，所以这里宁可多写一行也不"差不多就行"。
@@ -117,6 +152,10 @@ def read_env_snapshot(dst=None):
         不要因为"它也是从 env 来的"就套布尔口径（`ERR-META-03` 的味道）。
     ★ 任何一步失败都**返回空 dict + 原因**，绝不返回一个"看着正常的默认值" ——
       默认值会被下游当成事实用（ERR-META-01 一族）。
+    ★★★ 2026-09-24 第三次同形错后**落成 `ENV_KEY_TYPE` 表**（见上）：用哪个视图
+      由**数据类型**决定，不再由"读的人记不记得注释"决定。下游一律走 `typed()`；
+      直接摸 `vals` / `rawvals` 只允许出现在这一段的三个例外处（阶段开关循环、
+      `_as_int` 兜底、`key_raw` 回显），且每处都要写明**为什么**这里是安全的。
     """
     p = (dst or DST) / ENV_SNAPSHOT
     try:
@@ -256,13 +295,21 @@ def main():
         #    ★ 后果不是"少报一个"而是"报一个假的"：crawl 其实没在跑，却被当开着
         #      ⇒ 补上 INTERVALS 里的 crawl 之后，它会每轮报「★ 超过周期」。
         #    ⇒ 缺位必须如实传播：**未知的一律按"该动就得动"判**（宁可多报一个待查）。
+        #    ⇒ **这里直接摸 `snap_vals` 是安全的、且必须的**：本循环的键**全部**来自
+        #      `STAGE_ENABLE_KEY`，而它们**每一个**在 `ENV_KEY_TYPE` 里都是 `"bool"`。
+        #      `typed()` 对它们只会返回同一个值 ⇒ 多绕一层反而看不出"三态"。
+        #      ★ 若将来往 `STAGE_ENABLE_KEY` 加**非布尔**的阶段开关，这里就会漂 ——
+        #        所以下面加一句**断言式校验**，让漂移当场报错而不是静默出错（ERR-META-01）。
+        _bad = {k for k in STAGE_ENABLE_KEY.values()
+                if ENV_KEY_TYPE.get(k) != "bool"}
+        assert not _bad, f"STAGE_ENABLE_KEY 里出现了非布尔键，请改用 typed()：{_bad}"
         disabled = {st for st, key in STAGE_ENABLE_KEY.items()
                     if snap_vals.get(key) is False}
         missing = {st for st, key in STAGE_ENABLE_KEY.items()
                    if snap_vals.get(key) is None}
         disabled_src = (f"容器快照 {ENV_SNAPSHOT}（{snap_age:.0f}s 前；"
                         f"ENABLE_PUBLISH="
-                        f"{snap_vals.get('ENABLE_PUBLISH')}）")
+                        f"{typed(snap_vals, snap_raw, 'ENABLE_PUBLISH')}）")
     else:
         disabled = set()
         missing = set(STAGE_ENABLE_KEY)
@@ -482,7 +529,9 @@ def main():
     #                   同样**不发**，但原因不同（"还没配" vs "配错了"，修法不一样）。
     # ★★ 判"对不对"**必须比字符串**，不能借 `snap_vals`（那是布尔口径）——
     #    这条键的值是 `i-am-here`，按布尔转会得到假 False（2026-09-24 实测踩过）。
-    key_raw = None if not snap_raw else snap_raw.get(AUTO_KEY_ENV)
+    #    ★ 现在走 `typed()`：`ENV_KEY_TYPE['PUBLISH_I_AM_HERE'] == "str"` ⇒
+    #      取 `raw` 视图。**口径由表决定，不靠这段注释**（第三次踩错后的改动）。
+    key_raw = typed(snap_vals, snap_raw, AUTO_KEY_ENV)
     key_ok = (key_raw is not None
               and str(key_raw).strip() == AUTO_KEY_VALUE)
     if not snap_raw:
@@ -495,7 +544,7 @@ def main():
         # ★ 不回显值（哪怕它不是密钥）—— 回显就会写进巡检记录；只报"不对"。
         key_state = "⛔ 已配但值不对 ⇒ 每轮都会被拒（退出码 3）"
 
-    pub_on = (snap_vals.get("ENABLE_PUBLISH") is True) if snap_vals else None
+    pub_on = typed(snap_vals, snap_raw, "ENABLE_PUBLISH") if snap_vals else None
     if pub_on is None:
         auto_pub = "❔ 判不了：ENABLE_PUBLISH 读不到（见上方快照来源）"
     elif not pub_on:
@@ -507,7 +556,7 @@ def main():
 
     print("\n【自动发布】两把钥匙都成立才会真提交（不可逆，见 ERR-META-12）")
     print(f"  ENABLE_PUBLISH      = "
-          f"{snap_vals.get('ENABLE_PUBLISH') if snap_vals else '(读不到)'}"
+          f"{pub_on if snap_vals else '(读不到)'}"
           f"   （布尔口径）")
     # ★ 这一行**直接报"与约定值是否相等"**，不把原始值当布尔使 ——
     #   两个口径分开印，读的人一眼能看出"哪个键按哪个口径判"。
@@ -540,10 +589,10 @@ def main():
     #     `"1"`   → 布尔视图 `True`  ⇒ 印出来是 `True` 而不是 `1`（**2026-09-24 实测踩过**）
     #     `"120"` → 布尔视图 `True`  ⇒ 拿它算"间隔"就得到一个**假的 1**
     #   ⇒ 与 `PUBLISH_I_AM_HERE` 被按布尔转是**同一个错**，只是这次错的是整数。
-    raw_or_empty = snap_raw or {}
-    iv_raw = raw_or_empty.get("PUBLISH_INTERVAL")
-    per_cycle_raw = raw_or_empty.get("PUBLISH_MAX_PER_CYCLE")
-    gap_raw = raw_or_empty.get("PUBLISH_MIN_GAP")
+    #   ★ 现在走 `typed()`：这三个键在 `ENV_KEY_TYPE` 里都是 `"int"` ⇒ 取 `raw` 视图。
+    iv_raw = typed(snap_vals, snap_raw, "PUBLISH_INTERVAL")
+    per_cycle_raw = typed(snap_vals, snap_raw, "PUBLISH_MAX_PER_CYCLE")
+    gap_raw = typed(snap_vals, snap_raw, "PUBLISH_MIN_GAP")
 
     def _as_int(v):
         """字符串 → int；None/空/非数字 ⇒ None（**不猜默认值**，见下）。"""
