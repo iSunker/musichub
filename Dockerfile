@@ -26,6 +26,18 @@ COPY config.py db.py descr.py assets.py musopia.py \
      sync_opencd_tid.py readiness_probe.py qb_probe.py flip_status.py \
      crabpt_site.py ./
 
+# ★★ `tools/` 整个目录也打进去（2026-09-26）—— 原先**只 COPY 根目录的 .py**，
+#    于是容器里根本没有 `/app/tools/` ⇒ 任何 `tools/*.py` 都只能在本机跑。
+#    实测踩过：`docker compose run --rm tools python tools/recall_opencd_descr.py`
+#    ⇒ `can't open file '/app/tools/...': No such file or directory`。
+#    ★ 但有两类**刻意排除**：
+#      · `tools/doc-audit/`  —— 纯本机文档审计，跑它要读仓库里全部 .md，容器里没有意义
+#      · `tools/.baseline-*.json` / `.nas_health_last.json` —— 本机巡检的状态文件，
+#        打进去只会让"容器里的巡检"和"本机的巡检"各记一份，两个口径（ERR-META-05）
+#    ★ 判据：**容器内要跑的脚本必须真的在容器里** —— 别假设 bind mount 里有
+#      （根目录那份 COPY 就是反例：它靠"枚举文件名"维护，加文件时必漏）。
+COPY tools/ ./tools/
+
 # 容器内不需要 root：脚本只写 /data，音乐目录是只读挂载。
 # 但 /data 是 bind mount 过来的宿主机目录，属主由宿主机决定，这里不改 USER，
 # 交给 compose 的 user: 参数按需覆盖，避免在 NAS 上撞上 UID 不匹配写不进去。

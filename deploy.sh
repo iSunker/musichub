@@ -64,6 +64,14 @@ FILES=(
   # ★ 蟹黄堡站适配层（2026-09-24 加）—— publish.py 会 import 它，
   #   不进白名单就是"跑到发蟹黄堡那一步才 ImportError"（本注释上方那条纪律的场景）。
   crabpt_site.py
+  # ★★ `tools/` 目录（2026-09-26 加）—— Dockerfile 里是 `COPY tools/ ./tools/`。
+  #   为什么整个目录同步而不是逐个列文件：`tools/` 下的脚本是**按需在容器里跑**的
+  #   （`docker compose run --rm tools python tools/xxx.py`），逐个列必然漏
+  #   ——「白名单靠枚举维护、加文件时必漏」正是本脚本自检想防的那个形状，
+  #   只不过这次漏的是**整个目录**（连自检都看不见，见下面 `dockerfile_copy_dirs`）。
+  #   ★ 只同步目录本身；`tools/doc-audit/` 等被 `.dockerignore` 排除的**不进上下文**，
+  #     但也**不该上 NAS**（纯本机审计工具）。
+  tools
   Dockerfile docker-compose.yml
   .dockerignore
   README.md
@@ -125,6 +133,22 @@ dockerfile_copy_files() {
     | tr ' ' '\n' | grep -E '\.py$' || true
 }
 
+# ★★ 新增（2026-09-26）：`COPY <dir>/ <dir>/` 这种**整目录**拷贝。
+#   上面那个函数只 grep `\.py$` ⇒ **整目录 COPY 它完全看不见**
+#   —— 而这正是本自检自己注释里警告过的形状（reseed-toolkit 那次漏 `state.py`）。
+#   ⇒ 把"目录"也解析出来核对：源的目录名必须出现在 FILES 里。
+#   判据：**`COPY` 的目标可以是一个目录，此时"哪些文件需要同步"没有静态答案**
+#     ⇒ 只能要求白名单里有那个**目录**，否则就会重演"容器里少文件"。
+dockerfile_copy_dirs() {
+  awk '{ while (sub(/\\[[:space:]]*$/, "")) { getline nxt; $0 = $0 " " nxt } ; print }' "$SRC/Dockerfile" \
+    | awk '/^COPY /{ $1=""; print }' \
+    | tr ' ' '\n' \
+    | grep -vE '^$' \
+    | grep -vE '^\.?/' \
+    | grep -vE '^\.\.$|^\.$' \
+    | grep -E '/$' | sed 's#/$##' | sort -u || true
+}
+
 missing=()
 while IFS= read -r f; do
   [[ -z "$f" ]] && continue
@@ -134,6 +158,16 @@ while IFS= read -r f; do
   done
   [[ "$ok" -eq 1 ]] || missing+=("$f")
 done < <(dockerfile_copy_files)
+
+# ★★ 目录型 COPY 的核对（2026-09-26 加）—— 见 `dockerfile_copy_dirs` 上方那段。
+while IFS= read -r d; do
+  [[ -z "$d" ]] && continue
+  ok=0
+  for p in "${FILES[@]}"; do
+    [[ "$p" == "$d" ]] && { ok=1; break; }
+  done
+  [[ "$ok" -eq 1 ]] || missing+=("$d/  （整目录 COPY）")
+done < <(dockerfile_copy_dirs)
 
 if [[ ${#missing[@]} -gt 0 ]]; then
   echo "✗ 白名单漏了 Dockerfile 要 COPY 的文件：" >&2
@@ -161,13 +195,37 @@ if [[ "$MODE" == "--rollback" ]]; then
 fi
 
 # ---------- 算差异 ----------
+# ★★ 白名单里可以有**目录**（如 `tools`）—— 见 FILES 里那段的理由。
+#   但下面这几处原先都写死 `-f`（只认普通文件）⇒ 目录会被当成"本地缺失"跳过，
+#   或 `cmp` 报错、`cp -p` 静默什么都不拷（★ 实测 `cp -p dir dst` **退出码 0**、
+#   只在 stderr 说一句，所以"看起来成功" —— 与 `ERR-DOCKER-08` 同一个形状）。
+#   ⇒ 统一用这两个判据：`_exists` 认文件或目录；`_same` 对目录做**递归比较**。
+_exists() { [[ -f "$1" || -d "$1" ]]; }
+_same() {
+  local a="$1" b="$2"
+  if [[ -d "$a" ]]; then
+    # 递归比较：`diff -r` 对"只在一边存在的文件"也返回非 0 ⇒ 能发现新增/删除。
+    [[ -d "$b" ]] || return 1
+    # ★ 用 `diff -r -x <PATTERN>` 才是对的 —— `--exclude` 在 GNU diff 里
+    #   等价于 `-x`，但它们**都只对文件名/路径组件做匹配**：
+    #   `*.pyc` **不会**排掉 `__pycache__/x.pyc`（要 `-x '__pycache__'`）。
+    #   实测踩过：`--exclude='*.pyc'` 时 `__pycache__` 里的差异仍被判为"有变化"
+    #   ⇒ 每次部署都白同步一遍整个目录（不报错，只是慢 + 噪音）。
+    diff -r -q -x '__pycache__' -x '*.pyc' \
+         -x '.nas_health_last.json' -x '.baseline-*' \
+         "$a" "$b" >/dev/null 2>&1
+  else
+    [[ -f "$b" ]] && cmp -s "$a" "$b"
+  fi
+}
+
 CHANGED=()
 for s in "${FILES[@]}"; do
-  if [[ ! -f "$SRC/$s" ]]; then
+  if ! _exists "$SRC/$s"; then
     echo "⚠ 本地缺失，跳过: $s" >&2
     continue
   fi
-  if [[ ! -f "$DST/$s" ]] || ! cmp -s "$SRC/$s" "$DST/$s"; then
+  if ! _same "$SRC/$s" "$DST/$s"; then
     CHANGED+=("$s")
   fi
 done
@@ -189,6 +247,11 @@ done
 #   （"检测本身静默失效"比"不检测"更危险 —— 你会以为检查过了。）
 crlf=()
 for s in "${CHANGED[@]}"; do
+  # ★★ 白名单里现在有**目录**（`tools`）—— 对目录做 `< "$SRC/$s"` 的重定向
+  #   会得到 `tr: read error: Is a directory`（实测 2026-09-26）。
+  #   行尾符只对**单文件**有意义（目录里的每个文件各有各的行尾），
+  #   所以这里跳过目录；目录内文件的 CRLF 由构建/post-check 另行把关。
+  [[ -d "$SRC/$s" ]] && continue
   if [[ "$(tr -cd '\r' < "$SRC/$s" | wc -c)" -gt 0 ]]; then
     crlf+=("$s")
   fi
@@ -253,9 +316,15 @@ BDIR="$BACKUP_ROOT/$STAMP"
 mkdir -p "$BDIR"
 echo "→ 备份到 $BDIR"
 for s in "${CHANGED[@]}"; do
-  if [[ -f "$DST/$s" ]]; then
+  if _exists "$DST/$s"; then
     mkdir -p "$BDIR/$(dirname "$s")"
-    cp -p "$DST/$s" "$BDIR/$s"
+    # ★ 目录用 `cp -a`（递归 + 保权限/时间）—— 裸 `cp -p` 对目录**退出码 0
+    #   但什么都不拷**（见上面 `_exists` 那段）。文件仍走 `-p`。
+    if [[ -d "$DST/$s" ]]; then
+      cp -a "$DST/$s" "$BDIR/$s"
+    else
+      cp -p "$DST/$s" "$BDIR/$s"
+    fi
   fi
 done
 
@@ -269,10 +338,24 @@ done
 trap 'rm -f "$DST"/*.new.$$ 2>/dev/null || true' EXIT
 echo "→ 同步（原子替换）"
 for s in "${CHANGED[@]}"; do
-  mkdir -p "$DST/$(dirname "$s")"
-  cp -p "$SRC/$s" "$DST/$s.new.$$"
-  mv -f "$DST/$s.new.$$" "$DST/$s"
-  echo "  ✓ $s"
+  if [[ -d "$SRC/$s" ]]; then
+    # ★★ 目录：**不能**用"写 .new.$$ 再 mv"那套 —— 那是给**单文件**设计的
+    #   （原子替换一个 inode）。目录要的是**增量同步整个树**。
+    #   ⇒ 用 `cp -a`（递归、保权限/时间），并显式排掉 .dockerignore 之外
+    #     第 3 位的那种"本机状态文件"（巡检快照等），那些**不该上 NAS**。
+    #   ★ 注意：`--exclude` 只对 `rsync` 有效，`cp` 没有 ⇒ 这里用 tar 管道
+    #     做"带排除的递归拷贝"，它同时保住权限位：
+    ( cd "$SRC" && tar cf - \
+        --exclude='__pycache__' --exclude='*.pyc' \
+        --exclude='.nas_health_last.json' --exclude='.baseline-*' \
+        --exclude='doc-audit' "$s" ) | ( cd "$DST" && tar xf - )
+    echo "  ✓ $s/（目录，递归同步）"
+  else
+    mkdir -p "$DST/$(dirname "$s")"
+    cp -p "$SRC/$s" "$DST/$s.new.$$"
+    mv -f "$DST/$s.new.$$" "$DST/$s"
+    echo "  ✓ $s"
+  fi
 done
 trap - EXIT
 

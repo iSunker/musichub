@@ -72,7 +72,17 @@ __pycache__
 repos
 opencdhtml
 raw_html
-tools
+# ★★ `tools` 整个目录**不再排除**（2026-09-26）——
+#    原先这里是一行裸 `tools`，而它是**排除**语义 ⇒ 整个目录不进构建上下文
+#    ⇒ Dockerfile 里新加的 `COPY tools/ ./tools/` 会**静默地什么也没拷**
+#      （COPY 一个被 ignore 的目录不报错，容器里就是没有 `/app/tools/`）。
+#    实测的症状：`run --rm tools python tools/recall_opencd_descr.py`
+#    ⇒ `can't open file '/app/tools/...': No such file or directory`。
+#    ★ 只排**该排的两类**：审计工具 + 本机巡检状态（见下），其余 `tools/*.py`
+#      是**容器内要跑**的（`reset_deleted_site_status.py` / `queue_probe.py` …）。
+tools/doc-audit
+tools/.nas_health_last.json
+tools/.baseline-*.json
 out.baseline-*
 counts.json
 ERRATA.md
