@@ -294,6 +294,11 @@
 |---|---|
 | **`.dockerignore` 的一行裸目录名会让 `COPY <dir>/` 静默失效** | `.dockerignore` 只支持**排除**语法，而里面有一行裸 `tools` ⇒ 整个目录不进构建上下文 ⇒ Dockerfile 里的 `COPY tools/ ./tools/` **不报错、也没拷任何东西**，容器里就是没有 `/app/tools/`。实测症状：`docker compose run --rm tools python tools/recall_opencd_descr.py` ⇒ `can't open file '/app/tools/...': No such file or directory`。★ 更坏的配套：`deploy.sh` 的自检只从 Dockerfile 抓 `\.py$` ⇒ **整目录 COPY 它完全看不见**（正是该自检自己注释里警告过、在 reseed-toolkit 上踩过的那个形状）⇒ 白名单漏了目录也照样放行。⇒ 判据：**"这个文件需不需要同步"要按谁拷它去数**，且**目录型 COPY 必须自己能核**（已给 `dockerfile_copy_dirs` 加阴性对照） |
 
+### ERR-DOCKER-09
+| 教训 | 根因 |
+|---|---|
+| **镜像里的 `tools/` 是「构建那一刻的快照」，而 NAS 上的 `tools/` 是实时的 —— 两者会漂，且「NAS 上有」不蕴含「容器里有」** | `COPY tools/ ./tools/` 在**构建时**把文件拷进镜像层；之后往 NAS 的 `tools/` 里新增文件（`deploy.sh --apply` / SMB 直传）**不会**改已有镜像 ⇒ `docker compose run --rm tools python tools/<新脚本>.py` 报 `No such file or directory`，**而文件明明就在 NAS 上**。★ 2026-09-26 实测：容器内 `ls tools/ \| wc -l` = **22**，NAS 目录 `ls tools/ \| wc -l` = **23**，差的那一个正是当天新写的 `qb_state_probe.py`。★ 与 `ERR-DOCKER-08` **同族但根因不同**（08 是 `.dockerignore` 把目录整个吃掉、`COPY` 什么都没拷；本条是 `COPY` **正常生效过**、只是**之后**新增的文件不在里面）——**两者的症状一模一样**（都是"容器里没有那个文件"），但**修法相反**：08 要改 ignore 规则，本条只能**重建镜像**（或改走 bind mount 的路径）。⇒ 判据：**"容器里有没有"必须逐处问，不能由"NAS 上有没有"推**；两个数**都要在 NAS 上取**，但问的是**不同对象** —— 容器内 `sudo docker compose run --rm tools ls tools/` vs 宿主 `ls tools/`。★ 顺带：临时诊断件仍放 compose 目录走 `/data/...`（bind mount，实时），对"镜像新不新"完全免疫 |
+
 ### ERR-SITE-05
 | 教训 | 根因 |
 |---|---|
