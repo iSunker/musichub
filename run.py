@@ -64,8 +64,13 @@ def parse_title(raw_title, folder_path):
     formatted_title = f"{core} {year} - {fmt} {track_type} - OpenCD"
     formatted_title = re.sub(r"\s+", " ", formatted_title).strip()
 
-    # 副标题不在这里算：它只依赖曲目/碟数，由 main() 拿到 tracklist/logs 后
-    # 用 descr.build_small_descr 生成（渲染时 build_form_fields 还会再重算一次）。
+    # 副标题不在这里算：它依赖曲目/碟数，**还要按皇后/抓轨分流**，由 main() 拿到
+    # tracklist/logs 后调 `descr.scan_small_descr()` 生成。
+    # ★ 2026-09-26 订正：这里原先写「用 descr.build_small_descr 生成」—— 那句
+    #   既是错的**叫法**（`build_small_descr` 只算曲目数、不看皇后），
+    #   也是**真 bug 的出处**（每轮 scan 把皇后原文覆盖成「全 N 曲」）。
+    #   ⇒ 别照着这行注释去"恢复"那个调用（`ERR-META-04`：改了行为要同时改文档）。
+    #   ★ 渲染侧由 `build_form_fields()` 再按 `opencd_tid` 分流重算一次。
     return formatted_title, fmt, track_type
 
 
@@ -98,10 +103,19 @@ def main():
     # 一次查出已完成的任务，避免每个种子都开一次数据库连接。
     # 多带出 site_status / cover_url：已发布的任务不需要本地种子文件（站点上有），
     # 也不该重传封面（图床会报 Duplicated upload）。
+    #
+    # ★★ 还要带出 `opencd_tid` / `mapped_json`（2026-09-26 加）——
+    #    副标题要按它们分流：皇后转载路要用**皇后原文**，不能算「全 N 曲」。
+    #    ★ 缺了这两列 = 下面 `scan_small_descr()` 拿不到分流依据 ⇒ 静默退回
+    #      「全 N 曲」⇒ 每轮 scan 把皇后原文覆盖掉（`ERR-DATA-01` 的真根因）。
+    #      ★★ 这正是本项目栽过三次的形状：**数据在手边、就是没传进来**
+    #         （见 `db.TASK_FIELDS` 里那段同样的话）。
     conn = db.connect()
     cur = conn.cursor()
-    cur.execute("SELECT info_hash, status, torrent_file, site_status, cover_url FROM tasks")
-    known = {row[0]: (row[1], row[2], row[3], row[4]) for row in cur.fetchall()}
+    cur.execute("SELECT info_hash, status, torrent_file, site_status, cover_url, "
+                "opencd_tid, mapped_json FROM tasks")
+    known = {row[0]: (row[1], row[2], row[3], row[4], row[5], row[6])
+             for row in cur.fetchall()}
     conn.close()
 
     stats = {"skipped": 0, "no_log": 0, "ok": 0, "failed": 0, "skipped_no_log": 0}
@@ -112,7 +126,8 @@ def main():
         content_path = torrent.content_path
 
         if not args.recheck and info_hash in known:
-            status, tfile, site_status, known_cover = known[info_hash]
+            (status, tfile, site_status, known_cover,
+             known_opencd_tid, known_mapped) = known[info_hash]
             # 已发布到站点的任务：站点上已有种子和页面，本地 .torrent 文件
             # 有没有都无所谓，直接跳过。原先的跳过条件要求本地文件存在，
             # 于是每轮 scan 都把已发布的任务整个重做一遍——重传封面触发
@@ -161,10 +176,35 @@ def main():
 
         formatted_title, fmt, track_type = parse_title(name, content_path)
         tracklist = assets.read_tracklist(content_path)
-        small_descr = descr.build_small_descr(tracklist, disc_count=len(logs), fallback=name)
 
+        # ★★ 副标题（2026-09-26 改）：**必须**按皇后/抓轨分流，不能一律算「全 N 曲」。
+        #
+        # 原先这里是 `descr.build_small_descr(tracklist, …)` = 数曲目算「全 N 曲」，
+        # 它不看 `opencd_tid`/`mapped_json` ⇒ **每轮 scan 都把皇后原文覆盖掉**。
+        # 而 scan 每 30 分钟跑一遍、已发布的种子仍在 qB 里 ⇒ `tools/recall_opencd_descr.py`
+        # 那种一次性回写**跑完就被盖回去**（实测：回写 56 条后，下一轮变成"待改 8"，
+        # 且每次数字都不同 —— 被扫到的退回、没扫到的保留原文）。
+        #
+        # ★ 走 `descr.scan_small_descr()` 而不是 `build_small_descr_for_task(task)`：
+        #   后者读的是**列**（`task["small_descr"]`），而 scan 正要覆盖那一列
+        #   ⇒ 会读到自己上一轮的旧值、再写回去，是**假修**。scan 手里只有
+        #   `mapped_json` 这份**证据快照**，所以要用专门为它写的入口。
+        #   （见 `descr.scan_small_descr` 的 docstring，那里写清了三个调用点的差别。）
+        oid = known[info_hash][4] if info_hash in known else None
+        mj = known[info_hash][5] if info_hash in known else None
+        small_descr = descr.scan_small_descr(
+            tracklist, disc_count=len(logs), fallback=name,
+            mapped_json=mj, is_opencd=bool(oid))
+
+        # ★ 把"来源"印出来（`ERR-META-14`：来源为空不许印成"映射成功"）——
+        #   否则「全 N 曲」既是"本来就没有皇后副标题"、又是"没取到皇后信息"，
+        #   两种相反的结论排出来一模一样。
+        if oid:
+            _src = "皇后路, 取 mapped_json" if mj else "皇后路, ★ 无 snapshot ⇒ 退回曲目数"
+        else:
+            _src = "抓轨路(曲目数)"
         print(f"✔ 主标题: {formatted_title}")
-        print(f"✔ 副标题: {small_descr}")
+        print(f"✔ 副标题: {small_descr or '(空)'}   ← 来源: {_src}")
         print(f"📄 日志: {len(logs)} 个 [" + ", ".join(x['label'] for x in logs) + "]")
         print(f"🎵 曲目: {len(tracklist.splitlines())} 行")
 
