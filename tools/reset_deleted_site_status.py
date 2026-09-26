@@ -185,9 +185,20 @@ def main():
         _rounds = None
 
     if _per_cycle is None:
-        _why = ("值不是数字" if _raw not in (None, "") else "PUBLISH_MAX_PER_CYCLE 未配")
-        print(f"   ★★ 每轮上限读不出（{_why}）"
-              "⇒ 按 daemon 的兜底 **0 = 不限** 理解：**整批一轮里全发出去**")
+        # ★★ 2026-09-26 修：这里原先写「按 daemon 的兜底 **0 = 不限** 理解：
+        #    **整批一轮里全发出去**」—— **那是替用户猜了一个数，而且猜错了**。
+        #    实测（本机跑）`PUBLISH_MAX_PER_CYCLE` 读不到，而**生产真值是 1**
+        #    （在容器快照 `/data/daemon_env.json` 里，本机 `os.getenv` 当然读不到）
+        #    ⇒ 提示把「跨 ~5 天慢慢发」说成了「一轮全发」，**两个相反的结论**。
+        #    ★ 用户正是拿这句话决定要不要按 `--apply` 的 ⇒ 猜错在这里代价最大。
+        #    ★ 纪律（`ERR-META-14`：来源为空不许印成"映射成功"）：
+        #      **读不到就说读不到**，并指出**去哪读真值**，绝不给一个默认值当事实。
+        _why = ("值不是数字" if _raw not in (None, "") else "未配 / 本进程读不到")
+        print(f"   ★★ 每轮上限**读不出**（{_why}）⇒ **本条无法计算发完要多久。**")
+        print("       ★ 别把「读不出」当成 0（不限）—— 那是**另一个值的含义**：")
+        print("         0 = 一轮全发；读不出 = 本进程没拿到这个变量。")
+        print("       ★ 真值在**容器快照** /data/daemon_env.json（daemon 每轮重写）：")
+        print("         `python tools/nas_health.py` 的「【发布速率】」节会读它并算日上限。")
     elif _per_cycle == 0:
         print("   ⚠️ 每轮上限 = 0（不限）⇒ **整批一轮里全发出去**")
     elif len(targets) > _per_cycle:
