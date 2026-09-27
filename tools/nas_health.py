@@ -167,11 +167,9 @@ def resolve_intervals(snap_vals, snap_raw, snap_note="", snap_age=None):
     out, src, warns = {}, {}, []
     for stage, fallback in INTERVALS.items():
         key = STAGE_INTERVAL_KEY.get(stage)
-        val = typed(snap_vals, snap_raw, key) if key else None
-        if isinstance(val, bool):                 # typed() 对 int 键不该返回 bool
-            warns.append(f"{key} 从快照读出了布尔值（类型表写错了？）⇒ 改用兜底")
-            val = None
-        if isinstance(val, int) and val > 0:
+        # ★ 必须过 `as_int()` —— `typed()` 只选视图、不解析，对 int 键返回**字符串**。
+        val = as_int(typed(snap_vals, snap_raw, key)) if key else None
+        if val is not None and val > 0:
             n = val
             src[stage] = f"快照 {key}={n}"
             if n != fallback:
@@ -202,6 +200,28 @@ def typed(snap_vals, snap_raw, key):
     if t in ("str", "int"):
         return None if not snap_raw else snap_raw.get(key)
     return None
+
+
+def as_int(v):
+    """字符串 → int；None / 空 / 非数字 ⇒ None（**不猜默认值**）。
+
+    ★★ 为什么必须单独有这个函数（2026-09-27 实测踩到）：
+      `typed()` 只负责**选对视图**（布尔走 `vals`，其余走 `raw`），它**不做类型解析**
+      —— 对 `"int"` 键它返回的是**字符串** `'5400'`。
+      ★ 我原先在 `resolve_intervals` 里直接写 `isinstance(val, int)` ⇒ **永远为假**
+        ⇒ 每个阶段的周期都静默退到兜底，而打印出来的理由还是"快照里没有这个键"
+        —— **理由本身是假的**（键明明在快照里），比不打印更坏（`ERR-META-14` 一族：
+        一个错误的"为什么"会把人引去查一个不存在的问题）。
+      ⇒ 判据：**"取到值"和"解析成类型"是两件事**，中间那一步必须有名字、有测试。
+      ★ 本函数原先**嵌在 `main()` 里**（`【发布速率】`段自用），正因为够不着
+        才在上面又写错一次 ⇒ 提到模块级，两处共用（`ERR-META-03`：一份实现）。
+    """
+    if v is None or str(v).strip() == "":
+        return None
+    try:
+        return int(float(v))
+    except (ValueError, TypeError):
+        return None
 
 
 def read_env_snapshot(dst=None):
@@ -816,18 +836,12 @@ def main():
     per_cycle_raw = typed(snap_vals, snap_raw, "PUBLISH_MAX_PER_CYCLE")
     gap_raw = typed(snap_vals, snap_raw, "PUBLISH_MIN_GAP")
 
-    def _as_int(v):
-        """字符串 → int；None/空/非数字 ⇒ None（**不猜默认值**，见下）。"""
-        if v is None or str(v).strip() == "":
-            return None
-        try:
-            return int(float(v))
-        except (ValueError, TypeError):
-            return None
-
-    iv_s = _as_int(iv_raw)
-    per_cycle = _as_int(per_cycle_raw)
-    gap_s = _as_int(gap_raw)
+    # ★★ 2026-09-27：原先这里嵌了一份 `_as_int` 定义。它**够不着模块级代码**，
+    #   害我在 `resolve_intervals` 里又写错一次（以为 `typed()` 会返回 int）。
+    #   ⇒ 已提到模块级 `as_int()`，此处直接复用（`ERR-META-03`：一份实现）。
+    iv_s = as_int(iv_raw)
+    per_cycle = as_int(per_cycle_raw)
+    gap_s = as_int(gap_raw)
     # ★ `PUBLISH_INTERVAL` 不在快照白名单里（它是周期，不是开关）⇒
     #   退到本文件**自己的** `INTERVALS`（同一份周期口径，见文件头）。
     #   ★ 不静默用兜底假装算：拿不到就报"判不了"（另见下面那句注释）。
