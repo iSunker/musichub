@@ -195,9 +195,50 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
         status, reason = (STATUS_NO_LOG,
                           "皇后的 NFO/LOG 为空（页面 divnfo 里就是空的）")
     # ④ `.torrent` 拿不到 / 文件不在 ⇒ `publish.py` 必然拦，先落状态省得每轮重判
-    elif not torrent_file or not os.path.exists(str(torrent_file)):
+    #
+    #    ★★★ 2026-09-27：**这一支原来把两件不同的事写成同一句话**，而且那句话
+    #       是**错的**（`ERR-META-14`：错的"为什么"会把读的人引去查一个不存在的问题）。
+    #
+    #    实测现场（sid 15972 / 15974 / 17099 / 17264 / 17265 五条）：
+    #      · `reason` = `拿不到本地种子文件（None）`   ← 括号里是 **None**
+    #      · `torrent_file` 列 = `/data/output_torrents/…OpenCD.torrent`（**有值**）
+    #      · 盘上检查 → `exists=True`，8271 / 7879 / 8474 / 11617 / 19859 字节
+    #      ⇒ **文件全都在**。既没丢，也没被删。
+    #
+    #    ★ 真因：`topup_opencd_fields.py` 是**刻意**不传 `torrent_file` 的
+    #      （它模块头纪律 5：那批行的 `.torrent` 在 qB 那边，重建会换 passkey
+    #      ⇒ 改 infohash）。⇒ 传进来的是 `None` ⇒ 旧判据把它读成
+    #      「文件拿不到」⇒ 写下 `（None）`。
+    #
+    #    ★★ 为什么必须分辨这两支（**修法完全不同**）：
+    #      · `torrent_file is None`      ⇒ **写入侧没给这个事实**。
+    #        `.torrent` 可能存在、可能不存在，本模块**无从判断**（它不查 qB）。
+    #        ⇒ 该说的话是「**调用方没传路径**」；要修的是**调用方**（或将来
+    #          加一步从 qB 取路径），**不是**去盘上找文件。
+    #      · 路径给了但 `not exists` ⇒ **文件真的不在**。⇒ 该说的话是
+    #        「文件不在」；要修的是**盘**（重新生成 / 找回）。
+    #      ⇒ 混成一句话的后果（实测已发生）：`status` 列说 `NO_TORRENT_FILE`、
+    #        而 `torrent_file` 列有路径、盘上有文件 —— **三处自相矛盾**，
+    #        于是"这条到底能不能发"这个问题在对账里**答不出来**。
+    #
+    #    ⚠️ 状态码**两支仍用同一个** `STATUS_NO_TORRENT_FILE`：它对下游（发布队列）
+    #       的语义是一致的 ——「本行没有可用的 `.torrent`」。变的是 `reason`
+    #       （给人看的"为什么"），不是状态机。★ 别据此去加新状态码：那会动
+    #       `NON_PUBLISH_STATUSES` 与判据⑫ 的覆盖面，收益为零。
+    #
+    #    ★ 判据「取不到就不写，绝不编」在这里的落地：不猜"文件大概在别处"，
+    #      而是**如实说"我没拿到路径"**。
+    elif not torrent_file:
+        # ★ 文案纪律（**由判据⑫-B 钉住**）：这句话里**不许**出现"不存在 /
+        #   拿不到"这类**断言文件没有**的字样 —— 本模块**无从知道**文件在不在
+        #   （它不查 qB）。一出现那几个字，读的人就会去盘上找文件，
+        #   而那正是这次要修的误导（`ERR-META-14`）。
         status, reason = (STATUS_NO_TORRENT_FILE,
-                          f"拿不到本地种子文件（{torrent_file!r}）")
+                          "调用方未传 torrent_file（None）⇒ 无从核对本地有无该文件，"
+                          "故落此状态；这不代表文件缺失")
+    elif not os.path.exists(str(torrent_file)):
+        status, reason = (STATUS_NO_TORRENT_FILE,
+                          f"传入的 .torrent 路径在盘上不存在（{torrent_file!r}）")
     else:
         # ★★ 2026-09-23：**闸门① 已退役**（见 `opencd_gate.py` 模块头）。
         #
@@ -661,6 +702,81 @@ def _check():
             (ALLOW_H,)).fetchone()[0]
         chk(f"{st_name} 不在队列", n == 0)
     conn.close()
+
+    # ── ⑫-B ★★★ 2026-09-27 新判据：第 ④ 条必须**分辨两支** ──────────────
+    #
+    #  为什么非要加这条判据（`ERR-META-28`：一条断言若说不出"什么输入会让它
+    #  失败"，它就不是判据）：
+    #    上面⑫ 只断言「NO_TORRENT_FILE 不在队列」—— 而**两支**产出的状态码
+    #    相同 ⇒ **旧代码（混成一句）和新代码（分开两支）都能让⑫ 通过**。
+    #    ⇒ ⑫ 证不了这次的修复。而这次的病**正好**是"两件不同的事长得一样"，
+    #      所以必须直接断言**它们的 `reason` 不同**，并断言**各自说的是自己的事**。
+    #
+    #  ★ 三条断言，缺一不可（第三条是阴性对照的一半）：
+    #    ① `None` 那支的 reason 必须说"**没传路径**"，**不许**说"文件不存在"
+    #       —— 旧代码那句 `拿不到本地种子文件（None）` 会**同时**通过①和②下的
+    #          模糊检查，所以判据要逐词钉住（`in` 而不是"like"）。
+    #    ② 路径给了但不存在那支，reason 必须说"**盘上不存在**"。
+    #    ③ ★★ 两支的 reason **必须不相等** —— 只断言①②，将来有人把两支又合并
+    #       成一条（比如都改成 `f"没有 .torrent：{torrent_file!r}"`）时，
+    #       ① 会因为 `（None）` 里没有"没传"字样而失败，但**只改文案不改结构**
+    #       的退化（两支都写同一句）仍可能溜过 ⇒ 这条把"可分辨"本身钉住。
+    print("\n⑫-B ★★★ 第④条：『没传路径』与『文件不在』必须是**两句不同的话**")
+    st_none, why_none = ingest(ALLOW, raw_tid="t12b-none", info_hash="2" * 40,
+                               torrent_file=None, qb_seed_days=10.0, now=NOW)
+    st_miss, why_miss = ingest(ALLOW, raw_tid="t12b-miss", info_hash="3" * 40,
+                               torrent_file="/不存在/这个文件.torrent",
+                               qb_seed_days=10.0, now=NOW)
+    chk("两支的状态码**仍然相同**（都 = NO_TORRENT_FILE，下游语义没变）",
+        st_none == st_miss == STATUS_NO_TORRENT_FILE,
+        f"{st_none!r} vs {st_miss!r}")
+    chk("① torrent_file=None ⇒ reason 说的是「未传路径」",
+        ("未传" in why_none or "没传" in why_none), f"{why_none!r}")
+    chk("① ★ 且 reason **没有**断言「文件不存在 / 拿不到」（本模块无从知道）",
+        ("不存在" not in why_none) and ("拿不到" not in why_none),
+        f"{why_none!r}")
+    chk("② 传了路径但盘上没有 ⇒ reason 说的是「盘上不存在」",
+        "不存在" in why_miss, f"{why_miss!r}")
+    # ★★ ③ 这一条我第一版写错了，把过程记下来（因为它**正是**本项目反复栽的那个坑）：
+    #
+    #   第一版写的是 `why_none != why_miss`（"两支的文案必须不相等"），
+    #   并在**注入旧 bug 的阴性对照**里**通过了** —— 而旧 bug 恰恰就是
+    #   "两支合并"！⇒ 它看着像在钉这件事，其实**没钉住**。
+    #
+    #   ★ 为什么：旧代码 `f"拿不到本地种子文件（{torrent_file!r}）"` 是**一条
+    #     分支**，但 `{torrent_file!r}` 会把 `None` 和路径分别插进去
+    #     ⇒ 两句话**字符串不相等**（`（None）` vs `（'/不存在/…'）`）
+    #     ⇒ `!=` 为真 ⇒ 断言通过。**这又是 `ERR-META-28`**：
+    #     我说不出"什么输入会让 ③ 失败"，而实际上**旧 bug 就不会让它失败**。
+    #
+    #   ★ 真正的判据不能问"两句话一样吗"（那是**表象**），要问
+    #     "**分支是两支还是一支**"（那是**性质**）。两种可执行写法，都用上：
+    #       (a) **行为**：`None` 那支的文案里**不许出现我们传的那个路径**
+    #           （旧 bug 因为插值，`None` 支会带上"拿不到…"字样 ⇒ ① 失败）。
+    #       (b) **结构**：源码里必须是**两个并列的 `elif`**，不是 `or` 合成的一支。
+    #     ⇒ (b) 单独就能杀掉旧 bug；加 (a) 是为了把"文案"也钉住，
+    #       免得将来有人留两个 `elif` 却把文案抄成同一句。
+    chk("★★ ③(a) `None` 支的文案里**没有**出现我们传的那个路径（= 不是同一句话插值）",
+        "/不存在/这个文件" not in why_none,
+        f"{why_none!r}")
+    _src = open(__file__, encoding="utf-8").read()
+    _br = _src.split("def build_row(", 1)[1].split("\ndef ", 1)[0]
+    chk("★★ ③(b) `build_row` 里确实是**两个并列的 elif**（不是 `or` 合起来的一支）",
+        ("elif not torrent_file:" in _br)
+        and ("elif not os.path.exists(str(torrent_file)):" in _br)
+        and ("not torrent_file or not os.path.exists" not in _br),
+        "合并成一支 = 这次的 bug 原样复发（判据① 也会同时失败）")
+    # ★ 顺手钉住：`torrent_file` 列**没被这次 ingest 写进去**
+    #   （`build_row` 刻意不写它 —— 见它 docstring 里"刻意不写的三个键"）。
+    #   ★ 这正是"列里有路径、状态说没有 .torrent"那个自相矛盾的来源，
+    #     也是 `flip_status.py`（只改 status 一列）存在的前提。
+    #   ★ 用一次直查而不是 `row_of()`：后者只取 14 个固定列，**不含** `torrent_file`。
+    _c = db.connect()
+    _tf = _c.execute("SELECT torrent_file FROM tasks WHERE info_hash=?",
+                     ("2" * 40,)).fetchone()[0]
+    _c.close()
+    chk("★ ingest(torrent_file=None) **没有**写 torrent_file 列（刻意不写这列）",
+        _tf is None, f"{_tf!r}（本行是新建的，故应为 None）")
 
     print("\n⑬ ★★ 端到端（最有价值的一条）：队列的行 → 渲染 → 标签")
     import descr

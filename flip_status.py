@@ -6,8 +6,16 @@
 `topup_opencd_fields.py` 补完皇后页面后调 `opencd_ingest.ingest(...)`，
 而它**刻意不传 `torrent_file`**（纪律 5：重建 `.torrent` 会换 passkey ⇒
 **改 infohash**，严禁）⇒ `opencd_ingest.build_row` 的第 ④ 条判据
-（`opencd_ingest.py:198` `elif not torrent_file or not os.path.exists(...)`）
-就命中 ⇒ 落 `status='NO_TORRENT_FILE'`。
+（`elif not torrent_file:`，**2026-09-27 已拆成两支**）就命中
+⇒ 落 `status='NO_TORRENT_FILE'`。
+
+★ 2026-09-27 已修的那个坑（`ERR-META-29`）：那一支原先写的是
+  `elif not torrent_file or not os.path.exists(str(torrent_file))`，文案是
+  `f"拿不到本地种子文件（{torrent_file!r}）"` —— 把「写入侧没传路径（`None`）」
+  和「传了路径但盘上没有」**压成同一句话** ⇒ `reason` 印成
+  `拿不到本地种子文件（None）`，让人以为文件丢了（实际文件都在）。
+  ⇒ 现在两支分开，`None` 支明说「**调用方未传**」。★ 状态码**没变**（仍是
+  `NO_TORRENT_FILE`）⇒ **本脚本的判据与用法一个字都不用改**。
 
 ★★ 可是 `save_task` 的 upsert **只更新显式传进来的列** ——
    `build_row` **刻意不写** `torrent_file` / `log_content` / `content_path`
