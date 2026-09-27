@@ -98,13 +98,20 @@ HEARTBEAT_FRESH = 120        # 秒；仅用于"是否需要提醒"，**不是**�
 #       每个 `env_bool("ENABLE_*")`），**不是 startup banner** —— banner 只列
 #       门控后进来的阶段，两个 false 就被它吃掉（拿它当"阶段列表"已经错过一次）。
 INTERVALS = {"scan": 1800, "publish": 5400, "sync": 86400,
-             "covers": 21600, "edit": 21600, "vtid": 86400, "crawl": 1800}
+             "covers": 21600, "edit": 21600, "vtid": 86400, "crawl": 1800,
+             # ★★ 蟹黄堡（第二站，2026-09-27 接线）。默认**关**
+             #    （`ENABLE_PUBLISH_CRABPT` 未设 = false），所以它通常不在
+             #    快照里；在 `DISABLED_STAGES` 判据里会被判成"关着 = 预期不动"。
+             "publish_crabpt": 1800}
 # 阶段名 → 快照里那个周期键（**显式列出**，不靠 `f"{stage.upper()}_INTERVAL"` 拼 ——
 # 拼法在改名时不会报错，只会静默查不到，那种"静默"正是本文件反复记的那类坑）
+# ★ `publish_crabpt` 的周期键是 `CRABPT_INTERVAL`（**不是**
+#   `PUBLISH_CRABPT_INTERVAL`）⇒ 这正是"不许拿阶段名拼键名"的活例子。
 STAGE_INTERVAL_KEY = {"scan": "SCAN_INTERVAL", "publish": "PUBLISH_INTERVAL",
                       "sync": "SYNC_INTERVAL", "covers": "COVERS_INTERVAL",
                       "edit": "EDIT_INTERVAL", "vtid": "VTID_INTERVAL",
-                      "crawl": "CRAWL_INTERVAL"}
+                      "crawl": "CRAWL_INTERVAL",
+                      "publish_crabpt": "CRABPT_INTERVAL"}
 EDIT_COOLDOWN = 60
 # ★ 旧的 `HEARTBEAT_FRESH = 120` 挪到上面（连同"为什么它不是生死判据"的实测依据）。
 
@@ -131,7 +138,20 @@ SNAPSHOT_MAX_AGE = 3600
 # 快照里 `ENABLE_<阶段>` 与阶段名的对应（**必须显式列出**，不靠猜大小写）
 STAGE_ENABLE_KEY = {"scan": "ENABLE_SCAN", "publish": "ENABLE_PUBLISH",
                     "sync": "ENABLE_SYNC", "covers": "ENABLE_COVERS",
-                    "edit": "ENABLE_EDIT", "crawl": "ENABLE_CRAWL"}
+                    "edit": "ENABLE_EDIT", "crawl": "ENABLE_CRAWL",
+                    # ★★ 2026-09-27 补：`vtid` 一直**漏在这一张表里**。
+                    #   本文件顶部那段注释（第 96 行）**早就记着**这次事故：
+                    #     "也曾漏过 vtid（STAGE_ENABLE_KEY 里有 ENABLE_VTID，
+                    #      但 INTERVALS 里没有 ⇒ 它同样不进入循环）"
+                    #   —— ★ 而那句注释**自己就是错的**：漏的是**这张表**
+                    #     （INTERVALS 里有 vtid）。⇒ 注释记了一个事故、
+                    #       却记错了**在哪张表**，于是这张表一直缺着没人补。
+                    #   ★ 是 `check_stage_table_consistent()`（本次新加的可执行判据）
+                    #     第一次跑就把它抓出来的 —— 注释不会失败，判据会。
+                    "vtid": "ENABLE_VTID",
+                    # ★ 蟹黄堡的开关键是 `ENABLE_PUBLISH_CRABPT`，与阶段名
+                    #   `publish_crabpt` **不同** ⇒ 同样必须显式列出。
+                    "publish_crabpt": "ENABLE_PUBLISH_CRABPT"}
 # ★★ 自动发布的第二把钥匙（2026-09-24）。**必须与 `publish.AUTO_KEY_ENV` 同名** ——
 #    写死一处会漂（ERR-META-03）。这里不 import（本脚本刻意不依赖项目代码：
 #    它要在**本机**跑，而 `config` 缺密钥就 `sys.exit`，见 ERR-ENV-01 一族）。
@@ -152,12 +172,20 @@ ENV_KEY_TYPE = {
     # ---- 阶段开关：布尔 ----
     "ENABLE_SCAN": "bool", "ENABLE_PUBLISH": "bool", "ENABLE_SYNC": "bool",
     "ENABLE_COVERS": "bool", "ENABLE_EDIT": "bool", "ENABLE_CRAWL": "bool",
+    "ENABLE_VTID": "bool",
+    # ★★ 2026-09-27 补：蟹黄堡的开关与两个旋钮。
+    #   ★ 不登记它们 ⇒ 巡检会印「键类型未声明」——那条**是脚本漏登记，
+    #     不是生产异常**（本文件顶部已写明这个区别），但漏登记本身
+    #     会让"真异常"混在噪音里 ⇒ 该补就补。
+    "ENABLE_PUBLISH_CRABPT": "bool",
     "DRY_RUN": "bool",
     # ---- 第二把钥匙：**字符串**（按字符串相等判，绝不转布尔）----
     "PUBLISH_I_AM_HERE": "str",
     # ---- 速率/时长旋钮：**整数** ----
     "PUBLISH_INTERVAL": "int", "PUBLISH_MAX_PER_CYCLE": "int",
     "PUBLISH_MIN_GAP": "int",
+    # ★ 蟹黄堡的周期与上限（与乌托邦**各自独立**，见 daemon 里那段注释）
+    "CRABPT_INTERVAL": "int", "CRABPT_MAX_PER_CYCLE": "int",
     # ---- 调度语义（2026-09-27 加）----
     #   ★ `RUN_ON_START` 是**布尔**（它决定启动是否清空 last_run，见 daemon.main()）；
     #     其余 `*_INTERVAL` 是**整数秒**。
@@ -562,11 +590,128 @@ def check_target_where_consistent(verbose=True):
     return ok, detail
 
 
+def _find_repo_file(name):
+    """按候选位置找仓库里的一个文件。返回 `(Path 或 None, 找过的位置列表)`。
+
+    ★ 抽出来共用：`check_target_where_consistent()` 与
+      `check_stage_table_consistent()` 找的是**不同的文件**，但"怎么找"
+      必须**同一套** —— 否则两条判据对"文件在不在"会给出不同答案，
+      而那个差异只会在**换布局时**暴露（`ERR-META-03`）。
+
+    ★★ 候选顺序与理由（逐字沿用 `check_target_where_consistent` 的 docstring）：
+        ① `MUSOPIA_REPO`（CI / 特殊布局）  ② `<repo>/tools/` 的上级
+        ③ 本文件同目录（被单独拷出来跑）   ④ 当前工作目录
+      ★ 全找不到 ⇒ 调用方**必须**报"判据无法执行"（回 False + 非 0），
+        **绝不**回 True —— "找不到"与"一致"共用一个出口是最大的失败模式。
+    """
+    here = pathlib.Path(__file__).resolve()
+    cands = []
+    env_root = os.environ.get("MUSOPIA_REPO")
+    if env_root:
+        cands.append(pathlib.Path(env_root))
+    cands.append(here.parent.parent)
+    cands.append(here.parent)
+    cands.append(pathlib.Path.cwd())
+    tried = []
+    for c in cands:
+        p = c / name
+        tried.append(str(p))
+        if p.exists():
+            return p, tried
+    return None, tried
+
+
+def check_stage_table_consistent(verbose=True):
+    """`nas_health` 的阶段表 vs `daemon.build_stages()` 里的 `env_bool("ENABLE_*")`。
+
+    返回 `(ok, detail)`。
+
+    ★★★ 为什么需要这条（2026-09-27 加）：
+      本文件顶部**早就写着**「表里**仍必须**与 `daemon.build_stages()` 的 7 个
+      阶段一一对应」—— 而那句话是一条**注释，不是判据**。注释不会失败。
+      ★ 这句话本身还记着两次漏掉阶段的事故（crawl、vtid），后果一模一样：
+        「一个被门控关掉的阶段看起来'正常'，因为你根本没查它。
+          而'没查'和'查了没事'在报告里长得一模一样」（`ERR-META-01`）。
+      ⇒ 2026-09-27 加蟹黄堡阶段时，正是要再撞一次这个形状的时机 ——
+        所以这次**把注释变成可执行的判据**，而不是在注释里再写一遍"必须对应"。
+
+    ★ 判据：从 `daemon.py` 的**源码 AST** 里取出所有
+      `env_bool("ENABLE_XXX", ...)` 的**字符串字面量**（= 会有阶段的那些开关），
+      再与本文件的 `STAGE_ENABLE_KEY` 值集合比对。
+      ★ 为什么读源码而不 import daemon：本脚本的承重性质是「只读 SMB、
+        不需要连容器、随手就能跑」——`import daemon` 会把
+        `config.require_env()` 的副作用（缺 .env 直接 `sys.exit`）带进来
+        （实测：`❌ 缺少必需的环境变量 QB_PASS`）。★ 这条与
+        `check_target_where_consistent` 的选法是**同一个理由**（`ERR-META-30`）。
+
+    ★★ 局限（如实写明，别当成它没覆盖）：它只抓
+      `env_bool("ENABLE_*")` 这一种写法。若有人改成
+      `env_bool(key_var)` 或从别处读开关，本判据**抓不到** ——
+      那时它不会报假通过（阶段数会**少**一个 ⇒ 报出来），但需要人看一眼。
+    """
+    dp, tried = _find_repo_file("daemon.py")
+    if dp is None:
+        return False, ("找不到 `daemon.py` —— 判据**无法执行**（不是『通过』）。\n"
+                       "        找过这些位置：\n" +
+                       "\n".join(f"          · {t}" for t in tried) +
+                       "\n        ⇒ 用 `MUSOPIA_REPO=<仓库根>` 指定，或在本仓库里跑。\n"
+                       "        ★ 这**不是**『阶段表全对』—— 请勿据此认为没问题。")
+    src = dp.read_text(encoding="utf-8")
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as e:
+        return False, f"{dp.name} 语法错误，无法解析：{e} —— 判据**无法执行**"
+
+    # ★ 取 build_stages() 函数体里的 `env_bool("ENABLE_*", ...)` 第一个实参。
+    #   ★ 限定在这个函数里：别处也可能调 env_bool（如 main() 里的 RUN_ON_START），
+    #     那些**不是**阶段开关，混进来会造出一个"看起来对"的假差集。
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, ast.FunctionDef) and n.name == "build_stages"), None)
+    if fn is None:
+        return False, (f"在 {dp.name} 里找不到 `build_stages()` —— 判据**无法执行**"
+                       f"（函数被改名了？**不是**通过）")
+    found = set()
+    for node in ast.walk(fn):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name) and node.func.id == "env_bool"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+                and node.args[0].value.startswith("ENABLE_")):
+            found.add(node.args[0].value)
+
+    mine = set(STAGE_ENABLE_KEY.values())
+    missing_in_nh = sorted(found - mine)     # daemon 有、本文件没登记 ⇒ 该阶段**不被巡检**
+    extra_in_nh = sorted(mine - found)       # 本文件登记了、daemon 没有 ⇒ 幽灵阶段
+    ok = not missing_in_nh and not extra_in_nh
+    detail = (f"daemon.build_stages() 里的开关 {len(found)} 个：{sorted(found)}\n"
+              f"        本文件 STAGE_ENABLE_KEY 值  {len(mine)} 个：{sorted(mine)}")
+    if verbose:
+        print("=" * 72)
+        print("★ 阶段表一致性（nas_health vs daemon.build_stages 源码）")
+        print("=" * 72)
+        print(f"  真值文件: {dp}")
+        print(f"  {'✅ 一致' if ok else '❌ **不一致**'}")
+        print(f"  {detail}")
+        if missing_in_nh:
+            print()
+            print(f"  ★★ daemon 有、本文件**没登记**：{missing_in_nh}")
+            print("     ⇒ 这些阶段**不进入下面的巡检循环** ⇒ 它们'没查'与'查了没事'")
+            print("       在报告里**长得一模一样**（`ERR-META-01`）。")
+            print("     ⇒ 修法：给 INTERVALS / STAGE_INTERVAL_KEY / STAGE_ENABLE_KEY")
+            print("       各补一行（★ 键名要照 daemon 里的真名，别按阶段名拼）。")
+        if extra_in_nh:
+            print()
+            print(f"  ★ 本文件登记了、daemon 里没有：{extra_in_nh}")
+            print("     ⇒ 幽灵阶段（改名/删阶段后没跟）⇒ 报告里会多一行查不到东西的。")
+    return ok, detail
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--reset", action="store_true")
     ap.add_argument("--check-drift", action="store_true",
-                    help="只跑**判据自检**（目前：crawl 目标口径与 topup 是否一致），"
+                    help="只跑**判据自检**（crawl 目标口径 + 阶段表一致性），"
                          "不连 NAS、不读库。退出码非 0 = 有漂移")
     ap.add_argument("--dst", default=None,
                     help="NAS 部署目录（默认按 DST 环境变量 → .deploy.nasrc → 硬编码）")
@@ -588,7 +733,16 @@ def main():
             print(detail, file=sys.stderr)
             print("  ⇒ 退出码 = 1（★ 『不一致』与『判据跑不了』都会回 1，"
                   "上面那句区分是哪一种）", file=sys.stderr)
-        return 0 if ok else 1
+        # ★★ 第二条判据：阶段表 vs `daemon.build_stages()`。
+        #   ★ 它独立于上一条（不同的对象），所以**两条都要跑**，
+        #     不能因为第一条挂了就跳过第二条 —— 那样会"修一个、漏一个"。
+        #   ★ 退出码取**或**：任一条不正 ⇒ 非 0。
+        ok2, detail2 = check_stage_table_consistent()
+        if not ok2:
+            print(detail2, file=sys.stderr)
+            print("  ⇒ 上面这条也是退出码 1 的来源（两条判据任一不符即非 0）",
+                  file=sys.stderr)
+        return 0 if (ok and ok2) else 1
 
     dst = pathlib.Path(args.dst) if args.dst else resolve_dst()
     # ★ disabled 的来源分层：显式声明 > 容器快照 > 空集。**每一层都打印来源**，

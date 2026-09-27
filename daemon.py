@@ -168,6 +168,47 @@ def build_stages():
             "interval": env_int("PUBLISH_INTERVAL", 1800),
         })
 
+    # 2b) 发布到**蟹黄堡**（第二个站点，2026-09-27 用户拍板接线）。
+    #
+    #   ★★ 为什么是**独立阶段**而不是给上面那个 publish 加个参数：
+    #      两站的**待办队列、判重、封面列全都独立**（`site_publish` 是
+    #      `(info_hash, site)` 联合主键）⇒ 一个阶段失败**不该拖累**另一个。
+    #      合成一个阶段的话，"蟹黄堡的 Cookie 过期"会让**乌托邦也停发**
+    #      —— 那是两台站点的故障耦合，没人要求过。
+    #
+    #   ★★★ 默认 **False**（`ENABLE_PUBLISH_CRABPT` 未设 = 关）。
+    #      理由：它是**第二个发布目标**，而发布是本项目**唯一不可逆**的动作。
+    #      ★ 与 `ENABLE_CRAWL` 的默认关**理由不同**（那个是"唯一会主动出网
+    #        访问别人站点"），但**方向一致**：新增的对外写操作默认关，
+    #        要开必须显式在 `.env` 加一行（`ERR-ENV-02`：缺键时默认值必须中性）。
+    #
+    #   ★★ 三处**必须**与乌托邦那个 publish 阶段不同（逐条都有理由）：
+    #      ① `--site crabpt` —— 走 `run_crabpt()` 那条独立路径
+    #      ② 周期 `CRABPT_INTERVAL`（默认 1800s）—— **单独可调**。
+    #         ★ 用户 2026-09-27 明确说"节奏为什么要错开？各发各的又不影响"
+    #           ⇒ 所以**不是**为了错开，纯粹是"两个独立的阶段各有一个可调的钟"。
+    #           默认值与 `PUBLISH_INTERVAL` 一样是 1800s，但**改一个不动另一个**。
+    #      ③ 上限 `CRABPT_MAX_PER_CYCLE`（默认 1）—— **独立于**
+    #         `PUBLISH_MAX_PER_CYCLE`。★ 蟹黄堡对元数据要求比乌托邦低
+    #         （用户 2026-09-27），但它毕竟是第二站 ⇒ 默认仍是 1，要提速显式配。
+    #
+    #   ★ `--limit` 是**承重的**：`run_crabpt()` 在**没有** `--limit` 时
+    #     一次只发 1 条（不可逆操作的保守默认）。daemon 传它 = 显式声明批量意图。
+    #
+    #   ★★ `--auto` 也是**承重的**：`run_crabpt()` 里 `if args.auto:` 那一支
+    #      校验第二把钥匙（`PUBLISH_I_AM_HERE`）。**不传 `--auto` ⇒ 那把钥匙
+    #      根本不校验** ⇒ 无人值守路径上少一道保险（`ERR-META-12`）。
+    if env_bool("ENABLE_PUBLISH_CRABPT", False):
+        cmd = ["python", "publish.py", "--site", "crabpt"] + apply_flag("--auto")
+        n = env_int("CRABPT_MAX_PER_CYCLE", 1)
+        if n:
+            cmd += ["--limit", str(n)]
+        stages.append({
+            "name": "publish_crabpt",
+            "cmd": cmd,
+            "interval": env_int("CRABPT_INTERVAL", 1800),
+        })
+
     # 3) 回填 site_torrent_id。编辑的前置条件，频率可以很低。
     if env_bool("ENABLE_SYNC", True):
         stages.append({
@@ -450,6 +491,25 @@ ENV_SNAPSHOT_KEYS = (
     "RUN_ON_START",
     "SCAN_INTERVAL", "PUBLISH_INTERVAL", "SYNC_INTERVAL", "COVERS_INTERVAL",
     "EDIT_INTERVAL", "VTID_INTERVAL", "CRAWL_INTERVAL",
+    # ══════════════════════════════════════════════════════════════════════
+    # ★★★ 2026-09-27：**蟹黄堡（第二站）**那三个键。
+    #
+    #   为什么必须一起进白名单 —— 三条**各自的**理由，不是"顺带加的"：
+    #   ① `ENABLE_PUBLISH_CRABPT`：它是**第二个不可逆的对外写操作**。
+    #      巡检要能回答"蟹黄堡现在会不会自动发"，而 .env 本机读不到
+    #      （NEVER 名单，`ERR-ENV-02`）⇒ 不进白名单就**看不见它开没开**，
+    #      这正是 `ENABLE_PUBLISH` 被连续多轮写反的那个形状（`ERR-META-04`）。
+    #   ② `CRABPT_INTERVAL`：用户 2026-09-27 明确要它与乌托邦**各自独立可调**。
+    #      而"独立可调"若在本机**看不出来**，就等于没实现（判据必须可观测）。
+    #   ③ `CRABPT_MAX_PER_CYCLE`：它是**发布速率**的一半（乘数）。
+    #      ★ 上面 `PUBLISH_MAX_PER_CYCLE` 那段注释已经写明"不落盘 ⇒
+    #        本轮改动的全部意图无法从本机验证" —— 蟹黄堡这里**一字同理**。
+    #
+    #   ★ 安全：三个值都是**普通整数/布尔**，不含凭据
+    #     （`CRABPT_COOKIE` 是凭据，**不在**白名单里 —— 见 `CRABPT_URL` 那类
+    #      也刻意不落盘的既有做法）。
+    # ══════════════════════════════════════════════════════════════════════
+    "ENABLE_PUBLISH_CRABPT", "CRABPT_INTERVAL", "CRABPT_MAX_PER_CYCLE",
 )
 
 

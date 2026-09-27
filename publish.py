@@ -775,35 +775,46 @@ def run_crabpt(args):
 
     # ---- ★★ 两个安全护栏：先立起来，再干别的 ----
     #
-    # ① `--only` **必须**有（与乌托邦不同：那边是可选的）。
+    # ① `--only` **可选**（2026-09-27 用户拍板放宽，原先必须）。
     #
-    #   ★ 理由：乌托邦已经发过 254 条、常规批量发布是**它的日常**；
-    #     蟹黄堡**一条都没发过** —— 第一条的意义是"验证字段层到底对不对"，
-    #     而"发什么"必须由人**点名**，不能由 SQL 的排序决定。
-    #   ★ 这正是 `--only` 当初被加进来的理由（见它的 help）：**发布不可逆**，
-    #     所以"发十条"只能是"点名的十条"，不能是"队列前十条"。
-    #     ⇒ 对这条**从未验证过**的路径，把"可选"收紧成"必须"。
-    if not args.only:
-        sys.exit("❌ --site crabpt 必须带 --only <info_hash 前缀>：\n"
-                 "   ★ 蟹黄堡这条路**一次都没跑过**，第一条必须由人点名，\n"
-                 "     不能是「队列里排序最靠前的那条」（发布不可逆，无批量撤销）。\n"
-                 "   ⇒ 例：python publish.py --site crabpt --only 3f2a91c8… "
-                 "--limit 1 --yes")
+    #   ★★ 改动史（别把这段当"随便加的"）：
+    #      2026-09-25 加时写的是「**必须**带 --only」，理由逐字如下：
+    #        · 乌托邦已经发过 254 条、常规批量发布是**它的日常**；
+    #          蟹黄堡**一条都没发过** ⇒ 第一条的意义是"验证字段层对不对"，
+    #          而"发什么"必须由人点名，不能由 SQL 排序决定（发布不可逆）。
+    #      ★ 那条理由**当时是对的**，但它锚在"从未验证过"这个**临时状态**上。
+    #        2026-09-27 用户决定**接进 daemon**（`ENABLE_PUBLISH_CRABPT`），
+    #        即要它**无人值守地按队列发** —— 而不带 `--only` 正是那件事的形态。
+    #        ⇒ 护栏锚点消失，`--only` 从"必须"退回"可选"。
+    #
+    #   ★★★ 放宽后仍然成立的**安全性质**（这些一条都没丢）：
+    #      · `--only` **给了**就仍然只发点名的那些（下面那套 `hit`/`absent`
+    #        逻辑一个字没改，且"零交集 ⇒ 拒绝执行"仍在）
+    #      · 两把钥匙（`ENABLE_*` + `PUBLISH_I_AM_HERE`）仍在
+    #      · `PENDING_PUBLISH_WHERE` 四道闸门仍在（含闸门④ transfer_rule）
+    #      · 预检（缺封面/缺种子文件）仍在
+    #      · `site_publish` 判重仍在 ⇒ **不会重复发**
+    #   ⇒ 放宽的是"**谁决定发哪条**"（人点名 → 队列排序），
+    #     不是"**能不能发**"。
 
-    # ② ★ **硬杀只读闸门** —— `--dry-run` 是本函数唯一会自己加上的 flag。
+    # ② `--dry-run` 不再是强制（2026-09-27 同一次拍板放宽）。
     #
-    #   ★ 为什么要"硬杀"而不是"提示用户别忘"：
-    #     它**只影响这一条路径**（乌托邦那边一个字都不改），且方向**单向**
-    #     ——（关掉 dry-run = 真提交，**不可逆**）。
-    #     一个"不可逆动作的开关"如果默认是关的（= 会真发），那就等于没有开关。
-    #   ★ 反过来"不小心发了一次"是**不可逆**的 ⇒ 宁可多一步显式确认。
-    if not args.dry_run:
-        print("\n★★ 安全默认：`--site crabpt` **强制先走 dry-run**。")
-        print("   本次**不会**向蟹黄堡提交任何数据（只是把表单字段与来源打出来）。")
-        print("   ★ 看过字段没问题之后，去掉 `--dry-run` 再跑一次才会真发布。")
-        args.dry_run = True
-    else:
+    #   ★ 原话：「安全默认：`--site crabpt` **强制先走 dry-run**」——
+    #     同样是锚在"从未跑过"上的临时护栏。要接 daemon 就必须能真发。
+    #
+    #   ★★★ 但**放宽不等于取消**：真发这条路上仍要求第二把钥匙。
+    #     这是**唯一**能防"人以为在预览、其实真发了"的机制。
+    #     `--auto` 的语义（见 `parse_args`）就是"声明这是无人值守路径"
+    #     ⇒ 校验 `PUBLISH_I_AM_HERE`。**daemon 会传 `--auto`**。
+    if args.dry_run:
         print("\n★ 显式 dry-run：不会向站点提交任何数据。")
+    elif not args.auto:
+        # ★ 没声明无人值守、又没要 dry-run ⇒ 这是"人手工真发"。
+        #   与乌托邦 `main()` 的交互确认**不同**：那边有 `input()`。
+        #   这里**不**加 `input()`（容器里没有 TTY，`input()` 会 EOFError 崩掉
+        #   —— 2026-09-24 实测过那个形状），而是在下面出口显式打印"即将真发"。
+        print("\n★★ 真发模式（没有 --dry-run，也没声明 --auto）：")
+        print("   请确认你确实要往**蟹黄堡**提交 —— 发布**不可逆**、无批量撤销。")
 
     # ---- 闸门与队列：★ 与 main() 同一份判据，不手抄 SQL（ERR-META-03）----
     tasks = db.get_pending_publish()
@@ -811,28 +822,38 @@ def run_crabpt(args):
         print("💡 当前没有需要发布的任务（`PENDING_PUBLISH_WHERE`）。")
         return
 
-    want = tuple(s.strip().lower() for s in args.only.split(",") if s.strip())
-    hit = [t for t in tasks
-           if any((t.get("info_hash") or "").lower().startswith(w) for w in want)]
-    in_queue = {(t.get("info_hash") or "").lower() for t in tasks}
-    absent = [w for w in want if not any(h.startswith(w) for h in in_queue)]
+    # ★★ `--only` 给了 ⇒ 只发点名的；**没给** ⇒ 按队列（= 无人值守那条路）。
+    #    ★ 两条路的**其余部分完全一样**（下面的预检、提交、落库都不分叉），
+    #      这里只决定 `hit` 怎么来 —— 单一分叉点，好审计。
+    if args.only:
+        want = tuple(s.strip().lower() for s in args.only.split(",") if s.strip())
+        hit = [t for t in tasks
+               if any((t.get("info_hash") or "").lower().startswith(w) for w in want)]
+        in_queue = {(t.get("info_hash") or "").lower() for t in tasks}
+        absent = [w for w in want if not any(h.startswith(w) for h in in_queue)]
 
-    print("\n" + "=" * 60)
-    print(f"★ --only：点名 {len(want)} 个 ⇒ 命中队列 {len(hit)} 条")
-    print("=" * 60)
-    for t in hit:
-        print(f"   ✅ {(t.get('info_hash') or '')[:12]}  {t.get('formatted_title')}")
-    for w in absent:
-        print(f"   ❌ {w} 不在待发布队列里（被闸门拦下 或 hash 打错）")
-    if absent:
-        # ★ 同一份判据（`explain_not_queued`），不另写一套。
-        #   ★ 蟹黄堡最可能撞上的是闸门④：皇后的 `transfer_rule`
-        #     —— 我们在蟹黄堡发之前**必须先确认皇后允许转载**。
-        print("\n   ★ 逐条查为什么没进队列（同一份判据，不做手抄）：")
+        print("\n" + "=" * 60)
+        print(f"★ --only：点名 {len(want)} 个 ⇒ 命中队列 {len(hit)} 条")
+        print("=" * 60)
+        for t in hit:
+            print(f"   ✅ {(t.get('info_hash') or '')[:12]}  {t.get('formatted_title')}")
         for w in absent:
-            print(f"      {w}: {explain_not_queued(w)}")
-    if not hit:
-        sys.exit("❌ --only 与队列**零交集** ⇒ 拒绝执行（不会去发队列里的别的）")
+            print(f"   ❌ {w} 不在待发布队列里（被闸门拦下 或 hash 打错）")
+        if absent:
+            # ★ 同一份判据（`explain_not_queued`），不另写一套。
+            #   ★ 蟹黄堡最可能撞上的是闸门④：皇后的 `transfer_rule`
+            #     —— 我们在蟹黄堡发之前**必须先确认皇后允许转载**。
+            print("\n   ★ 逐条查为什么没进队列（同一份判据，不做手抄）：")
+            for w in absent:
+                print(f"      {w}: {explain_not_queued(w)}")
+        if not hit:
+            sys.exit("❌ --only 与队列**零交集** ⇒ 拒绝执行（不会去发队列里的别的）")
+    else:
+        # ★ 无人值守那条路：按队列取。★ `--limit` 与乌托邦同义（截前 N 条）。
+        hit = list(tasks)
+        print("\n" + "=" * 60)
+        print(f"★ 无 --only ⇒ 按发布队列取（无人值守路），队列 {len(hit)} 条")
+        print("=" * 60)
 
     # ---- 预检：★ 与 main() 同一套（缺封面 / 种子文件 / 无 log）----
     valid, blocked = [], []
@@ -875,18 +896,24 @@ def run_crabpt(args):
         return
     if args.limit:
         valid = valid[:args.limit]
-    # ★★ 蟹黄堡这条路**再加一道**：一次最多 1 条。
+    # ★★ 未显式给 `--limit` 时，蟹黄堡这条路**一次最多 1 条**（2026-09-27 放宽后）。
     #
-    #   ★ 这不是"保守"，是**不可逆操作的正确默认**：这条路**从未验证过**
-    #     （字段层是照实测表单写的，但"提交之后站点上长什么样"没人看过）。
-    #     第一条发出去、回读确认之后，才谈得上第二条。
-    #   ★ 想多发就得显式改这个数 —— 而改它的人必然看到这段注释
-    #     （与"一个能靠多打一个词关掉的保险不是保险"同一个思路，
-    #       这里反过来：**能靠多打一个词放开的上限，至少得让人问一句为什么**）。
-    if len(valid) > 1:
-        print(f"\n★★ 蟹黄堡路径一次只发 1 条（本次点名命中 {len(valid)} 条 "
-              f"⇒ 只发第一条）。★ 理由：这条路从未验证过，发布不可逆。")
-        print("   ⇒ 若确实要发多条，请逐条点名、逐条确认。")
+    #   ★ 改动史：原来这里是**无条件** `valid = valid[:1]`（无论给没给 --limit），
+    #     锚在"这条路从未验证过"上。2026-09-27 用户决定接 daemon
+    #     ⇒ 无人值守要能按 `CRABPT_MAX_PER_CYCLE` 发 N 条，
+    #       所以上限改由 `--limit` **显式**表达（daemon 会传它）。
+    #
+    #   ★★★ 但护栏本身**没有取消**，只是从"写死 1"变成"**默认 1**"：
+    #        给了 `--limit N` ⇒ 发 N 条（调用方**显式声明**了要多发）；
+    #        没给          ⇒ 仍然只发 1 条。
+    #      ⇒ 这个方向是对的：**不可逆操作的默认值必须保守**，
+    #        放开要有人显式写一个数（与 `ERR-ENV-02` 那条"缺键时默认中性"同族，
+    #        只是这里中性 = 保守）。
+    #   ★ 若真发了多条，**回读确认**仍是后面的步骤（见下面的比对段）。
+    elif len(valid) > 1:
+        print(f"\n★★ 蟹黄堡路径未给 --limit ⇒ 一次只发 1 条（本次命中 {len(valid)} 条）。")
+        print(f"   ★ 理由：发布不可逆。要一次多发请在命令行**显式**给 "
+              f"`--limit N`（daemon 用的是 `CRABPT_MAX_PER_CYCLE`）。")
         valid = valid[:1]
 
     # ---- 提交前：读发布页（★ 唯一能在提交前发现"没有发种权限"的判据）----
