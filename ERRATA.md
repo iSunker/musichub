@@ -435,9 +435,12 @@
 |---|---|
 | **`docker compose ps <X>` 里的 `<X>` 是 service 名，不是 `container_name`** | compose 的 `container_name: opencd2musopia` 只改**容器名**，**不改 service 名**（service 是 `musopia`）⇒ `docker compose ps opencd2musopia` 回 `no such service`。★ 危害：**这个报错长得像"容器不存在"**，于是很容易被读成"daemon 挂了" —— 而实际只是参数用错（`ERR-META-01` 一族：判据本身失效却被当成结论）。⇒ 记法：`ps/logs/run/exec` 后面跟 **service 名**；要按容器名操作就用 `docker inspect/logs opencd2musopia` |
 
----
+### ERR-DATA-06
+| 教训 | 根因 |
+|---|---|
+| **"补数据"的工具如果顺手改了 `status`，它的副作用就是把行从发布队列里踢出去 —— 而这件事不报任何错，于是"补得越多、队列越空"** | `topup_opencd_fields.py` 早年**刻意不传 `torrent_file`**（怕"重建 `.torrent` 会换 announce passkey ⇒ 改 infohash"），而 `opencd_ingest.build_row()` 见 `torrent_file` 为空即落 `STATUS_NO_TORRENT_FILE` ⇒ 而 `db.PENDING_PUBLISH_WHERE` 的**第一句**就是 `status = 'SUCCESS'` ⇒ 被补过的那行**从此出不了队列**。★ 实测（2026-09-28）：全库发布队列 **0 条**（`PENDING_PUBLISH_WHERE` 空），其中 **84 行**内容已补全、`transfer_rule` 已就位（73 条 ALLOW）、`torrent_file` 非空且**盘上文件全都在** —— 只因 `status='NO_TORRENT_FILE'` 而**全部卡在队列外**。⇒ 整个库"看起来没活干"，而真实情况是"活干完了，但状态被上游工具改坏了"。★★ 根因的根因：**那个"怕改 infohash"的顾虑只对"去重建种子"成立，对"把库里本来就记着的路径原样传回去"不成立** —— 传一个已有路径**不读 qB、不写文件、不换 passkey**，infohash 风险为 **0**。⇒ 判据：**一个防护性的 `None`/空值，要问它防的是哪条路**；防不住的那条路（这里是"重建"）另有屏障时，这个 `None` 就只剩副作用。★ 修法两处：① `topup_opencd_fields.py` 改为**带库内已有 `torrent_file`**（只带已有的，库里为空仍传 `None`）；② 一次性修复 `tools/fix_no_torrent_file_status.py`（只改 `status` + 清 `reason`，默认只读，**核盘后**才改）。★ 顺带钉住一个形状：**`reason` 列记的是旧结论，改 `status` 时必须同清** —— 否则库里同时存在"`status='SUCCESS'`"与"`reason='没拿到种子文件'`"，读的人被引去查一个不存在的问题（`ERR-META-14` 一族） |
 
-## 怎么用这张表
+
 
 - **按症状查**：按上面的分层定位（OS / 通路 / 容器 / 存储 / 配置 / 元 / 站点）。
 - **引用**：代码与文档里用 `ERR-XX-NN` 指过来即可，`tools/doc-audit/02_refs.py` 会核对每个 ID 是否存在。

@@ -48,16 +48,28 @@
    `RateGate` 抛 `DailyQuotaExceeded` 是**保护**，不是错误；
    摘要里"本轮放入 N 条"与"被配额截断到 M 条"要**分别可见**。
 
-5. ★ **绝不碰 `status` 之外的东西** —— 入库走 `opencd_ingest.build_row()`，
-   它**刻意不写** `content_path` / `cover_url` / `torrent_file`
+5. ★ **绝不碰 `status` 以外的内容** —— 入库走 `opencd_ingest.build_row()`，
+   它**刻意不写** `content_path` / `cover_url`
    （见它的 docstring：`content_path` 是"第一阶段行的标志字段，永不可碰"）。
-   ★ 本脚本**连 `torrent_file` 都不传**：那些行的 `.torrent` 在 qB 那边才有，
-     而**重建 `.torrent` 会换 announce passkey ⇒ 改 infohash**（严禁）。
-     ⇒ 不传 `torrent_file` ⇒ 落 `NO_TORRENT_FILE`。**这是预期行为**，不是失败。
+   ★★ **`torrent_file` 传的是「库里已有的值」，不是去重建**（2026-09-28 改）：
+     本条原先写的是「**连 `torrent_file` 都不传**：那些行的 `.torrent` 在 qB 那边，
+     而**重建 `.torrent` 会换 announce passkey ⇒ 改 infohash**（严禁）」。
+     ★ 那条**危险性的理由依然成立**（本脚本**绝不重建**任何 `.torrent`），
+       但它**推不出"不该把库里已有的路径传回去"** —— 本步只是把
+       `tasks.torrent_file` 这一列**已有的值**原样交给 `build_row`：
+       不读 qB、不写文件、不换 passkey ⇒ **infohash 风险为 0**。
+     ⇒ ★ 传 `None` 的真实后果是 **`status` 被改成 `NO_TORRENT_FILE`**，
+       即"补一行 ⇒ 把一行踢出发布队列"（队列第一句是 `status='SUCCESS'`）。
+       实测（2026-09-28）：全库队列 **0 条**，其中 **113 条**内容已补全、
+       规则已就位（72 ALLOW）、`torrent_file` 也非空，**全卡在这一格**。
+     ⇒ 现改为**只带库里已有的值**；库里为空 ⇒ 仍传 `None`（如实说"不知道"）。
 
-6. ★ **`status` 会变成 `NO_TORRENT_FILE`，这是本脚本的已知副作用**：
-   原因见纪律 5。⇒ 要发这些行时得**显式**把 `status` 改回 `SUCCESS`
-   （那是**另一件独立的事**，且**需要用户决定发哪些**）。本脚本不做那件事。
+6. ★ **`status` 仍可能变成 `NO_TORRENT_FILE`，但只在"真的没有路径"时**：
+   库里那列本来就为空的、或路径在盘上不存在的（`build_row` 会 `os.path.exists` 核）。
+   ⇒ 要发这些行时得**显式**把 `status` 改回 `SUCCESS` —— ★ 那是**另一件独立的事**，
+     且**需要用户决定发哪些**。本脚本不做那件事。
+   ★★ 但**库里已有非空路径、且盘上文件在**的行，本步**不再**把它们打成
+     `NO_TORRENT_FILE` —— 那正是 2026-09-28 修掉的那个"补数据 ⇒ 踢出队列"的副作用。
    ★ 好处：内容（`mapped_json`/`artist`/`year`/`transfer_rule`）**已经补全了**，
      将来要发只需改一个 `status`，**不用再花请求**。
 
@@ -236,8 +248,13 @@ def select_batch(limit, tried, retry_failed=False, tids=()):
         #        点名（`tids` 非空）⇒ **仍是 `TARGET_WHERE`**（点名可点 EXISTS 的行，
         #                              因为"显式点名"正是重推的正当路径）
         #        批量（`tids` 空）  ⇒ `PICK_WHERE`（**排除已上站**，不浪费配额）
+        # ★★ `torrent_file` 必须一起选出来（2026-09-28 加）—— 理由见下面
+        #    `opencd_ingest.ingest()` 调用点那段：库里已有的路径要**原样带回去**，
+        #    否则入库会把它判成"调用方没传" ⇒ `status` 掉成 `NO_TORRENT_FILE`
+        #    ⇒ 这条**永远进不了发布队列**（队列第一句就是 `status='SUCCESS'`）。
+        #    ⚠️ 实测（2026-09-28）：全库发布队列是 **0 条**，唯一原因就是这一格。
         _cols = ("info_hash, opencd_tid, status, site_status, torrent_name, "
-                 "opencd_added_at")
+                 "opencd_added_at, torrent_file")
         n_target_all = conn.execute(
             f"SELECT count(*) FROM tasks WHERE {TARGET_WHERE}").fetchone()[0]
         n_pick_all = conn.execute(
@@ -474,11 +491,36 @@ def main():
         tri[rule] = tri.get(rule, 0) + 1
         print(f"    转载规则 = {raw!r} → {rule}")
 
-        # ★ 入库（纯本地、零请求）。**不传 torrent_file**（见纪律 5/6）
+        # ★★ 入库（纯本地、零请求）。**把库里已有的 `torrent_file` 原样带回去**
+        #    （2026-09-28 改；原先这里传的是 `None`，见下）。
+        #
+        #    ★ 原先为什么传 `None`（纪律 5/6 的理由）：那些行的 `.torrent` 在 qB 那边，
+        #      而**重建 `.torrent` 会换 announce passkey ⇒ 改 infohash**（严禁）。
+        #      ⇒ 不传 ⇒ `build_row` 落 `NO_TORRENT_FILE`。当时认为"这是预期行为"。
+        #
+        #    ★★ 但那条理由**只对"要去重建"成立**，对"库里本来就记着路径"不成立 ——
+        #      本步**不去 qB、不重建**，只是把 `tasks.torrent_file` 这一列**已有的值
+        #      原样传回去**（`build_row` 拿到非空路径时会去 `os.path.exists()` 核，
+        #      核不过也**不会**丢路径，只是落 `NO_TORRENT_FILE` + 换一句真话）。
+        #      ⇒ infohash 风险为 0（本步不碰种子文件），而 `status` 能保住 `SUCCESS`。
+        #
+        #    ★★ 不改这一处的后果（2026-09-28 实测，**这才是真正的代价**）：
+        #      每一次 `topup` 补一行，就把那行的 `status` 从 `SUCCESS` 打成
+        #      `NO_TORRENT_FILE` ⇒ 补得越多，**发布队列越空**。
+        #      现场：全库 `PENDING_PUBLISH_WHERE` = **0 条**，而其中
+        #      **113 条**内容已补全、`transfer_rule` 已就位（72 ALLOW）、
+        #      `torrent_file` 也非空 —— 只因 `status` 是 `NO_TORRENT_FILE`
+        #      而**全部卡在队列之外**。⇒ 一个"补数据"的工具，
+        #      副作用是"把行从队列里踢出去"，而这件事**不报任何错**。
+        #      （`ERR-META-14` 一族：判据与它要服务的对象反了。）
+        #
+        #    ★ 分寸：**只带库里已有的值，绝不凭空造**。库里为空 ⇒ 仍传 `None`
+        #      ⇒ 仍是 `NO_TORRENT_FILE`（那是如实说"我不知道"）。
+        _tf = (r.get("torrent_file") or "").strip() or None
         try:
             st, reason = opencd_ingest.ingest(
                 info, raw_tid=tid, info_hash=(r["info_hash"] or "").lower(),
-                torrent_file=None, qb_seed_days=None, now=datetime.now(),
+                torrent_file=_tf, qb_seed_days=None, now=datetime.now(),
                 # ★ 把库里已有的发布日期**原样带过去** —— `build_row` 在它为空时
                 #   不会进 kwargs ⇒ `save_task` 的 upsert **不碰这一列** ⇒
                 #   已有值不会被抹掉。（它是 `vtid` 阶段的产物，本步只负责别弄丢。）
