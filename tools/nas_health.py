@@ -12,9 +12,11 @@
     python tools/nas_health.py --reset    # 清掉上次快照（只报一次全量）
 """
 import argparse
+import ast
 import json
 import os
 import pathlib
+import re
 import sqlite3
 import sys
 import time
@@ -28,6 +30,24 @@ SNAP = pathlib.Path(__file__).with_name(".nas_health_last.json")
 # 但 last_finish 字符串与 data.db 的 updated_at 是**两个不同口径**（ERR-SQL-03）：
 #   last_finish → 本地 CST；data.db.updated_at → UTC。
 CST = 8 * 3600
+
+# ══════════════════════════════════════════════════════════════════════════
+# ★★★ `crawl` 目标口径 —— **第二份副本，由一条判据钉住**（见文件末尾 --check-drift）
+#
+#   真值来源：`topup_opencd_fields.TARGET_WHERE`（那边是**唯一**定义，别处不许再写）。
+#   ★ 本文件为什么只能写第二份：见 `crawl_todo` 上方那段（import 会拉进
+#     `config.require_env` ⇒ 本脚本就不再"随手可跑"了）。
+#   ★ 所以**规矩是**：改那边**必须**同时改这里 —— 而这一条不再靠"记得"，
+#     `python tools/nas_health.py --check-drift` 会**直接读对方的源码**比对。
+#     ⇒ 判据：**两处实现要么共用一份，要么被一条判据钉住**；
+#       "两处各写一份、谁也不看着谁"是不允许的（那正是 ERR-META-03）。
+#
+#   ⚠️ 比对是**规范化后**的字符串相等（去空白/统一引号），不是"语义等价"——
+#      语义等价没法机械判。⇒ 若你在那边改了写法但含义没变（比如换 `<>`），
+#      本判据会报红。**那是对的**：请把两份改成同一个写法，
+#      而不是把判据放宽（放宽等于把这条性质扔掉）。
+CRAWL_TARGET_WHERE = ("(opencd_tid IS NOT NULL AND opencd_tid != '') "
+                      "AND (mapped_json IS NULL OR mapped_json = '')")
 
 # ★★ 心跳阈值：**它不是"daemon 的生死判据"，只是"该不该往下看阶段表"的提示**。
 #
@@ -397,10 +417,25 @@ def read_db(dst=None):
     #       (i) 配额空了（= 明天会自己好） 与
     #      (ii) 抓了但没落库（= 真 bug，明天也不会好）
     #     —— 两者的**修法完全不同**（ERR-META-13/14：不许把两种情形印成同一行）。
+    #
+    #   ★★★ 2026-09-27：**这句是 `topup_opencd_fields.TARGET_WHERE` 的第二份副本**
+    #       （`ERR-META-03`：同一件事不许有两处实现）。为什么当时会手写第二份：
+    #         `topup_opencd_fields` **import 不进来** —— 它 import `crawl`/`db`/`config`，
+    #         而 `config` 用 `require_env()`，**本机没有 .env 就 `sys.exit`**
+    #         （实测：`import topup_opencd_fields` → `❌ 缺少必需的环境变量 QB_PASS`）。
+    #         本脚本的成文纪律是「只读 SMB、不需要连容器」⇒ 不能为了取一个常量
+    #         就把整条出网/配置依赖链拉进来。
+    #       ⇒ 所以这里**不 import**，改成：**把判据文本写成本文件的常量**，
+    #         并加**一致性判据** `check_target_where_consistent()` —— 见本文件
+    #         底部的 `--check-drift`，它**直接读对方的源码**把两份文本比对，
+    #         不一致就报红。★ 判据：**两处实现要么共用一份，要么被一条判据钉住**
+    #         —— 只剩"两处各写一份、谁也不看着谁"是不允许的。
+    #       ★ 为什么选"钉住"而不是"共用"：共用要把 `config`/`crawl` 拉进本脚本，
+    #         代价是**本脚本从此需要 .env**（破坏它最好用的那条性质：随手就能跑）。
+    #         而本判据读的是**源码文本**、不需要任何环境 ⇒ 两全。
     crawl_todo = cur.execute(
         "SELECT count(*) FROM tasks "
-        " WHERE opencd_tid IS NOT NULL AND opencd_tid != '' "
-        "   AND (mapped_json IS NULL OR mapped_json = '')"
+        f" WHERE {CRAWL_TARGET_WHERE}"
     ).fetchone()[0]
     # ★ 配额账本：`opencd_quota` 表按 (day_key, kind) 记账。★ 表可能不存在
     #   （早期库）⇒ **读不到就说读不到**，绝不当成 0（ERR-SQL-05）。
@@ -420,9 +455,86 @@ def read_db(dst=None):
             "quota_known": quota_known}
 
 
+def check_target_where_consistent(verbose=True):
+    """
+    ★ 把 `CRAWL_TARGET_WHERE`（本文件的副本）与 `topup_opencd_fields.TARGET_WHERE`
+      （真值来源）**读源码文本**比对。零环境依赖（不 import 对方 ⇒ 不需要 .env）。
+
+    返回 `(ok, detail)`。`ok=False` 时 `detail` 说清"两边各是什么"。
+
+    ★ 为什么读源码而不 import：见 `CRAWL_TARGET_WHERE` 上方那段
+      （import 会把 `config.require_env` 拉进来，本脚本就不能"随手跑"了）。
+
+    ★ 为什么只断言**文本**相等、不试图判"语义等价"：语义等价**没法机械判**
+      （`!=` 与 `<>`、`IS NULL` 与 `IS ''` 的等价性要懂 SQL 语义）。
+      ⇒ 判据取**最保守**的那一种：**规范化后字符串必须相等**。
+        代价是"改了写法但含义没变"也会报红 —— 那**是刻意的**：
+        报红时正确的动作是把两份改成同一写法，**不是**把判据放宽。
+    """
+    def norm(s):
+        s = s.replace("\n", " ")
+        s = re.sub(r"\s+", " ", s)
+        return s.replace('"', "").strip()
+
+    here = pathlib.Path(__file__).resolve().parent.parent  # 仓库根（tools/ 的上一级）
+    tp = here / "topup_opencd_fields.py"
+    if not tp.exists():
+        return False, f"找不到 {tp} —— 判据**无法执行**（不是『通过』）"
+
+    src = tp.read_text(encoding="utf-8")
+    # ★ 这一步曾经**静默失效**（2026-09-27，我自己踩的）：原先写
+    #     `re.search(r"^TARGET_WHERE\s*=\s*\((.*?)\n\)", src, re.S|re.M)`
+    #   而真值那份的收尾是 `..."\'\')")` —— **闭合括号与字符串收尾在同一行**
+    #   ⇒ `\n\)` 永远匹配不上 ⇒ `m` 恒为 `None` ⇒ 判据只走"无法执行"那一支。
+    #   ★ 这与本文件里的告警是**同一个形状**（`ERR-META-01`）：判据看着在跑、
+    #     实际量的不是那件事。★ 教训写在这里：**正则匹配失败必须报红，
+    #     绝不能与"通过"共用一个出口** —— 所以下面那支明确回 False + 说清原因。
+    #   ⇒ 改成不依赖换行位置：匹配到**下一个空行/下一个顶层语句**为止。
+    #     ★ 更稳的办法是走 AST（`ast.parse` 后取 `Assign` 节点），那对写法免疫。
+    #       这里用 AST —— 因为"拼接字符串"在 AST 里就是一个 `BinOp`，
+    #       把 `Constant` 叶子全取出拼起来即可，**不依赖任何排版**。
+    try:
+        tree = ast.parse(src)
+    except SyntaxError as e:
+        return False, f"{tp.name} 语法错误，无法解析：{e} —— 判据**无法执行**"
+    assign = None
+    for node in tree.body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "TARGET_WHERE"):
+            assign = node
+            break
+    if assign is None:
+        return False, (f"在 {tp.name} 的**模块顶层**没找到 `TARGET_WHERE = ...` 赋值 "
+                       f"—— 判据**无法执行**（它可能被改名/挪进函数了，**不是**通过）")
+
+    parts = [n.value for n in ast.walk(assign.value)
+             if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    others = norm(" ".join(parts))
+    mine = norm(CRAWL_TARGET_WHERE)
+    ok = (others == mine)
+    detail = (f"本文件 CRAWL_TARGET_WHERE = {mine!r}\n"
+              f"        topup.TARGET_WHERE = {others!r}")
+    if verbose:
+        print("=" * 72)
+        print("★ crawl 目标口径一致性（nas_health 副本 vs topup 真值）")
+        print("=" * 72)
+        print(f"  {'✅ 一致' if ok else '❌ **已经漂了**'}")
+        print(f"  {detail}")
+        if not ok:
+            print()
+            print("  ⇒ 两个口径**不同** ⇒ 本脚本报的 'crawl 目标' 与 crawl 实际")
+            print("    在抓的集合**不是同一批** ⇒ 那个'目标没减少'的判据会失效")
+            print("    （`ERR-META-01` 的形状：判据看着对，量的却是另一个集合）。")
+    return ok, detail
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--reset", action="store_true")
+    ap.add_argument("--check-drift", action="store_true",
+                    help="只跑**判据自检**（目前：crawl 目标口径与 topup 是否一致），"
+                         "不连 NAS、不读库。退出码非 0 = 有漂移")
     ap.add_argument("--dst", default=None,
                     help="NAS 部署目录（默认按 DST 环境变量 → .deploy.nasrc → 硬编码）")
     ap.add_argument("--disabled", default="",
@@ -430,6 +542,12 @@ def main():
                          "不给就读 NAS 上的 daemon_env.json 快照；快照也读不到则按空集判"
                          "（= 每个阶段都按'该动就得动'，宁可多报一个待查）")
     args = ap.parse_args()
+
+    # ★ `--check-drift`：纯本地判据自检，**在任何 NAS/网络动作之前**返回。
+    #   用途：改完 `topup_opencd_fields.TARGET_WHERE` 后跑一次，确认副本跟着改了。
+    if args.check_drift:
+        ok, _ = check_target_where_consistent()
+        return 0 if ok else 1
 
     dst = pathlib.Path(args.dst) if args.dst else resolve_dst()
     # ★ disabled 的来源分层：显式声明 > 容器快照 > 空集。**每一层都打印来源**，
@@ -966,4 +1084,15 @@ def _utc_to_epoch(s):
 
 
 if __name__ == "__main__":
-    main()
+    # ★★★ 2026-09-27：**`sys.exit(main())` 而不是裸 `main()`** —— 直接抄的
+    #   `ERR-META-18` 教训，而我刚刚**又踩了一次**：
+    #     `main()` 里 `--check-drift` 那条路径 `return 0 if ok else 1`，
+    #     但裸调 `main()` ⇒ **返回值被丢掉** ⇒ 退出码**恒为 0**。
+    #   ★ 实测症状（阴性对照时抓到的，**这是它唯一能被发现的途径**）：
+    #     把 `topup.TARGET_WHERE` **故意改漂**、跑 `--check-drift`
+    #     ⇒ 屏幕上**正确报红**「❌ 已经漂了」…而 `echo $?` 是 **0**
+    #     ⇒ CI / 任何脚本都会当它通过 ⇒ 这条判据**等于没有**。
+    #   ★ 判据：**自检的结论必须能传到调用方**，而"打印了红字"不算 ——
+    #     必须有非 0 退出码。⇒ 任何自检都要做一次阴性对照，**且要看退出码**
+    #     （只看它打印了什么，就是这次这个形状）。
+    sys.exit(main())

@@ -344,6 +344,12 @@
 |---|---|
 | **`.dockerignore` 的一行裸目录名会让 `COPY <dir>/` 静默失效** | `.dockerignore` 只支持**排除**语法，而里面有一行裸 `tools` ⇒ 整个目录不进构建上下文 ⇒ Dockerfile 里的 `COPY tools/ ./tools/` **不报错、也没拷任何东西**，容器里就是没有 `/app/tools/`。实测症状：`docker compose run --rm tools python tools/recall_opencd_descr.py` ⇒ `can't open file '/app/tools/...': No such file or directory`。★ 更坏的配套：`deploy.sh` 的自检只从 Dockerfile 抓 `\.py$` ⇒ **整目录 COPY 它完全看不见**（正是该自检自己注释里警告过、在 reseed-toolkit 上踩过的那个形状）⇒ 白名单漏了目录也照样放行。⇒ 判据：**"这个文件需不需要同步"要按谁拷它去数**，且**目录型 COPY 必须自己能核**（已给 `dockerfile_copy_dirs` 加阴性对照） |
 
+### ERR-META-30
+| 教训 | 根因 |
+|---|---|
+| **「两处各写一份」的两条出路：要么共用一份，要么被一条判据钉住 —— 而"钉住"的那条判据必须自己做阴性对照** | `tools/nas_health.py` 要报"crawl 目标数"，而真值口径在 `topup_opencd_fields.TARGET_WHERE`（`ERR-META-03`）。★ **但它 import 不进来**：对方 import `crawl`/`db`/`config`，而 `config` 用 `require_env()` ⇒ 本机没有 `.env` 就 `sys.exit`（实测：`❌ 缺少必需的环境变量 QB_PASS`）。而本脚本的**承重性质**是「只读 SMB、不需要连容器、随手就能跑」。⇒ 两条路：**共用**（把配置依赖链拉进来，代价是它不再随手可跑）或**钉住**（留副本 + 一条判据比对）。选了后者。★ 判据实现：`--check-drift` **读对方源码的 AST**取 `TARGET_WHERE` 的字符串字面量拼接结果、与本地副本规范化比对。**为什么读源码而不 import**：不需要任何环境。**为什么用 AST 不用正则**：第一版用 `re.search(r"^TARGET_WHERE\s*=\s*\((.*?)\n\)", ...)`，而真值那份的**闭合括号与字符串收尾在同一行**（`..."\'\')")`）⇒ 正则**永远匹配不上** ⇒ 判据只走"无法执行"分支 —— 又一个 `ERR-META-01`（判据看着在跑、量的不是那件事）。★★ 关键纪律：**"判据无法执行"必须报红，绝不能与"通过"共用一个出口** |
+| ★ 附：这条判据的**阴性对照是唯一发现它的途径** —— 把 `topup.TARGET_WHERE` 故意改漂、跑 `--check-drift`，屏幕上**正确报红**「❌ 已经漂了」……而 `echo $?` 是 **`0`**。根因是 `if __name__ == "__main__": main()` **丢掉了 `main()` 的返回值** ⇒ 退出码恒 0 ⇒ CI 与任何脚本都会当它通过。**这正是本表 `ERR-META-18` 逐字写着的那一条，而我又犯了一次** —— 说明"知道这条教训"不等于"新写的自检会带上它"。⇒ 施行办法：**每条新自检写完，立刻 (a) 注入已知坏样本、(b) `echo $?` 看退出码**；只看它打印了什么就是这次这个形状。（修法：`sys.exit(main())`） |
+
 ### ERR-META-29
 | 教训 | 根因 |
 |---|---|
