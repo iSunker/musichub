@@ -504,6 +504,57 @@ def explain_not_queued(prefix):
     finally:
         con.close()
 
+
+def explain_not_transferable(prefix):
+    """★ 蟹黄堡路专用：给一个 hash 前缀，说清它**为什么不在转种队列里**。
+
+    ★★ 为什么不复用 `explain_not_queued()`（那是乌托邦路的）：
+      两条路问的是**不同的问题** ——
+        · `explain_not_queued`：为什么不 **发布到乌托邦**？
+        · 本函数          ：为什么不 **从乌托邦转去蟹黄堡**？
+      前者会把"`site_status='EXISTS'`（已在站上）"报成**拦下**，
+      而后者恰恰**要求**它成立。⇒ 复用 = 给人看**反的**原因
+      （这是 `ERR-META-03` 的形状：同一段代码服务两个消费者，
+       而两个消费者要的**答案方向相反**）。
+
+    ★ 返回**多行列表**而不是一个字符串：原因可能同时有多条
+      （比如"源站没发过" **且** "蟹黄堡发过"），拼成一行会看不清哪条先触发。
+    """
+    import sqlite3
+    con = sqlite3.connect(config.DB_PATH, timeout=30)
+    try:
+        con.execute("PRAGMA query_only=1")
+        rows = con.execute(
+            "SELECT info_hash FROM tasks WHERE info_hash LIKE ?",
+            (prefix + "%",)).fetchall()
+        if not rows:
+            return ["库里没有这个 hash（打错了？）"]
+        if len(rows) > 1:
+            return [f"前缀歧义，命中 {len(rows)} 行（给长一点的前缀）"]
+        h = rows[0][0]
+        ok, why = db.is_transferable_to(h, db.SITE_CRABPT)
+        if ok:
+            return [f"✅ 它**在**转种队列里（{why}）—— 请复核上面的命中列表"]
+        out = [f"❌ {why}"]
+        # ★ 附加信息：**别的**站点上它的分布（"这条到底发过哪些站"）。
+        #   ★ 只说事实，不替用户下结论 —— 判据已在 `why` 里给全了。
+        try:
+            pubs = db.site_publishes(h)
+        except Exception as e:  # noqa: BLE001
+            out.append(f"   （各站记录读不到：{e}）")
+            return out
+        if pubs:
+            out.append("   各站记录：")
+            for site, rec in sorted(pubs.items()):
+                out.append(f"     · {site}: id={rec.get('torrent_id')!r} "
+                           f"status={rec.get('status')!r}")
+        else:
+            out.append("   各站记录：**一条都没有**（`site_publish` 里查无此行）")
+        return out
+    finally:
+        con.close()
+
+
 def _crabpt_cover(task, *, dry_run=False):
     """确保这条种子在**蟹黄堡**上有一份**属于蟹黄堡的**封面 URL。返回 `(url, 说明)`。
 
@@ -754,6 +805,84 @@ def selftest_crabpt_isolation(verbose=True):
     return (not detail), detail
 
 
+# ---- ★★ 负向自检：转种队列的判据**确实是** `db.transferable_to` ----
+#
+# ★★★ 为什么需要它（`ERR-META-31` 的形状：状态文件的两种历史序列化后一样、
+#   携带不了那个区分）：
+#   用户 2026-09-27 拍板「需求是【转种】，目标站缺、源站有的才转过去」。
+#   而**忘记**这个筛选**不报错、也不抛异常** —— 表现只是"蟹黄堡照发"，
+#   而下面 `site_publish` 的判重**拦不住**（它问的是"蟹黄堡发过没有"，
+#   对"这条在**乌托邦**发过"一无所知）⇒ **静默多发**，多发不可撤销。
+#
+# ★ 判据取自**本文件自己的源码**（AST），不是手抄清单 —— 那必然漂移。
+#   具体断两件事：
+#     ① `run_crabpt` **必须**调 `db.transferable_to`（而不是 `get_pending_publish`）
+#     ② `run_crabpt` **不许**调 `db.get_pending_publish()` 当**选行**用
+#        ★ 注意判据要**精确到语法位置**，不能只 `if "get_pending_publish" in code`：
+#          那会误伤我特意写进 `run_crabpt` 的那段**子集断言**
+#          （它**故意**调一次 `db.get_pending_publish()` 来求差集）。
+#          ⇒ 只检查"它有没有出现在**赋值给 `tasks`/`hit`** 的位置"
+#          —— 那才是"拿它当选行的判据"。
+def selftest_crabpt_transfer_queue(verbose=True):
+    """断言 `run_crabpt` 的选行判据是**转种**（`db.transferable_to`）。"""
+    src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    tree = _ast.parse(src)
+    fn = next((n for n in _ast.walk(tree)
+               if isinstance(n, _ast.FunctionDef) and n.name == "run_crabpt"), None)
+    if fn is None:
+        return False, ["★ 找不到 run_crabpt —— 函数被改名了？本条自检失效"]
+    code = _code_only(fn)
+    detail = []
+
+    # ① 必须调 transferable_to（"改了但没换队列"要能被抓到）
+    if "transferable_to" not in code:
+        detail.append("★★ run_crabpt 里**没有** `db.transferable_to` ⇒ "
+                      "用的是发布队列（`PENDING_PUBLISH_WHERE`），"
+                      "而它含 `site_status != 'EXISTS'` ⇒ 转种队列**恒为空**"
+                      "（实测 0 条）")
+
+    # ② 不许把 `get_pending_publish()` 的**返回值**当选行判据。
+    #    ★ 判据是"有没有 `x = db.get_pending_publish()` 这种赋值"，
+    #      而**不是**子串出现 —— 见上面那段注释（子集断言故意调它）。
+    for node in _ast.walk(fn):
+        if isinstance(node, (_ast.Assign, _ast.AnnAssign)):
+            val = node.value
+            if val is None:
+                continue
+            # 剥掉 `list(...)` / `[t for t in ...]` 之外的原样调用
+            if (isinstance(val, _ast.Call)
+                    and getattr(val.func, "attr", "") == "get_pending_publish"):
+                tgt = node.targets[0] if isinstance(node, _ast.Assign) else node.target
+                nm = getattr(tgt, "id", "?")
+                detail.append(f"★★ run_crabpt 里 `{nm} = db.get_pending_publish()` "
+                              f"⇒ 又拿**发布队列**当选行判据了（转种队列必须用 "
+                              f"`db.transferable_to`）")
+
+    # ③ 队列来源必须显式带站点（`db.SITE_CRABPT`）—— 否则默认参数会静默
+    #    变成 `SITE_MUSOPIA`，而那会让筛选"查自己站发过没有" ⇒ 恒为空。
+    ok_kw = False
+    for node in _ast.walk(fn):
+        if isinstance(node, _ast.Call) and getattr(node.func, "attr", "") == "transferable_to":
+            if node.args:
+                a = node.args[0]
+                if getattr(a, "attr", "") == "SITE_CRABPT":
+                    ok_kw = True
+            for kw in node.keywords:
+                if getattr(kw.value, "attr", "") == "SITE_CRABPT":
+                    ok_kw = True
+    if "transferable_to" in code and not ok_kw:
+        detail.append("★★ 调 `transferable_to` 时**没有**显式传 `db.SITE_CRABPT` "
+                      "⇒ 落到默认参数 `SITE_MUSOPIA`，筛选变成'乌托邦查乌托邦'，"
+                      "队列恒为空")
+
+    if verbose:
+        mark = "✅" if not detail else "❌"
+        print(f"{mark} 转种队列自检：run_crabpt 用 db.transferable_to(SITE_CRABPT) 选行")
+        for d in detail:
+            print(f"    {d}")
+    return (not detail), detail
+
+
 def run_crabpt(args):
     """蟹黄堡（crabpt.vip）发布路径。★ 与 `main()` 的乌托邦路径**并列**，不互相调用。
 
@@ -762,10 +891,18 @@ def run_crabpt(args):
       本函数里属于"不变量"的每一处都**明写了它对应 `main()` 的哪一段**，
       将来改一边就能立刻看出另一边要不要跟。
 
-    ★★ 本函数**没有**接进 daemon（`daemon.py` 的 publish 阶段仍只调
-      `publish.py --yes --auto`，即默认的 musopia）。这是**刻意的**：
-      在"发一条、回读一条"验证通过之前，不让它进入每 30 分钟跑一次的无人值守路径。
-      接线是下一步，且那时要同时决定 `PUBLISH_CATEGORY` 与 qB 做种路径。
+    ★★ **已接进 daemon**（2026-09-27，`daemon.py` 的 `publish_crabpt` 阶段，
+      开关 `ENABLE_PUBLISH_CRABPT`）。原注释写的是"刻意不接"，那条**已作废** ——
+      ★ 但当时那段话里另有一条**仍然成立**、且是本次真正被推翻的东西：
+        「在'发一条、回读一条'验证通过之前，不让它进入无人值守路径」。
+      ⇒ 用户 2026-09-27 拍板**先接**（"现在就接，并放宽护栏"），
+        验证改为**事后**做（先发三条看效果）。所以现在的状态是：
+        **开关关着**（`.env` 里 `ENABLE_PUBLISH_CRABPT=false`），
+        接线的**代码**已就位 —— 打开开关即生效，不必再改代码。
+
+    ★★ **队列是"转种队列"而不是"发布队列"**（2026-09-27 用户拍板，见下面
+      那段长注释）：本函数选行用 `db.transferable_to()`，
+      **不是** `db.get_pending_publish()`。这是与乌托邦路**最大的**语义差异。
     """
     import crabpt_site
 
@@ -816,11 +953,81 @@ def run_crabpt(args):
         print("\n★★ 真发模式（没有 --dry-run，也没声明 --auto）：")
         print("   请确认你确实要往**蟹黄堡**提交 —— 发布**不可逆**、无批量撤销。")
 
-    # ---- 闸门与队列：★ 与 main() 同一份判据，不手抄 SQL（ERR-META-03）----
-    tasks = db.get_pending_publish()
+    # ---- ★★★ 队列：**不是** `get_pending_publish()`，是**转种队列** ----------
+    #
+    # 用户 2026-09-27 原话：「需求是【转种】，一条种子不是每个站都要有，
+    #   是**目标站缺、而源站有**的，才转过去」。
+    #
+    # ★★ 为什么这里**不能**用 `db.get_pending_publish()`（改之前就是它，
+    #   而它让队列**恒为空** —— 见下面那段实测）：
+    #   `PENDING_PUBLISH_WHERE` 里那句 `site_status != 'EXISTS'` 问的是
+    #   「**乌托邦**发过没有」，而转种要问的是「**蟹黄堡**发过没有」。
+    #   ⇒ 转种恰恰需要 `site_status = 'EXISTS'`（**有源才可转**），
+    #     与那句 WHERE **方向相反** ⇒ 拿它当队列 = 一条都选不出来（实测 0 条）。
+    #
+    # ★★★ 为什么**不**去改 `PENDING_PUBLISH_WHERE` 那句（那是最自然的"修法"，
+    #   而它是错的）：那条 WHERE 被**两个消费者**共用 —— `main()`（乌托邦）
+    #   和本函数（蟹黄堡）。乌托邦靠那句拿"还没发过的新活"。
+    #   ⇒ 为蟹黄堡把 `!=` 改成 `=`，乌托邦队列立刻**全空**。
+    #   **改一条共用判据 = 静默改掉另一个消费者的行为**（它不会报错，
+    #     只会表现为"乌托邦不再发新种"，而日志里一切正常）。
+    #   ⇒ 正确做法：判据本身**有名字**（`db.transferable_to()`），
+    #     而不是把 SQL **手抄**进这里（手抄 = `ERR-META-03` 的漂移形状：
+    #     将来闸门改了、这里没跟，两边静默分叉）。
+    #
+    # ★★ 忘记"排除已发过蟹黄堡的"会怎样（**这是本条最危险的失败模式**）：
+    #   下面 `site_publish` 的判重**拦不住它** —— 那个判重问的是
+    #   "**蟹黄堡**发过没有"，对"这条在**乌托邦**发过"一无所知。
+    #   ⇒ 结果是把乌托邦已发的那批**反复搬**到蟹黄堡 = **静默多发**。
+    #     多发**不可撤销**（蟹黄堡没有批量删种），而少发只是补一次。
+    #   ⇒ 所以这条判据必须**是函数**、必须**有阴性对照**（见
+    #     `selftest_crabpt_transfer_queue()`：把筛选去掉，自检**必须**报红）。
+    tasks = db.transferable_to(db.SITE_CRABPT)
     if not tasks:
-        print("💡 当前没有需要发布的任务（`PENDING_PUBLISH_WHERE`）。")
+        print("💡 当前没有可转的种（源站有、蟹黄堡没有的）——"
+              f"判据 = `{db.CROSS_SITE_DEDUP_WHERE}` + 蟹黄堡无记录。")
         return
+
+    # ---- ★ 可执行断言：转种队列**必须**是乌托邦发布队列的**子集** ----------
+    #
+    # ★ 为什么需要它（这是**推理**，不是上面那条 SQL 自己保证的东西）：
+    #   本节开头论证过「能上乌托邦 ⇒ 已过闸门④ `transfer_rule='ALLOW'`」，
+    #   所以转种路**不必**再查一次 ALLOW。但那段是**推理** ——
+    #   一旦将来有人让某条种子绕过 `publish.py` 上站（比如手工 `set_site_id`），
+    #   `site_status='EXISTS'` 就**不再蕴含** ALLOW，而转种路会照转。
+    #   ⇒ 把那条推理**变成断言**：跑一次真实查询，把差集**报出来**。
+    #
+    # ★★ 为什么是断言（打印 + 非零退出）而不是 `sys.exit(0)` 静默通过：
+    #   本项目的纪律是"判据要接到能让人看见的地方"。这里**不拦**执行
+    #   （拦住会让一条`NEED_CONFIRM`把整批卡死），而是**大声报出来** ——
+    #   它是一条**应当恒为空**的差集。非空 = 有东西违反了推理，要人看一眼。
+    _gaps = []
+    try:
+        _pend = {(t.get("info_hash") or "") for t in db.get_pending_publish()}
+        _on_muso = {(t.get("info_hash") or "") for t in db.get_published(
+            torrent_id=None, only_with_cover=False)}
+        if _on_muso:
+            _con = db.connect()
+            _rows = _con.execute(
+                "SELECT info_hash, transfer_rule FROM tasks "
+                f" WHERE {db.CROSS_SITE_DEDUP_WHERE} "
+                "   AND (transfer_rule IS NULL OR transfer_rule != 'ALLOW')"
+            ).fetchall()
+            _con.close()
+            _gaps = [(r[0], r[1]) for r in _rows]
+    except Exception as e:  # noqa: BLE001
+        # ★ 断言自身出错**不许**装成"通过"（`ERR-META-14`：兜底值不许冒充真结果）。
+        print(f"⚠️  子集断言**没能跑起来**（不是通过）：{e}")
+    if _gaps:
+        print("\n" + "!" * 60)
+        print(f"★★ 转种队列里有 {len(_gaps)} 条**没标 ALLOW**（应当恒为 0）——")
+        print("   它们能上乌托邦，说明闸门④当年被绕过了（或有人手工标了 site_status）。")
+        print("   ★ 本次**不拦**（拦住会把整批卡住），但请人工过一遍：")
+        for h, rule in _gaps[:10]:
+            print(f"      {h[:12]}  transfer_rule={rule!r}")
+        if len(_gaps) > 10:
+            print(f"      …另有 {len(_gaps) - 10} 条")
+        print("!" * 60)
 
     # ★★ `--only` 给了 ⇒ 只发点名的；**没给** ⇒ 按队列（= 无人值守那条路）。
     #    ★ 两条路的**其余部分完全一样**（下面的预检、提交、落库都不分叉），
@@ -833,27 +1040,31 @@ def run_crabpt(args):
         absent = [w for w in want if not any(h.startswith(w) for h in in_queue)]
 
         print("\n" + "=" * 60)
-        print(f"★ --only：点名 {len(want)} 个 ⇒ 命中队列 {len(hit)} 条")
+        print(f"★ --only：点名 {len(want)} 个 ⇒ 命中转种队列 {len(hit)} 条")
         print("=" * 60)
         for t in hit:
             print(f"   ✅ {(t.get('info_hash') or '')[:12]}  {t.get('formatted_title')}")
         for w in absent:
-            print(f"   ❌ {w} 不在待发布队列里（被闸门拦下 或 hash 打错）")
+            print(f"   ❌ {w} 不在转种队列里（被闸门拦下 / 已发过 / hash 打错）")
         if absent:
-            # ★ 同一份判据（`explain_not_queued`），不另写一套。
-            #   ★ 蟹黄堡最可能撞上的是闸门④：皇后的 `transfer_rule`
-            #     —— 我们在蟹黄堡发之前**必须先确认皇后允许转载**。
-            print("\n   ★ 逐条查为什么没进队列（同一份判据，不做手抄）：")
+            # ★ 同一份判据（`explain_not_transferable`），不另写一套。
+            print("\n   ★ 逐条查为什么没进转种队列：")
             for w in absent:
-                print(f"      {w}: {explain_not_queued(w)}")
+                for line in explain_not_transferable(w):
+                    print(f"      {line}")
         if not hit:
-            sys.exit("❌ --only 与队列**零交集** ⇒ 拒绝执行（不会去发队列里的别的）")
+            sys.exit("❌ --only 与转种队列**零交集** ⇒ 拒绝执行（不会去发队列里的别的）")
     else:
         # ★ 无人值守那条路：按队列取。★ `--limit` 与乌托邦同义（截前 N 条）。
         hit = list(tasks)
         print("\n" + "=" * 60)
-        print(f"★ 无 --only ⇒ 按发布队列取（无人值守路），队列 {len(hit)} 条")
+        print(f"★ 无 --only ⇒ 按**转种**队列取（无人值守路），队列 {len(hit)} 条")
         print("=" * 60)
+        for t in hit[:12]:
+            print(f"   · {(t.get('info_hash') or '')[:12]}  "
+                  f"{(t.get('formatted_title') or '')[:64]}")
+        if len(hit) > 12:
+            print(f"   …另有 {len(hit) - 12} 条")
 
     # ---- 预检：★ 与 main() 同一套（缺封面 / 种子文件 / 无 log）----
     valid, blocked = [], []
@@ -1069,7 +1280,14 @@ def main():
     #   ★ 判据 = **阴性对照也要跑**（见 `selftest_crabpt_isolation` 的 docstring）：
     #     把原 bug 的形状塞回去，自检**必须**报错。没做过阴性对照的自检不算验证过。
     if args.selftest:
-        ok, _ = selftest_crabpt_isolation()
+        ok1, _ = selftest_crabpt_isolation()
+        ok2, _ = selftest_crabpt_transfer_queue()
+        # ★ 两条判据**都要**跑（`and` 而不是 `or`）—— 它们是**独立**的失效模式：
+        #   ① 碰了乌托邦的列（"发一条污染四个判据"）
+        #   ② 队列取错（"静默多发、不可撤销"）
+        #   ★ 用 `or` 的话，一条报红时另一条**根本没跑**，而"没跑"与"通过"
+        #     在输出上应当长得不一样（`ERR-META-14`：兜底不许冒充真结果）。
+        ok = ok1 and ok2
         # ★★ 必须 `sys.exit`，**不能 `return`** —— `main()` 是被
         #   `if __name__ == "__main__": main()` 调的，那个写法的返回值**会被丢掉**
         #   ⇒ 退出码恒为 0 ⇒ **自检报红也没人看得见**（阴性对照实测踩到这一条）。

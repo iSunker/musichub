@@ -1230,3 +1230,125 @@ def site_cover_url_of(info_hash, site=SITE_MUSOPIA):
       （用户 2026-09-25 明确否掉了这个做法）。
     """
     return site_publish_get(info_hash, site)[2] or ""
+
+
+# ── ★★★ 跨站去重：这条已经在**别的**站上发过了吗（2026-09-27 用户拍板）────
+#
+# ★ 用户原话：「需求是【转种】，一条种子不是每个站都要有，是**目标站缺、
+#   而源站有**的，才转过去」。⇒ 蟹黄堡的发布队列**不该**由
+#   `PENDING_PUBLISH_WHERE` 单独决定 —— 那条 WHERE 里
+#   `site_status != 'EXISTS'` 问的是「**乌托邦**发过没有」，
+#   而蟹黄堡要问的是「**蟹黄堡**发过没有」，两者**本来就不是同一个问题**。
+#
+# ★★ 为什么必须写成判据而不是靠 WHERE（这是关键，别简化掉）：
+#   `PENDING_PUBLISH_WHERE` 被 `get_pending_publish()` 用，而它的消费者
+#   **有两个**：`publish.py` 的**乌托邦**路径（`main()`）与**蟹黄堡**路径
+#   （`run_crabpt()`）。★ 两侧需要互斥的集合：
+#     · 乌托邦：要 `tasks.site_status != 'EXISTS'`（**乌托邦**还没发）
+#     · 蟹黄堡：要 **`tasks.site_status = 'EXISTS'`**（**乌托邦已发**＝有源可转）
+#       **且** `site_publish(site='crabpt')` 无记录
+#   ⇒ 若为了蟹黄堡去改那句 WHERE，乌托邦队列立刻**全空**（它要靠那句拿新活）。
+#     **动的是一条被两个消费者共用的判据 ⇒ 改它 = 静默改掉另一个消费者的行为。**
+#   这和 `ERR-META-03` 里"两处各写一份 SQL 必然漂移"是**同一形状的反面**：
+#   共写一份**判据**没错，错在**两个消费者要的集合不同** ⇒ 分叉点必须显式落
+#   在**消费侧**，而且**判据本身**要有名字（就是本函数），不能内联进 `for`。
+#   ★★ 更要命的是：忘记这个筛选**不报错**。去重忘了写，表现是"蟹黄堡照发"，
+#      而 crabpt 的 `site_publish` 判重**拦不住** —— 它判的是"**蟹黄堡**发过没有"，
+#      对"这条在**乌托邦**发过"一无所知。⇒ Jellyfin 种子里乌托邦已发过的那批
+#      会被**重复搬**到蟹黄堡。这是**静默多发**，不是静默少发 —— 多发不可撤销。
+#
+# ★ 为什么不需要 `annotate_transfer_rule` 那条 ALLOW 白名单：
+#   这条路径的**上游**是 `tasks.site_status = 'EXISTS'`，而"能上乌托邦"
+#   本身就已经过过 `PENDING_PUBLISH_WHERE` 的闸门④（`transfer_rule='ALLOW'`）。
+#   ⇒ 再查一次是**冗余**，而且会引入一个假判据（见 `crabpt_rule_gaps()`）。
+#   ★ 但这是**推理**，不是 `CROSS_SITE_DEDUP_WHERE` 自己保证的 ——
+#     所以 `run_crabpt()` 里另有一条**可执行**的断言，见那里的 `rule_gaps`。
+CROSS_SITE_DEDUP_WHERE = (
+    "site_status = 'EXISTS' AND site_torrent_id IS NOT NULL AND site_torrent_id != ''"
+)
+
+
+def is_transferable_to(info_hash, site=SITE_CRABPT):
+    """★ **转种判据**：这条能不能从**别的**站转去 `site`。
+
+    返回 `(ok, why)`：
+      · `ok=True`  ⇒ 该转，且**必须**转（`site` 上还没有）
+      · `ok=False` ⇒ 不该转，`why` 是给**人**看的原因（`run_crabpt()` 的
+        `--only` 零交集报文要用它，见 `explain_not_queued` 的同款纪律）
+
+    ★★ 判据**逐条可查**（`why` 说的就是哪一条没过），不是"筛完算数"：
+      ① 源站（乌托邦）上**有**这条 —— 转种的前提是"有源"。
+         ★ 用 `tasks.site_status='EXISTS'` 判而不是 `site_publish(site='musopia')`
+           —— 两者**现在**同义（`sync_opencd_tid.py` 只往 `site_publish` 写，
+           而 `site_status` 是它的**旧镜像列**），但只有 `tasks.site_status`
+           是 `CROSS_SITE_DEDUP_WHERE` 唯一能放进**同一条 SQL** 的形态。
+           ★ 代价：`why` 里只能写"源站没有"，说不出更细的（哪个列空）。
+             这是刻意的 —— 细化到列名会让**两个**消费者（SQL 与这里的报文）
+             各写一份判据（`ERR-META-03` 的漂移形状）。
+      ② `site` 上**没有**这条 —— 已经有了就不叫"转种"叫"重复"。
+    """
+    if not info_hash:
+        return False, "info_hash 为空"
+    src = site_status_of(info_hash, SITE_MUSOPIA)
+    # ★ 注意用 `!= 'EXISTS'` 而不是 `is None`：`UNKNOWN` 与 `None` **都**表示
+    #   "源站上没这条"（`None` = 没记录，`UNKNOWN` = 记录说不知道）——
+    #   两者在"有没有源"这个问题上**答案相同**，所以这里可以合并。
+    #   ★ 但**报文**必须区分（`ERR-META-14`：兜底值不许和真实结果混着报）。
+    if src != "EXISTS":
+        got = site_publish_get(info_hash, SITE_MUSOPIA)
+        if got[1] is None:
+            return False, "源站（乌托邦）没有这条的记录（`site_publish` 里查无此行）"
+        return False, f"源站（乌托邦）上不是 EXISTS 而是 {src!r} ⇒ 没有可转的源"
+    dst_status = site_status_of(info_hash, site)
+    if dst_status is not None:
+        # ★★ 这里**必须**区分"记录在但 id 空"（写坏了）与"正常已发"，
+        #   否则一条写坏的记录会被当成"已发"而**永远拦着**这条种子
+        #   （`ERR-META-14` 的经典形状：兜底值与真实结果混在一起）。
+        if not site_torrent_id_of(info_hash, site):
+            return False, (f"目标站（{site}）**有记录但 torrent_id 为空** ⇒ "
+                           f"记录坏了，需人工核（状态 {dst_status!r}）")
+        return False, f"目标站（{site}）上已有（id={site_torrent_id_of(info_hash, site)}）"
+    return True, f"源站有（乌托邦）、目标站（{site}）没有 ⇒ 该转"
+
+
+def transferable_to(site=SITE_CRABPT):
+    """★ 转种队列：源站有、目标站没有的全部行。
+
+    ★ 返回**完整 task 行**（`TASK_FIELDS`），因为调用方（`publish.py`）
+      接着要用它渲染表单 —— 只给 hash 会逼调用方再查一次，
+      而"再查一次"就会出现**两份 WHERE**（`ERR-META-03`）。
+
+    ★ 排序：`updated_at` 升序（与 `get_published()` 同口径 —— 老的先转，
+      不因为新行插队而永远轮不到）。
+    """
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT {TASK_FIELDS} FROM tasks "
+        f" WHERE {CROSS_SITE_DEDUP_WHERE} "
+        f"   AND info_hash NOT IN "
+        f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?) "
+        f" ORDER BY updated_at",
+        (str(site),),
+    )
+    rows = _rows_to_dicts(cur)
+    conn.close()
+    return rows
+
+
+def count_transferable_to(site=SITE_CRABPT):
+    """★ 转种队列的**计数**。★★ 必须与 `transferable_to()` 用**同一个**
+    `CROSS_SITE_DEDUP_WHERE` 字符串 —— 理由逐字同 `count_stale()` 那段：
+    一旦探针（计数）和实际筛选漂移，就会变成"探针说有活 → 一条都选不出来 →
+    探针还说有活"的**静默空转**，不报任何错。
+    """
+    conn = connect()
+    n = conn.execute(
+        f"SELECT COUNT(*) FROM tasks "
+        f" WHERE {CROSS_SITE_DEDUP_WHERE} "
+        f"   AND info_hash NOT IN "
+        f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?)",
+        (str(site),),
+    ).fetchone()[0]
+    conn.close()
+    return n
