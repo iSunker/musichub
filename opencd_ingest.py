@@ -368,6 +368,33 @@ def _check():
         fh.write(b"d4:infod4:name1:xee")
 
     NOW = datetime(2026, 9, 21, 12, 0, 0, tzinfo=timezone.utc)
+
+    # ★★★ 闸门② 的夹具必须锚在 **`datetime('now')`**（= 闸门 SQL 用的那个时间源），
+    #      不能锚在写死的 `NOW` —— 见下面 `GATE2_NOW` 的长注释（`ERR-META-01`）。
+    #
+    # ★ 判据：**夹具与它要测的那句 SQL 必须在同一个时间源上。**
+    #   闸门② 的 SQL 是 `opencd_added_at <= datetime('now', '-7 days')`
+    #   ⇒ 那句话里的"现在"是**真实墙钟**（每次跑都不一样）。
+    #   而原先的夹具是 `NOW - timedelta(days=1)`，`NOW` 写死成 2026-09-21
+    #   ⇒ 落库值 2026-09-20 在**写下那天**确实"很新"，
+    #     但**今天**（2026-09-27）它已经比 `datetime('now','-7 days')` 还旧
+    #     ⇒ 情形A（"1 天前 ⇒ 不在队列"）**必然误报**，且误报那天离写下的日子
+    #       越远，越不可能被人联想到是这个原因。
+    #
+    #   ★★ 实测（2026-09-27）：`datetime('now','-7 days')` = 2026-09-20 13:19，
+    #      而夹具落库 = 2026-09-20 12:00 ⇒ `12:00 <= 13:19` 成立 ⇒ 被放行
+    #      ⇒ 自检报「❌ 发布日期 1 天前 ⇒ 不在队列」。
+    #      这不是生产逻辑错，是**夹具过期**。
+    #
+    #   ⇒ 修法：GATE2_NOW 直接从 `datetime('now')` 取（**同一个源**）。
+    #     它只用于**闸门② 相关的夹具与断言**；别的夹具（`fetched_at` 断言、
+    #     `publish_after` 等）继续用写死的 `NOW` —— 那些测的是"写进去的值
+    #     是不是我当时传的那个"，与墙钟无关，本来就该写死。
+    _g2 = db.connect().execute("SELECT datetime('now')").fetchone()[0]
+    GATE2_NOW = datetime.strptime(_g2, TS_FMT)
+    GATE2_EDGE = 7
+    print(f"  ★ 闸门② 夹具基准 GATE2_NOW = {GATE2_NOW}（取自 `datetime('now')`，"
+          f"与闸门 SQL 同源；写死的 NOW = {NOW.strftime(TS_FMT)} 只用于非墙钟断言）")
     # ★ 样本里自带的 infohash（实测）。取不到就用不着"hash 相符"那条分支。
     ALLOW_H = str(ALLOW.get("info_hash") or "").strip().lower() or "a" * 40
     DENY_H = str(DENY.get("info_hash") or "").strip().lower() or "b" * 40
@@ -451,14 +478,20 @@ def _check():
 
     print("\n⑤ ★★ 闸门② **改锚到皇后的发布日期**（不再是「抓取时刻 + 3 天」）")
     ih = "e" * 40
-    # ★ 情形 A：发布日期**很新**（1 天前）⇒ 7 天窗口未满 ⇒ 不在队列
-    fresh = (NOW - timedelta(days=1)).strftime(TS_FMT)
+    # ★ 夹具基准 = GATE2_NOW（取自 `datetime('now')`，与闸门 SQL 同源）。
+    #   原先写 `NOW - timedelta(days=1)` ⇒ 会随日子推移变成"早就够了"（见上面长注释）。
+    # ★ 边界要**离开等号**：`<=` 是含等的，所以"刚好 7 天"会**在**队列里。
+    #   ⇒ 用 7-1=6 天造"未满"、7+1=8 天造"已满"，两边各留 1 天余量，
+    #     这样即使夹具基准与 SQL 的真实 `now` 差几秒也不会翻面。
+    # ★ 情形 A：发布日期**很新**（6 天前）⇒ 7 天窗口未满 ⇒ 不在队列
+    fresh = (GATE2_NOW - timedelta(days=GATE2_EDGE - 1)).strftime(TS_FMT)
     ingest(ALLOW, raw_tid="t5", info_hash=ih, torrent_file=tf,
            qb_seed_days=None, now=NOW, opencd_added_at=fresh)
     inq = any(t["info_hash"] == ih for t in db.get_pending_publish())
-    chk("★ 发布日期 1 天前 ⇒ SUCCESS 但**不在**队列（7 天未满）", not inq)
+    chk(f"★ 发布日期 {GATE2_EDGE - 1} 天前 ⇒ SUCCESS 但**不在**队列"
+        f"（{GATE2_EDGE} 天未满）", not inq)
     # ★ 情形 B：发布日期 **8 天前** ⇒ 必须被选出
-    old = (NOW - timedelta(days=8)).strftime(TS_FMT)
+    old = (GATE2_NOW - timedelta(days=GATE2_EDGE + 1)).strftime(TS_FMT)
     conn = db.connect()
     conn.execute("UPDATE tasks SET opencd_added_at=? WHERE info_hash=?", (old, ih))
     conn.commit(); conn.close()
@@ -476,6 +509,98 @@ def _check():
         f"实得 {r2[13]!r}")
     inq3 = any(t["info_hash"] == ih2 for t in db.get_pending_publish())
     chk("★★ 发布日期为空 ⇒ **不在**队列（空 ⇒ 拦，**判据反转**）", not inq3)
+
+    # ★★★ 情形 D —— **阴性对照**（`ERR-META-18`）：证明上面那几条**真的在测闸门②**。
+    #
+    #   ★ 为什么必须有这一条（这是本节最有价值的一条）：
+    #     情形A（"未满 ⇒ 不在队列"）**天然是个"默认就通过"的判据** ——
+    #     只要某处把这条行拦下来（或行压根没进库、或被别的闸门挡住），
+    #     它就会**通过**，而闸门② **完全可能是不存在的**。
+    #     ⇒ 上面"情形A 通过"这件事，**推不出**"闸门② 在工作"（`ERR-META-01`：
+    #       判据看着对、测的却是别的东西）。
+    #
+    #   ★ 做法：把闸门② 那句 SQL **独立地**、**注入成永真**（`AND 1=1`）跑一遍
+    #     —— 即**模拟"闸门② 不存在"**。此时同一行**必须**变得能被选出。
+    #     · 若"注入永真后仍在队列外" ⇒ 说明拦住它的是**别的条件**（或它根本没进库）
+    #       ⇒ 上面的情形A 是个**假通过** ⇒ 自检必须**报错**。
+    #     · 若"注入永真后在队列里" ⇒ 情形A 的"不在"**确实**是闸门②造成的 ✅
+    #
+    #   ★ 注入方式：**不动生产 SQL**，只在自检里把 `db.PENDING_PUBLISH_WHERE`
+    #     里的闸门② 那一段**字符串替换**掉，再自己拼一条查询。
+    #     ⇒ 生产代码一行不改（这是本节的纪律：只动自检段）。
+    print("\n⑤-D ★★★ 阴性对照：把闸门② 注入成永真 ⇒ 同一行**必须**变得能选出")
+    # ★★ 字面量**必须从 `(` 开始，不能带前导 `AND `** —— 见下面注入那段的长注释。
+    gate2_sql = ("(opencd_added_at IS NOT NULL AND opencd_added_at != '' "
+                 "     AND opencd_added_at <= datetime('now', '-7 days'))")
+    chk("闸门② 那句 SQL 在 PENDING_PUBLISH_WHERE 里找得到（否则对照组无效）",
+        gate2_sql in db.PENDING_PUBLISH_WHERE)
+    # ★ 注入：把闸门② 整段换成永真（= 闸门② 不存在）
+    #   ★★ 替换串**只要在开头留一个空格**，**绝不能自带 `AND`**。
+    #      实测原文的两侧边界（别凭印象）：
+    #        · 左：`... != 'EXISTS')` 与 `AND (opencd_added_at ...` **有空格**
+    #        · 右：本段结尾是 `))`，而下一句是 `AND (opencd_tid ...` ——
+    #          也就是说**原文本段里就带着那个 `AND`**（段尾是 `... -7 days'))`
+    #          后面紧跟 `AND`，那个 `AND` 属于本段替换串的**右边**）。
+    #      ⇒ `"AND 1=1"` → 拼出 `1=1AND`（`unrecognized token: "1AND"`）
+    #        `" 1=1 "`  → 拼出 `1=1 AND` 前少空格 → 实测是 `... 1=1 AND AND (...`
+    #                     （多一个 `AND`）⇒ `near "1": syntax error`
+    #        `" 1=1 AND "` → 变成 `1=1 AND AND (...` 同上 ✗
+    #      ⇒ 正解：**`" 1=1"`**（只留前导空格，其余交给原文自己的 `AND`）。
+    #      ★ 教训：**替换 SQL 片段前先把两侧边界逐字符看清** —— 我是连错三次
+    #        （1AND / near "1" / AND AND）才去打印原文的，那三行本可以省掉。
+    # ★★★ 这里连错三次，把**根因**记下来（免得下次重犯）：
+    #   原文（实测，见下面那行 repr）是：
+    #     `... != 'EXISTS') AND (opencd_added_at ... '-7 days'))AND (opencd_tid ...`
+    #                            ↑ 这个 AND 属于**连接词**，不属于闸门② 本体
+    #                                                          `))` 后**紧贴** AND
+    #   ⇒ 原先字面量写成 `"AND (opencd_added_at ..."`（**自带前导 AND**）⇒
+    #     替换时会把那个**连接用的 `AND` 一起吃掉** ⇒ 剩下的 SQL 变成
+    #     `... != 'EXISTS') 1=1AND (opencd_tid ...`（左少 AND、右贴成 `1AND`）。
+    #     · 补前导 `AND`  → `AND 1=1AND` ⇒ `unrecognized token: "1AND"`
+    #     · 不补（只空格）→ `) 1=1AND`   ⇒ 还是 `1AND`
+    #     · 段尾再补 `AND` → `1=1 AND AND` ⇒ `near "ANDAND"`
+    #   ⇒ **正解是把字面量的边界改对**（从 `(` 开始、到 `))` 为止，不含连接 AND），
+    #     这样替换后原文自己的两个 `AND` 都留着，注入成 `AND 1=1 AND` 天然成立。
+    #   ★ 一般化：**做 SQL 字符串替换前，先把要替换的那一段的**两个边界**逐字符
+    #     打印出来**（`repr` 一下就能看见 `))AND` 这种粘连）—— 靠"看着像"改
+    #     会连错三次，而那三次本可以一次都不发生（`ERR-META-01` 的形状）。
+    # ★★★ 最终正解（第 5 次才对，把边界一次说清）：
+    #   原文粘连处是 `...'-7 days'))AND (opencd_tid ...` ——
+    #   闸门② 的 `))` 之后**紧贴**下一个连接词 `AND`（**没有空格**）。
+    #   ⇒ 字面量从 `(` 起到 `))` 止（不含连接 AND）是对的，
+    #     但**替换串必须以空格结尾**，否则新串会与那个紧贴的 `AND` 粘成 `1=1AND`。
+    #   ⇒ `replace(gate2_sql, "1=1 ")` —— 前导空格由原文的 ` AND ` 提供，
+    #     尾部空格由我们补上。实测通过后才写进注释（不是推导出来的）。
+    injected = db.PENDING_PUBLISH_WHERE.replace(gate2_sql, "1=1 ")
+    chk("注入确实改动了 SQL（否则测的还是闸门② 本身）",
+        injected != db.PENDING_PUBLISH_WHERE)
+    conn = db.connect()
+    # ★ 把 ih 摆回"未满"（6 天前）—— 即情形A 的状态
+    conn.execute("UPDATE tasks SET opencd_added_at=? WHERE info_hash=?",
+                 (fresh, ih))
+    conn.commit()
+    # ★★ 查询形状必须与**生产**一致：生产是 `WHERE {PENDING_PUBLISH_WHERE}`
+    #   （**没有**前置 `AND`，见 `db.get_pending_publish()`）。
+    #   我原先写成 `WHERE info_hash=? AND {sql}` ⇒ 多一个连接词 `AND`，
+    #   与注入后的 SQL 首尾的 `AND` 叠加 ⇒ `1AND`（**第 4 次踩同一个坑**）。
+    #   ⇒ 这里改成把 `info_hash=?` 作为**一个子条件并入 SQL 开头**，
+    #     保持"整串就是 WHERE 的内容"这个形态。
+    n_real = conn.execute(
+        f"SELECT count(*) FROM tasks WHERE info_hash=? AND ({db.PENDING_PUBLISH_WHERE})",
+        (ih,)).fetchone()[0]
+    n_inj = conn.execute(
+        f"SELECT count(*) FROM tasks WHERE info_hash=? AND ({injected})",
+        (ih,)).fetchone()[0]
+    conn.close()
+    # ★ 判据：真口径下选不出（0），注入永真后必须选得出（1）
+    chk("真口径：发布日期未满 ⇒ 选不出（0）", n_real == 0, f"实得 {n_real}")
+    chk("★★ 注入永真后**选得出**（1）⇒ 上面的『选不出』确实是闸门② 造成的",
+        n_inj == 1, f"实得 {n_inj}（若为 0 ⇒ 情形A 是**假通过**，闸门② 可能不存在）")
+    # ★ 恢复：把 ih 放回"已满"，免得影响后面的判据
+    conn = db.connect()
+    conn.execute("UPDATE tasks SET opencd_added_at=? WHERE info_hash=?",
+                 (old, ih))
+    conn.commit(); conn.close()
 
     print("\n⑥ ★ 第一阶段行**不被冲掉**（content_path 永不可碰）")
     ih = "f" * 40
@@ -530,7 +655,7 @@ def _check():
         #   还是日期拦的"（`ERR-META-05`：两个口径不许混）。
         conn.execute("UPDATE tasks SET status=?, opencd_added_at=? "
                      "WHERE info_hash=?",
-                     (st_name, (NOW - timedelta(days=30)).strftime(TS_FMT), ALLOW_H))
+                     (st_name, (GATE2_NOW - timedelta(days=GATE2_EDGE * 4)).strftime(TS_FMT), ALLOW_H))
         n = conn.execute(
             f"SELECT count(*) FROM tasks WHERE info_hash=? AND {db.PENDING_PUBLISH_WHERE}",
             (ALLOW_H,)).fetchone()[0]
@@ -545,7 +670,7 @@ def _check():
     #   （这正是 `db.PENDING_PUBLISH_WHERE` 那句"空 ⇒ 拦"的现场演示）。
     conn.execute("UPDATE tasks SET status='SUCCESS', "
                  "opencd_added_at=? WHERE info_hash=?",
-                 ((NOW - timedelta(days=8)).strftime(TS_FMT), ALLOW_H))
+                 ((GATE2_NOW - timedelta(days=GATE2_EDGE + 1)).strftime(TS_FMT), ALLOW_H))
     conn.commit(); conn.close()
     pending = [t for t in db.get_pending_publish() if t["info_hash"] == ALLOW_H]
     if not pending:
