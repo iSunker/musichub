@@ -537,6 +537,21 @@ MAPPED_TOP_KEYS = ("tags", "medium_sel", "audiocodec_sel", "team_sel",
                    "tracklist")
 
 
+# ★★ 哪些键的**空快照**是"权威结论"（而不是"没抓到"）—— 见 `merge_mapped` 的长注释。
+#
+# ★ 判据（怎么判断一个键该不该进这张表）：问一句 ——
+#   **"皇后页面里这个字段是空的"这件事，快照能不能确定地告诉我？**
+#     · 能（该字段是页面上的**一个明确位置**，抓到空就是空）⇒ 进表。
+#     · 不能（该字段由解析层**多处拼**出来，空更可能是"这次没覆盖到"）⇒ 不进表。
+#   ⇒ `small_descr` / `descr` 是**一个 div**（`<div class="smalltitle">` /
+#     `<div class="divdescr">`）⇒ 能确定 ⇒ 进表。
+#   ⇒ `tags` / `medium_sel` / `audiocodec_sel` / `team_sel` / `tracklist` 是
+#     **映射/多行解析**的产物，空更可能是"映射表里没这一项" ⇒ **不进表**。
+#
+# ★ 只对**皇后行**（`opencd_tid` 有值）生效；非皇后行的 `mapped` 恒为 `{}`。
+EMPTY_SNAPSHOT_IS_AUTHORITATIVE = ("small_descr", "descr")
+
+
 def merge_mapped(task):
     """
     把 `task["mapped_json"]`（`opencd_map.map_all()` 的**证据快照**）解回**顶层键**。
@@ -556,22 +571,50 @@ def merge_mapped(task):
       这里**什么都不改**，行为与改动前完全一致。
     ★ 解析失败会**抛出**（`_load_mapped` 的契约）—— 响亮地坏，不静默当空。
 
-    ★★ 守卫 `mapped[key] not in (None, "")` 对 `small_descr` 的**确切语义**（别读错）：
-      · 皇后页面**写了**副标题 ⇒ 取快照原文，**盖过列**（这正是本次要修的）。
-      · 皇后页面**本来就没写**（实测「齐秦 - 我拿什么爱你」那条，
-        `small_descr_present=False`）⇒ `mapped["small_descr"] == ""`
-        ⇒ **不合并** ⇒ 保留 `task["small_descr"]`（可能是列里已有的值）。
-      ⇒ ⚠️ **已知缺口（不静默）**：这个守卫**无法区分**
-          "皇后本来就没写" 与 "列里存着一个错值（如「全 15 曲」）"——
-        两种情形它都保留列值。对后者，`merge_mapped` **救不了**；
-        要修得**回写列**（`tools/recall_opencd_descr.py`）+ 标脏重推。
-        ⇒ 判据：**"能确定推导出来的"与"只能靠猜的"必须分开处理**——
-          本函数只做前者（直接从快照取值），后者留给回写工具显式做。
+    ★★ 守卫的**确切语义**（2026-09-27 更正，别按旧文档读）：
+      · 快照**有值**（`mapped[key] not in (None, "")`）⇒ 取快照，**盖过列**。
+      · 快照**是空**：分两种键，**语义相反**，必须分开处理 —— 见下面的
+        `EMPTY_SNAPSHOT_IS_AUTHORITATIVE`。
+
+    ★★★ 为什么旧守卫是**错的**（`ERR-DATA-05`，2026-09-27 实测更正）：
+      旧实现一律是 `if key in mapped and mapped[key] not in (None, "")` ⇒
+      **快照为空时保留列值**。它的理由是"要区分'皇后本来就没写'与'列里是错值'"。
+      ⇒ 但那个理由**不成立**，因为：对**皇后行**（`opencd_tid` 有值），
+        `mapped_json` 就是**那次抓页面的权威快照** ⇒ 快照里空 = **皇后当时确实没写**。
+        "列里是错值"**正是要修的那件事**，不是要保护的对象。
+      ⇒ 旧守卫的实际后果：列里若存着「全 15 曲」这种错值，而皇后**真的没写**副标题，
+        `merge_mapped` 会**保留错值**并把它提交上站 —— 也就是把"错值"当成"皇后的意思"
+        推出去。那正是 `ERR-META-14` 的形状（空来源不许印成成功）。
+      ⇒ 判据：**"快照为空"对皇后行是一个**结论**（皇后没写），不是一个"不知道"。**
+        把它当成"不知道"去退回列值，等于用一个错值去填一个已知的空。
+
+    ★ `EMPTY_SNAPSHOT_IS_AUTHORITATIVE` 只对**这两列**成立，且只对**皇后行**成立：
+      · `small_descr` —— 皇后 `<div class="smalltitle">` 没写 ⇒ 就该空（实测 4 条：
+        15974 齐秦 / 17264 黄清元 / 17265 醉民乐 / 17294 爱是我们共同的声音，
+        三者列/快照/站点**同为 `''`** ⇒ 正确留空）。
+        ★ 但若列里是「全 N 曲」（`scan` 旧路径的产物），**必须被空快照盖掉**。
+      · `descr`（简介正文）—— 同上：皇后的 `divdescr` 没正文 ⇒ 该空。
+        ★ 注意 `descr` 的**渲染**有 `task.get("descr") or task.get("opencd_descr") or ""`
+          兜底（`descr.py:630`），所以这里盖成 `''` 是**有意的**：它表达"快照说没有"。
+      ⇒ 别的键（`tags`/`medium_sel`/`audiocodec_sel`/`team_sel`/`tracklist`）
+        **不适用**：那些是"快照没抓到"更可能等于"解析没覆盖到"，空值不该盖掉列
+        （旧的保守行为对它们仍然是对的）。⇒ 只白名单这两列，不做通用化。
+
+    ★ 对**非皇后行**（`opencd_tid` 空、qB 本地抓轨路）`mapped` 恒为 `{}`
+      ⇒ 下面的 `key in mapped` 为假 ⇒ **一律不动**，行为与改动前完全一致。
     """
     mapped = _load_mapped(task)
+    is_opencd = bool((task or {}).get("opencd_tid"))
     for key in MAPPED_TOP_KEYS:
-        if key in mapped and mapped[key] not in (None, ""):
-            task[key] = mapped[key]
+        if key not in mapped:
+            continue
+        val = mapped[key]
+        if val not in (None, ""):
+            task[key] = val
+        elif is_opencd and key in EMPTY_SNAPSHOT_IS_AUTHORITATIVE:
+            # ★ 皇后行 + 权威空 ⇒ **盖成空**（不是"保留列值"）。
+            #   见上面 `ERR-DATA-05`：快照空 = 皇后没写，是结论不是未知。
+            task[key] = val if val is not None else ""
     return task
 
 
