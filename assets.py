@@ -4,8 +4,10 @@
 run.py 里这些逻辑原本是内联的，backfill_covers.py 也需要同一套（补历史缺失的封面），
 所以抽出来共用，避免两处实现慢慢跑偏。
 """
+import json
 import os
 import re
+from datetime import datetime
 
 import requests
 
@@ -288,7 +290,163 @@ def _lsky_extract_url(data):
     return ""
 
 
-def upload_to_lsky(image_path, retries=2, api_url=None, token=None):
+def _lsky_base():
+    """Lsky 接口 base（`https://img.crabpt.vip/api/v1`），去尾斜杠。"""
+    return (config.LSKY_API_URL or "").rstrip("/")
+
+
+def lsky_token_path():
+    """token 落盘路径。★ 默认值在这里算 —— `config.LSKY_TOKEN_FILE` 的默认值
+    留空是**刻意**的（`config.py` 里 `DATA_DIR` 定义在它后面，那里拼会
+    `NameError`，见那条注释）。"""
+    p = (config.LSKY_TOKEN_FILE or "").strip()
+    if p:
+        return p
+    return os.path.join(config.DATA_DIR, "lsky_token.json")
+
+
+def lsky_load_token():
+    """读**缓存**的 token（上次换来的）。★ 读不到一律返 `""`，绝不抛。
+
+    ★★ 为什么只认 `token` 字段、不认别的：
+      这是**我们的**文件（自己写的），格式由 `lsky_save_token` 定死。
+      多认一种形状 = 以后换个写法也"能读"⇒ 坏了看不出来（`ERR-META-14`）。
+    """
+    p = lsky_token_path()
+    if not os.path.exists(p):
+        return ""
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            d = json.load(fh)
+    except (OSError, ValueError) as e:
+        print(f"    [Lsky token] 缓存读不出（{type(e).__name__}: {e}）⇒ 当作没有")
+        return ""
+    t = d.get("token") if isinstance(d, dict) else None
+    return t.strip() if isinstance(t, str) else ""
+
+
+def lsky_save_token(token):
+    """落盘 token（原子替换）。★ **返回值表示"存住了没有"**，不是"token 对不对"。"""
+    if not (token or "").strip():
+        return False
+    p = lsky_token_path()
+    try:
+        os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            # ★ 只存 token，**不存**邮箱/密码 —— 那两个在 `.env` 里，
+            #   多存一份 = 多一个泄漏面，而它换来的好处是零。
+            json.dump({"token": token.strip(),
+                       "obtained_at": datetime.now().isoformat(timespec="seconds")},
+                      fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, p)
+        try:
+            os.chmod(p, 0o600)          # ★ 凭据文件：只给主人读写
+        except OSError:
+            pass
+        return True
+    except OSError as e:
+        print(f"    [Lsky token] 写不进 {p}：{type(e).__name__}: {e}")
+        return False
+
+
+def lsky_login(email=None, password=None, api_url=None, timeout=30):
+    """用**账号密码换 token**（`POST <base>/tokens`）。返回 `(token, 说明)`。
+
+    ★★ 逐字对齐站点文档（请求体字段 `email` / `password`，响应 `data.token`）：
+      不另起字段名 —— 下次有人对文档核时时能一眼对上。
+
+    ★★★ 为什么必须有这个函数（本次实测的根因，别删掉这段）：
+      `.env` 里那个 714 字符、以 `XSRF-TOKEN=` 开头的值**不是** token，
+      而是**浏览器 Cookie 串**。它"看起来配好了"（键在、非空、很长），
+      打上传接口却回 **401**。★ 而 `upload_to_lsky` 只在**真发布那一刻**
+      才用它 ⇒ 这个错一直**潜伏**着，直到"要发三条"时才炸。
+      ⇒ 人手从网页复制凭据这条路上**根本没有判据**；把换 token 做成
+        一步**可执行**的动作之后，凭据对了就是对了、错了当场报 401。
+
+    ★ 成功判据**只有一条**：`HTTP 200` **且** `status` 为真 **且** `data.token` 非空。
+      Lsky 在业务失败时也回 200（`status:false` + `message`）⇒ 只看状态码会把
+      「登录被拒」读成「成功」（`ERR-META-01`：检测方法失效比不检测更危险）。
+    ★★ token **绝不打印**（同 `guard_auto_key` 的纪律：值不进日志，
+      而 `docker logs` 是本项目最容易被抄走的那份）。`说明` 里只出现长度与来源。
+    """
+    email = config.LSKY_EMAIL if email is None else email
+    password = config.LSKY_PASSWORD if password is None else password
+    if not (email or "").strip() or not (password or "").strip():
+        return "", ("没配 LSKY_EMAIL / LSKY_PASSWORD ⇒ **无法换 token**。"
+                    "★ 见 ERR-ENV-02：新增的 .env 键要在 **NAS 上手工加**。")
+
+    url = f"{(api_url or _lsky_base())}/tokens"
+    try:
+        res = requests.post(
+            url,
+            json={"email": email.strip(), "password": password},
+            headers={"Accept": "application/json"},
+            timeout=timeout,
+        )
+    except Exception as e:                                  # noqa: BLE001
+        return "", f"换 token 请求异常：{type(e).__name__}: {e}"
+
+    if res.status_code == 401:
+        return "", ("HTTP 401 —— 邮箱或密码不对（★ 注意：这是**登录**被拒，"
+                    "与'上传时 token 不对'是**两件事**，别混）")
+    if res.status_code == 403:
+        return "", "HTTP 403 —— 管理员关闭了接口功能"
+    if res.status_code == 429:
+        return "", "HTTP 429 —— 超出接口请求配额（★ 别立刻重试，会继续扣）"
+    if res.status_code != 200:
+        return "", f"HTTP {res.status_code} —— {res.text[:150]}"
+    try:
+        d = res.json()
+    except ValueError:
+        return "", f"HTTP 200 但响应不是 JSON：{res.text[:150]}"
+    if not d.get("status"):
+        return "", f"status=false：{str(d.get('message'))[:150]}"
+    tok = ((d.get("data") or {}) if isinstance(d.get("data"), dict) else {}).get("token")
+    if not (tok or "").strip():
+        return "", f"响应里没有 data.token：{res.text[:150]}"
+    return tok.strip(), f"已换到新 token（长度 {len(tok.strip())}）"
+
+
+def lsky_get_token(force=False, allow_login=True, api_url=None):
+    """拿一个**能用的** token，按「缓存 → 换 → .env 里的静态值」顺序。返回 `(token, 说明)`。
+
+    ★★★ 优先级**为什么是这个顺序**（每一条都是踩出来的，别改）：
+      ① **缓存文件**：换 token 会扣**接口配额**（站点文档 429 = 超出请求配额）。
+         每次上传都换一次 = 白扣。⇒ 先看上次换的还在不在。
+      ② **换新的**（`lsky_login`）：只有配了邮箱/密码才走得到。
+      ③ **`.env` 里的 `LSKY_TOKEN`**：★ 放**最后**。它是"人手抄的值"，
+         而本次实测证明人手抄的可以是**完全不相干的东西**（Cookie 串）。
+         ⇒ 它是**兜底**，不是首选 —— 但**保留**它，因为有人可能确实手工配好了
+           （那时不该因为我们多了个换 token 的路就不认它）。
+      ④ 都没有 ⇒ 返 `("", 原因)`，调用方据此**不发布**。
+
+    ★★ `force=True` 的含义是"**跳过缓存**"，**不是**"跳过登录" ——
+      换 token 的第一因是"缓存 401 了"，那时要的正是重新换。
+    ★ 但 `allow_login=False` 时**只读缓存/静态值**，绝不发网络请求
+      （给"只想看看配没配"的诊断用，且它是**零配额**的判据）。
+    """
+    if not force:
+        cached = lsky_load_token()
+        if cached:
+            return cached, f"用缓存 token（{lsky_token_path()}，长度 {len(cached)}）"
+    if allow_login:
+        tok, why = lsky_login(api_url=api_url)
+        if tok:
+            if lsky_save_token(tok):
+                return tok, why + f"；已落盘 {lsky_token_path()}"
+            return tok, why + "（★ 落盘失败，本次仍可用，但下次还要再换）"
+        # ★ 换失败**不立刻放弃** —— 下面还有静态值那条兜底。
+        #   但要**说清**它失败了，否则"兜底顶上了"会被读成"换成功了"。
+        print(f"    [Lsky token] 换 token 没成功：{why}")
+    static = (config.LSKY_TOKEN or "").strip()
+    if static:
+        return static, f"用 .env 里的 LSKY_TOKEN（长度 {len(static)}）—— ★ 兜底路径"
+    return "", "既没有缓存 token、也换不到、`.env` 里的 LSKY_TOKEN 也是空"
+
+
+def upload_to_lsky(image_path, retries=2, api_url=None, token=None,
+                   allow_retoken=True):
     """上传图片到**蟹黄堡的专用图床**（Lsky Pro），返回 URL 或 ""。
 
     ★★ 为什么单独一个函数、不复用 `upload_to_picgo`（2026-09-25 用户要求
@@ -322,10 +480,26 @@ def upload_to_lsky(image_path, retries=2, api_url=None, token=None):
     if not image_path or not os.path.exists(image_path):
         return ""
 
-    token = config.LSKY_TOKEN if token is None else token
+    # ★ `token_arg` 记下"调用方**有没有**显式传" —— 这个区分**必须**留着：
+    #   显式传时我们不能替他换 token（会让传进来的值静默失效），
+    #   而 `token` 变量后面会被 `lsky_get_token()` 的返回值覆盖 ⇒ 分不清了。
+    token_arg = token
+    # ★★ token 的来源：**传进来的** > 缓存 > **换** > `.env` 静态值。
+    #   ★ 2026-09-27 改：原先直接读 `config.LSKY_TOKEN`，而那个值实测是个
+    #     **Cookie 串**（见 `lsky_login` 的 docstring）⇒ 401 且一路沉默到发布那天。
+    #     ⇒ 现在默认走 `lsky_get_token()`（它会**换**一个），
+    #       而"人手抄的值"退到**兜底**位置 —— 保留它，但不指望它。
+    #   ★ 显式传 `token=` 时**不碰网络**（调用方已经自己解决了，别白扣配额）。
+    if token is None:
+        token, tok_why = lsky_get_token(api_url=api_url)
+        print(f"    [Lsky 图床] {tok_why}")
+    else:
+        token = (token or "").strip()
     if not (token or "").strip():
-        print("    [Lsky 图床] 没配 LSKY_TOKEN（空）⇒ **不上传**。"
-              "★ 见 ERR-ENV-02：新增的 .env 键要在 **NAS 上手工加**。")
+        print("    [Lsky 图床] 拿不到可用 token ⇒ **不上传**。"
+              "★ 两条修法：① 往 NAS 的 `.env` 加 `LSKY_EMAIL`/`LSKY_PASSWORD`"
+              "（推荐，程序自己换）；② 或把接口页的 token 填进 `LSKY_TOKEN`。"
+              "见 ERR-ENV-02。")
         return ""
 
     base = (api_url or config.LSKY_API_URL).rstrip("/")
@@ -365,11 +539,32 @@ def upload_to_lsky(image_path, retries=2, api_url=None, token=None):
                     return u
                 last_err = f"响应里没有 data.links.url: {res.text[:150]}"
             elif res.status_code == 401:
-                # ★ 单独认这一条：这是**最可能**的失败（token 过期/抄错），
-                #   而它的修法与别的原因**完全不同**（去 NAS 换 .env）。
-                last_err = ("HTTP 401 授权失败 —— LSKY_TOKEN 不对或已失效。"
-                            "★ 去蟹黄堡「接口」页重新生成 token，"
-                            "再改 **NAS 的 .env**（deploy.sh 不带 .env，见 ERR-ENV-02）")
+                # ★★ 缓存 token 过期 ⇒ **当场重换一次**（2026-09-27 加）。
+                #   ★ 为什么值得单独一条路：缓存文件的存在就是为了省配额，
+                #     而它**必然**会过期。没有这条，"缓存过期"的表现是
+                #     "蟹黄堡永远发不出去、而日志里只有一句 401"
+                #     —— 每次都要人去 NAS 手工删文件才恢复。
+                #   ★ 只在**没有显式传 token** 时才换：显式传 = 调用方自己管，
+                #     我们替他换会让他传进来的值静默失效（`ERR-META-13` 形状）。
+                if (token_arg is None and attempt == 0 and allow_retoken
+                        and lsky_load_token()):
+                    new_tok, why = lsky_login(api_url=api_url)
+                    if new_tok:
+                        lsky_save_token(new_tok)
+                        token = new_tok
+                        headers["Authorization"] = f"Bearer {new_tok}"
+                        last_err = f"401 ⇒ 已重换 token（{why}）并重试"
+                        continue
+                    last_err = ("HTTP 401 授权失败，且**重换也失败** —— "
+                                f"{why}。★ 若没配 `LSKY_EMAIL`/`LSKY_PASSWORD`，"
+                                f"就只能去接口页生成 token 填 `LSKY_TOKEN`"
+                                f"（NAS 的 .env）")
+                else:
+                    last_err = ("HTTP 401 授权失败 —— token 不对或已失效。"
+                                "★ 优先修法：往 NAS 的 `.env` 加 "
+                                "`LSKY_EMAIL`/`LSKY_PASSWORD`（程序自己换）；"
+                                "或去蟹黄堡「接口」页生成 token 填 `LSKY_TOKEN`"
+                                "（deploy.sh 不带 .env，见 ERR-ENV-02）")
             elif res.status_code == 403:
                 last_err = "HTTP 403 —— 蟹黄堡管理员关闭了接口功能"
             elif res.status_code == 429:
@@ -633,3 +828,210 @@ def has_cue(folder_path):
         if any(f.lower().endswith(".cue") for f in files):
             return True
     return False
+
+
+# ==================== Lsky token 链路的自检 ====================
+#
+# ★★ 为什么给这一段写自检（`ERR-META-31` 的形状）：
+#   本次实测的根因是「`.env` 里的凭据**看起来配好了**，实际是个 Cookie 串」。
+#   那种错**没有任何判据会报** —— 键在、值非空、长度可观，只在**真发布那一刻**
+#   才以 401 现形。⇒ 光把代码改对不够，要留一条判据让"链路断了"以后也能看出来。
+#
+# ★ 判据分两层：
+#   ① **离线**（不发网络请求）：类名/字段名/成功判据是否与站点文档对齐，
+#      以及 `lsky_get_token` 的**优先级顺序**（缓存 > 换 > 静态值）对不对。
+#      —— 这一层能跑在任何地方，包括本地和容器里。
+#   ② **联网**（只有配了凭据才跑）：真去换一次 token，验 HTTP 200 + status:true。
+#      —— 这一层**会扣接口配额**，所以默认**不跑**，要 `--online` 显式要。
+def selftest(online=False):
+    """Lsky token 链路自检。返回 `(是否通过, 明细列表)`。"""
+    import inspect
+
+    detail = []
+    ok = True
+
+    def check(name, cond, bad_msg):
+        nonlocal ok
+        if not cond:
+            ok = False
+            detail.append(bad_msg)
+        return cond
+
+    # ---- ① 文档对齐：字段名/端点/成功判据 ----
+    src_login = inspect.getsource(lsky_login)
+    check("login.json.email", '"email"' in src_login,
+          "★ lsky_login 的请求体里没有 `email` 字段 ⇒ 与站点文档对不上")
+    check("login.json.password", '"password"' in src_login,
+          "★ lsky_login 的请求体里没有 `password` 字段 ⇒ 与站点文档对不上")
+    check("login.endpoint", "/tokens" in src_login,
+          "★ lsky_login 没打 `POST <base>/tokens` ⇒ 端点与文档不符")
+    # ★ 成功判据必须**同时**认 200、status、data.token —— 少一个就会把
+    #   "登录被拒"读成"成功"（Lsky 业务失败也回 200）。
+    check("login.judge.200", "res.status_code != 200" in src_login,
+          "★ lsky_login 没有校验 HTTP 200 ⇒ 会把错误响应当成功")
+    check("login.judge.status", 'd.get("status")' in src_login,
+          "★ lsky_login 没有校验 `status` ⇒ Lsky 业务失败也回 200，会误判成功")
+    check("login.judge.token", '"token"' in src_login,
+          "★ lsky_login 没有取 `data.token` ⇒ 换到了也拿不出来")
+
+    src_upload = inspect.getsource(upload_to_lsky)
+    # ★★★ 这几条**不能**用 `in src_upload`（整段源码含**注释与文档串**）——
+    #   实测踩到：把真正的 `f"Bearer {token}"` 改成不带前缀之后，判据**照样通过**，
+    #   因为文档串里那句「`Authorization: Bearer <token>`」和重换 token 那条路
+    #   里也有 `Bearer ` ⇒ 子串搜索命中了**别的地方**。
+    #   ★ 这是本条判据**第一版就是假的**的证据（阴性对照 RC=0）。
+    #   ⇒ 拿 **AST 里的真实调用/字面量**来判，不看源码文本。
+    # ★ 做法：找出 `upload_to_lsky` 里构造 `headers` 的那个 dict 字面量，
+    #   直接看它的键值（这才是**真正发出去**的东西）。
+    _hdr = None
+    for node in __import__("ast").walk(__import__("ast").parse(src_upload)):
+        if isinstance(node, __import__("ast").Assign):
+            for t in node.targets:
+                if getattr(t, "id", "") == "headers" and isinstance(node.value, __import__("ast").Dict):
+                    _hdr = node.value
+    check("upload.headers_found", _hdr is not None,
+          "★ 在 `upload_to_lsky` 里找不到构造 `headers` 的字面量 ⇒ "
+          "本条判据**没法执行**（不是通过）")
+    auth_val, accept_val = "", ""
+    if _hdr is not None:
+        for k, v in zip(_hdr.keys, _hdr.values):
+            ks = getattr(k, "value", None)
+            if ks == "Authorization":
+                # f-string 里的常量片段用 `JoinedStr.values` 取
+                auth_val = __import__("ast").unparse(v)
+            elif ks == "Accept":
+                accept_val = getattr(v, "value", "") or ""
+    check("upload.bearer",
+          "Bearer " in auth_val,
+          f"★ upload_to_lsky 真正发出的 `Authorization` 值（{auth_val!r}）里"
+          f"**没有** `Bearer ` 前缀 ⇒ 与接口文档不符")
+    check("upload.accept",
+          accept_val == "application/json",
+          f"★ upload_to_lsky 的 `Accept` 头是 {accept_val!r}，"
+          f"而文档标注 `application/json` 为**必传**")
+    check("upload.field", '"file"' in src_upload or "'file'" in src_upload,
+          "★ upload_to_lsky 的文件字段名不是 `file` ⇒ 与文档不符")
+
+    # ---- ② 优先级顺序：**这是本次真正的修复点** ----
+    # ★ 判据取自源码的**调用顺序**（AST 拿语句序号），不是手抄一个期望值。
+    #   ★★ 为什么这条最要紧：如果"静态值"排在"换 token"**前面**，
+    #     那个 Cookie 串会被优先用上 ⇒ 401 ⇒ **修复等于没做**，
+    #     而且从日志上看和"没改过"一模一样。
+    try:
+        tree = __import__("ast").parse(inspect.getsource(lsky_get_token))
+        order = []
+        for node in __import__("ast").walk(tree):
+            if isinstance(node, __import__("ast").Call):
+                fn = getattr(node.func, "id", "") or getattr(node.func, "attr", "")
+                if fn in ("lsky_load_token", "lsky_login"):
+                    order.append((node.lineno, fn))
+        order.sort()
+        seq = [f for _l, f in order]
+        # ★★★ 下面这两行我第一版写错了，而错法**正是本条判据要防的东西**
+        #   （`ERR-META-01`：判据算错了，却仍然"通过"）：
+        #     `seq.index(...)` 返回的是**下标**，而我拿它去和**行号**比大小。
+        #     下标 1 vs 行号 23/35 ⇒ `early` 恒为空 ⇒ 判据**永远通过**。
+        #     阴性对照实测：注入根因形状后 RC 仍是 0。
+        #   ⇒ 必须取**行号**，不是下标。
+        login_lines = [ln for ln, f in order if f == "lsky_login"]
+        cache_lines = [ln for ln, f in order if f == "lsky_load_token"]
+        first_login = login_lines[0] if login_lines else -1
+        first_login_idx = seq.index("lsky_login") if "lsky_login" in seq else -1
+        check("order.login_called", bool(login_lines),
+              "★★ `lsky_get_token` 里**没有**调 `lsky_login` ⇒ 换 token 这条路断了"
+              "（`.env` 里的错值又会成为唯一来源）")
+        check("order.cache_before_login",
+              bool(cache_lines) and bool(login_lines) and cache_lines[0] < login_lines[0],
+              "★★ `lsky_get_token` 里**缓存没有排在换 token 前面** ⇒ "
+              "每次上传都换一次，会白扣接口配额（文档里 429 就是配额）")
+        # ★ 静态值必须**最后**：它出现的位置要在 lsky_login 的**后面**。
+        #   ★★★ 判据**不能**只看"某个 `LSKY_TOKEN` 出现的行号 > lsky_login"
+        #     —— 我第一版就是这么写的，而它**测不出真东西**：
+        #     把静态值提到 lsky_login **前面**并 `return`，源码里**另一处**
+        #     （末尾那句兜底）行号仍然大于 lsky_login ⇒ 判据照样通过
+        #     （阴性对照实测：注入根因形状后 RC=0）。**判据失效比没有判据更危险**。
+        #   ⇒ 真正要测的是「**在 `lsky_login` 之前，有没有一条路径会提前 return 静态值**」。
+        #     取 `lsky_get_token` 里**所有** `LSKY_TOKEN` 的读取点，
+        #     要求**每一个**都排在 `lsky_login` **之后**。
+        static_lines = [n.lineno for n in __import__("ast").walk(tree)
+                        if isinstance(n, __import__("ast").Attribute)
+                        and getattr(n, "attr", "") == "LSKY_TOKEN"]
+        check("order.static_read_exists", bool(static_lines),
+              "★★ `lsky_get_token` 里**没有**读 `.env` 的 `LSKY_TOKEN` ⇒ "
+              "兜底路径丢了（有人手工配好 token 时会被无视）")
+        early = [ln for ln in static_lines if first_login != -1 and ln < first_login]
+        check("order.no_early_static",
+              not early,
+              f"★★ `.env` 的静态 `LSKY_TOKEN` 在**第 {early} 行**被读，"
+              f"而换 token 在**第 {first_login} 行** "
+              f"⇒ 静态值**优先**于换 token ⇒ 人手抄的错值会被先用上"
+              f"（**本次 401 的根因**，修复等于没做）")
+    except SyntaxError as e:
+        ok = False
+        detail.append(f"★ 解析 `lsky_get_token` 源码失败：{e} ⇒ 本条判据**没能执行**（不是通过）")
+
+    # ---- ③ 缓存往返（不联网）----
+    try:
+        p = lsky_token_path()
+        old = None
+        if os.path.exists(p):
+            old = open(p, "rb").read()
+        sentinel = "SELFTEST-NOT-A-REAL-TOKEN"
+        if lsky_save_token(sentinel):
+            got = lsky_load_token()
+            check("cache.roundtrip", got == sentinel,
+                  f"★ token 缓存**存了读不回**（存 {sentinel!r} 读到 {got!r}）⇒ "
+                  f"缓存形同虚设")
+            check("cache.file.hides_login", os.path.exists(p),
+                  "★ 缓存文件没落盘")
+            # ★ 缓存文件里**不许**出现密码（凭据最小化）
+            try:
+                body = open(p, encoding="utf-8").read()
+                check("cache.no_password",
+                      "password" not in body.lower(),
+                      "★★ token 缓存文件里出现了 password 字段 ⇒ "
+                      "多存了一份凭据（`lsky_save_token` 只该存 token）")
+            except OSError:
+                pass
+        else:
+            ok = False
+            detail.append(f"★ `lsky_save_token` 写不进 {p} ⇒ 缓存链路断了")
+        # 还原
+        if old is None:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        else:
+            with open(p, "wb") as fh:
+                fh.write(old)
+    except Exception as e:                                  # noqa: BLE001
+        ok = False
+        detail.append(f"★ 缓存往返测试抛了异常：{type(e).__name__}: {e}")
+
+    # ---- ④ 联网（默认跳过；会扣配额）----
+    if online:
+        if not (config.LSKY_EMAIL or "").strip():
+            print("   ⏭️  跳过联网检查：没配 LSKY_EMAIL")
+        else:
+            tok, why = lsky_login()
+            check("online.login", bool(tok), f"★ 联网换 token 失败：{why}")
+            if tok:
+                print(f"   ✅ 联网换 token 成功：{why}")
+    else:
+        print("   ⏭️  联网检查默认跳过（会扣接口配额）。要跑加 `--online`。")
+
+    if not detail:
+        detail.append(f"全部通过（{'含' if online else '不含'}联网检查）")
+    return ok, detail
+
+
+if __name__ == "__main__":
+    import sys
+    sys.stdout.reconfigure(encoding="utf-8")
+    _online = "--online" in sys.argv
+    _ok, _detail = selftest(online=_online)
+    print(f"Lsky token 链路自检：{'✅ 通过' if _ok else '❌ 失败'}")
+    for d in _detail:
+        print(f"  {d}")
+    sys.exit(0 if _ok else 1)

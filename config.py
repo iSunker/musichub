@@ -91,6 +91,38 @@ LSKY_TOKEN = os.getenv("LSKY_TOKEN", "")
 #   ★ 我们**不猜**这个 id —— 猜错会传到别的策略/桶里，而那是"写错事实"的一种。
 LSKY_STRATEGY_ID = os.getenv("LSKY_STRATEGY_ID", "")
 
+# ---- ★★★ 用基本验证**换** token（2026-09-27 加）---------------------------
+#
+# ★ 为什么需要这组键（用户 2026-09-27 贴来的接口文档，逐字）：
+#   「当前版本接口采用 『HTTP 基本验证』的方式验证授权，**获取到 token 后**，
+#     通过设置请求 header 标头来验证请求(Bearer Token)」
+#   ⇒ 那句话里有**两个**动作：① 用账号密码**换** token；② 用 token 发请求。
+#     本项目在 2026-09-27 之前**只实现了 ②** —— `assets.upload_to_lsky()` 有，
+#     换 token 的那半**没有**。⇒ 这是"文档写着、代码缺一半"的缺口，不是 bug。
+#
+# ★★★ 为什么**不能**靠"让人去网页上点一下复制 token"（这是本次实测的教训）：
+#   `.env` 里那个 714 字符、以 `XSRF-TOKEN=` 开头的值，**不是** token，
+#   而是一个**浏览器 Cookie 串**。它看起来"配了凭据"（键在、非空、长度可观），
+#   打过去却是 **HTTP 401**。★ 更糟的是：`upload_to_lsky` 只在**真发布那一刻**
+#   才用到它 ⇒ 这个错**潜伏**着，等到"要发三条"时才发现（`ERR-ENV-03` 形状）。
+#   ⇒ 修法不是"再去网页上小心点复制"，而是**把换 token 变成可执行的一步**：
+#     账号密码进 `.env`，token **由程序换**。人手不参与 ⇒ 抄错的可能**归零**。
+#
+# ★ 键名与站点文档的请求体字段**逐字对齐**（`email` / `password`）——
+#   不另起名字，免得下次有人对着文档核对时对不上。
+# ★ `os.getenv` 不用 `require_env`：理由同上（乌托邦老链路不该被蟹黄堡的配置拖死）。
+# ★★★ 是**凭据**：绝不打印、绝不进快照、绝不进仓库（同 LSKY_TOKEN 的纪律）。
+LSKY_EMAIL = os.getenv("LSKY_EMAIL", "")
+LSKY_PASSWORD = os.getenv("LSKY_PASSWORD", "")
+# ★ token 换取结果的落盘路径。★ 为什么落盘而不是每次换：
+#   站点对**接口**有配额（429 = 超出请求配额）⇒ 每次上传都换一次 token
+#   是**白扣配额**，而配额是本项目反复踩的坑（见 opencd_rate.py 那段）。
+#   ★★ 默认值**不能**在这里就 `os.path.join(DATA_DIR, ...)` —— `DATA_DIR`
+#   定义在本文件**后面**（第 130 行附近），此处引用会 `NameError`
+#   ⇒ 用 `os.getenv` 的默认值**延迟到用时**算（见 `assets.lsky_base_url` 一族）。
+#   ★ 留空 = 由 `assets` 在用到时按 `DATA_DIR` 拼默认路径。
+LSKY_TOKEN_FILE = os.getenv("LSKY_TOKEN_FILE", "")
+
 # ==================== 状态与产物存储 ====================
 # 统一挂载点：`docker-compose.yml` 里所有 service 都把**同一个 bind mount**
 # 挂到这里 —— 形如 `${STATE_DIR:-.}:/data`（默认就是 compose 文件所在目录本身）。
