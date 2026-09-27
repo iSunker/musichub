@@ -467,10 +467,26 @@ def read_db(dst=None):
     ).fetchone()[0]
     # ★ 配额账本：`opencd_quota` 表按 (day_key, kind) 记账。★ 表可能不存在
     #   （早期库）⇒ **读不到就说读不到**，绝不当成 0（ERR-SQL-05）。
+    #
+    # ★★★ 2026-09-28 修 ERR-META-36：原先这里写 `time.strftime("%Y-%m-%d")`
+    #   —— 那是**跑本脚本这台机器**的本地日。而账本真正的写入方是
+    #   `crawl.py:348` 的 `day_key = time.strftime("%Y-%m-%d")`，它在
+    #   **容器里**执行，容器 `TZ = CST+0800`。
+    #   ⇒ 两端时区不同（实测：巡检机 UTC / 容器 CST+0800）时，
+    #     **每天有 8 小时窗口会查到"昨天"那行** ⇒ 报出一个**看着完全正常**
+    #     的旧数字（如 50/50）⇒ 把「该跑不跑」说成「没额度不用跑」。
+    #   ★ 判据：**谁写账本，谁定日期** —— 所以这里必须用**容器口径**（CST）。
+    #     这正是本文件 `cst()` / `CST` 一直在用的那个口径（心跳/max_updated_at
+    #     都按它印），只是 `day_key` 这一处**漏了**。
+    #   ★★ 为什么**不**硬编 `+8h`：那会在"巡检机本身就在 CST"时**反向错**
+    #     （同 ERR-META-31 的时区混用）。这里复用的是**同一个** `cst()` 换算，
+    #     口径只有一份；★ 并且把**两端**的 day_key 都返回去，让人一眼看出差异。
+    day_key_local = time.strftime("%Y-%m-%d")
+    day_key_ctr = time.strftime("%Y-%m-%d", time.gmtime(time.time() + CST))
     try:
         qrow = cur.execute(
             "SELECT used FROM opencd_quota WHERE day_key = ? AND kind = 'request'",
-            (time.strftime("%Y-%m-%d"),)).fetchone()
+            (day_key_ctr,)).fetchone()
         quota_used = qrow[0] if qrow else 0
         quota_known = True
     except sqlite3.Error:
@@ -480,7 +496,8 @@ def read_db(dst=None):
             "exists": exists, "total": total,
             "max_updated_at": mx, "published": published,
             "crawl_todo": crawl_todo, "quota_used": quota_used,
-            "quota_known": quota_known}
+            "quota_known": quota_known,
+            "quota_day_key": day_key_ctr, "quota_day_key_local": day_key_local}
 
 
 def check_target_where_consistent(verbose=True):
@@ -742,7 +759,15 @@ def main():
             print(detail2, file=sys.stderr)
             print("  ⇒ 上面这条也是退出码 1 的来源（两条判据任一不符即非 0）",
                   file=sys.stderr)
-        return 0 if (ok and ok2) else 1
+        # ★★ 第三条判据（2026-09-28，ERR-META-36）：配额 `day_key` 的口径
+        #   必须与写账本的 `crawl.py`（容器时区）一致，不许在巡检机上算本地日。
+        #   ★ 同前：独立对象 ⇒ **照样要跑**，且退出码取或。
+        ok3, detail3 = check_quota_day_key_consistent()
+        if not ok3:
+            print(detail3, file=sys.stderr)
+            print("  ⇒ 上面这条也是退出码 1 的来源（三条判据任一不符即非 0）",
+                  file=sys.stderr)
+        return 0 if (ok and ok2 and ok3) else 1
 
     dst = pathlib.Path(args.dst) if args.dst else resolve_dst()
     # ★ disabled 的来源分层：显式声明 > 容器快照 > 空集。**每一层都打印来源**，
@@ -1283,7 +1308,14 @@ def main():
           f"的皇后行 ⇒ ★ 这是 crawl 的**待办**；★ 上面阶段表里 crawl 那行会判它在不在推进)")
     print(f"  配额(今天)    "
           + (f"{_q} / {os.getenv('OPENCD_MAX_PER_DAY', '50')}"
-             f"   (账本 = data.db:opencd_quota；★ 满 ⇒ crawl 本轮出不了网)"
+             f"   (账本 = data.db:opencd_quota，**按容器口径** day_key="
+             f"{db.get('quota_day_key') or '?'}"
+             + (f"；★ 巡检机本地日是 {db.get('quota_day_key_local')}，"
+                f"两者不同 ⇒ 若按巡检机算会查到**另一天**的行（ERR-META-36）"
+                if db.get("quota_day_key_local")
+                and db.get("quota_day_key_local") != db.get("quota_day_key")
+                else "")
+             + "；★ 满 ⇒ crawl 本轮出不了网)"
              if _qn else
              "❔ **读不到**（opencd_quota 表不在 / 读失败）⇒ ★ 不许当成 0"))
     print(f"  max(updated_at)  {db['max_updated_at']}  ← ★ 这是 **UTC**，加 8h = "
@@ -1306,6 +1338,114 @@ def _utc_to_epoch(s):
         return time.mktime(time.strptime(s, "%Y-%m-%d %H:%M:%S")) - time.timezone
     except Exception:
         return None
+
+
+def check_quota_day_key_consistent(verbose=True):
+    """
+    ★★ 钉住 `day_key` 的**口径**：配额账本由 `crawl.py` 在**容器里**按
+      容器时区（CST+0800）写，所以巡检读账本**必须用同一个口径**
+      （`ERR-META-36`：在巡检机上算本地日 ⇒ 每天有 8h 窗口查到"昨天"那行
+       ⇒ 报出**看着完全正常**的旧数字 ⇒ 把「该跑不跑」说成「没额度不用跑」）。
+
+    判据（三条，缺一不可）：
+      ① `crawl.py` 里**真值来源**的写法必须是 `time.strftime("%Y-%m-%d")`
+         —— 我们不假设它的时区，而是**读出来**它对不对齐容器；
+      ② 本文件的 `day_key` **不许**写成裸 `time.strftime("%Y-%m-%d")`
+         （那正是 bug 的形状）；
+      ③ 本文件的 `day_key` **必须**带上 `CST` 偏移（`time.gmtime(... + CST)`）。
+      ⇒ ②是"反例判据"、③是"正例判据"：**两条一起**才能证明"改对了"
+         而不是"改成了另一种错"（只查③会放过"同时也留着一份本地日"）。
+    ★ 为什么读**源码文本**而不算"两边日期是否相等"：相等与否取决于**跑的那一刻**
+      （同一天时两者相同 ⇒ 判据恒真失效，见 `ERR-META-10`）。
+      ⇒ 判据必须落在**口径**上，不能落在**当前值**上。
+
+    返回 `(ok, detail)`。找不到对方文件 ⇒ **回 False**（不许把"找不到"
+    与"一致"共用一个出口，见 `check_target_where_consistent` 的注释）。
+    """
+    here = pathlib.Path(__file__).resolve()
+    cands = []
+    if os.environ.get("MUSOPIA_REPO"):
+        cands.append(pathlib.Path(os.environ["MUSOPIA_REPO"]) / "crawl.py")
+    cands += [here.parent.parent / "crawl.py", here.parent / "crawl.py",
+              pathlib.Path.cwd() / "crawl.py"]
+    crawl_src = None
+    for c in cands:
+        try:
+            crawl_src = c.read_text(encoding="utf-8")
+            found = c
+            break
+        except OSError:
+            continue
+    if crawl_src is None:
+        return False, (f"判据无法执行：找不到 `crawl.py`（找过 {len(cands)} 处）"
+                       f"⇒ ★ 不当成'一致'")
+
+    ok = True
+    problems = []
+    # ① 真值来源的写法
+    if 'time.strftime("%Y-%m-%d")' not in crawl_src:
+        problems.append("`crawl.py` 里没找到 `time.strftime(\"%Y-%m-%d\")` "
+                        "⇒ 写账本的 day_key 口径变了，本判据要跟着重新对")
+        ok = False
+    self_src = here.read_text(encoding="utf-8")
+    # ★★ 判据必须看 **AST**，不能看源码文本（`ERR-META-32` 的教训，本轮
+    #   第一版我又踩了**两次**）：
+    #     ① 文本搜索会命中**注释与本函数的 docstring**（上面那段注释里就逐字
+    #        写着 `time.strftime("%Y-%m-%d")`）⇒ 判据恒报红 ⇒ 变噪音；
+    #     ② 改成"在 `get_source_segment` 里子串找 `strftime("%Y-%m-%d")`"
+    #        之后，**正例判据恒为假** —— 因为正确写法是
+    #        `time.strftime("%Y-%m-%d", time.gmtime(... + CST))`，
+    #        那个字面量后面跟的是**逗号不是右括号** ⇒ 带括号的子串**匹配不上**
+    #        ⇒ 它只匹配到了"裸本地日"那一行 ⇒ 判据**永远说没按容器口径换算**。
+    #   ⇒ 结论：**逐个子串地对源码做匹配，本身就是错的方法**。
+    #     这里改成**只看 AST 结构**：认出 `time.strftime(<fmt>[, <gmtime(...+CST)>])`，
+    #     判断"第二实参里是不是 gmtime 且带 CST"。
+    self_tree = ast.parse(self_src)
+
+    def _is_strftime_day(node):
+        """`time.strftime("%Y-%m-%d", ...)` ⇒ True（只看结构，不看文本）。"""
+        return (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "strftime"
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "%Y-%m-%d")
+
+    def _has_gmtime_cst(node):
+        """第二实参（若有）里用了 `time.gmtime(... + CST)`。"""
+        if len(node.args) < 2:
+            return False
+        seg = ast.get_source_segment(self_src, node.args[1]) or ""
+        # ★ 这里可以安全用子串：它只在**已确认是 strftime 调用**的
+        #   第二实参这一小段上匹配，不会命中注释/docstring。
+        return "gmtime" in seg and "CST" in seg
+
+    bad_assigns = []
+    gmtime_ok = False
+    for node in ast.walk(self_tree):
+        if not isinstance(node, ast.Assign) or not _is_strftime_day(node.value):
+            continue
+        tgt = node.targets[0]
+        name = getattr(tgt, "id", "") or getattr(tgt, "attr", "")
+        if _has_gmtime_cst(node.value):
+            gmtime_ok = True
+        elif name.endswith("_local"):
+            pass                          # ★ 刻意的"巡检机本地日"，用于对比
+        else:
+            bad_assigns.append(f"line {node.lineno}: {name}")
+    if bad_assigns:
+        problems.append("本文件有**裸的本地日 day_key 赋值**（= 巡检机本地日）"
+                        "⇒ 正是 ERR-META-36 的形状：" + "；".join(bad_assigns))
+        ok = False
+    if not gmtime_ok:
+        problems.append("本文件的 day_key **没有**用 `time.gmtime(... + CST)` "
+                        "⇒ 没按容器口径换算")
+        ok = False
+    detail = ("day_key 口径一致（本文件走 CST 偏移；`crawl.py` 为容器内本地日）"
+              if ok else "；".join(problems))
+    if verbose:
+        print(("✅ " if ok else "❌ ") + "quota day_key 口径：" + detail)
+    return ok, detail
 
 
 if __name__ == "__main__":
