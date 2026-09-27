@@ -179,22 +179,37 @@ def map_audiocodec(musopia_audiocodec):
 #     大陆        4                  2
 #     港台        6                  3
 #     欧美        5                  4
-#     日韩        7                  ★ **拆不出** ⇒ 1（见下）
+#     日韩        7                  ★ **拆不出** ⇒ 5（见下）
 #     其它地区    8                  1
 #
-# ★★ 为什么"日韩"落到 `1 其他`：皇后那一列**只有一个合并值**，
-#    而蟹黄堡要分 `5 日本` / `6 韩国` ⇒ **信息不足，拆不出来**。
-#    ⇒ 落 `1`，并**显式记进 unmapped**（不静默丢，同 `opencd_map` 的纪律）。
-#    ★ 这是个**已知缺口**，不是 bug。
+# ★★ 为什么"日韩"落到 `5 日本`（2026-09-27 用户拍板，**原先落 `1 其他`**）：
+#    皇后那一列**只有一个合并值 `日韩`**，而蟹黄堡要分 `5 日本` / `6 韩国`
+#    ⇒ **信息不足，数学上拆不出来**（这不是 bug，是上游数据粒度不够）。
+#    用户的决定：**落 `5 日本`**。
+#
+#    ★★★ 必须如实标注的后果（别把它读成"已解决"）：
+#      **韩国歌手会被标成日本。** 这是一个**已知的、有意的**不精确。
+#      理由（用户的判断）：蟹黄堡对元数据的要求**没有乌托邦那么高**，
+#      而落 `1 其他` 会让"日韩"这一整类（在皇后占比不小）在蟹黄堡侧
+#      全都是"其他地区"，反而更没用。
+#
+#    ★ 所以这一支**仍然进 `notes`**（不静默）：读日志的人要看得出
+#      "这条的地区是**猜**的，可能是韩国被动标成日本"。
+#      ⇒ 判据：**"我不确定"必须能被表达出来**（`ERR-SITE-06` 同族）——
+#        落 5 是**决定**，但"为什么是 5"必须留在说明里。
 _PROCESSING_BY_MUSOPIA_TAG = {
     "大陆": 2,
     "港台": 3,
     "欧美": 4,
+    "日韩": 5,          # ★ 用户 2026-09-27 拍板：拆不出 ⇒ 落日本(5)，见上
     "其它地区": 1,
     "其他地区": 1,      # ★ 两站用字不同（乌托邦写"其他"、皇后写"其它"）
 }
-# ★ 拆不出的那些：**显式列出**，让调用方能把它们报出来，而不是悄悄填 1
-_PROCESSING_SPLIT_LOST = {"日韩": "蟹黄堡分日本(5)/韩国(6)，皇后只给合并值 ⇒ 落 1 其他"}
+# ★ 拆不出的那些：**显式列出**，让调用方能把它们报出来（不静默）
+_PROCESSING_SPLIT_LOST = {
+    "日韩": "皇后只给合并值 ⇒ 蟹黄堡分日本(5)/韩国(6)，**拆不出** ⇒ "
+            "按约定落 5 日本；★ 韩国条目会被标成日本（已知不精确）",
+}
 
 
 def map_processing(musopia_tags):
@@ -204,6 +219,14 @@ def map_processing(musopia_tags):
       但**不保证**（可能同时有"港台"和"流行"，那是风格不是地区 ⇒ 不受影响；
       真正可能撞的是"大陆"+"港台"这种）。撞了就**取第一个**并**在说明里写明**
       —— ★ 不静默，让"这条种子地区可能填错"变成看得见的事。
+
+    ★★ 2026-09-27 改：「日韩」从"跳过（落 1）"改成"**落 5 但带说明**"。
+      改之前这一支在 `_PROCESSING_SPLIT_LOST` 里 **`continue` 掉** ——
+      那是对的（当时 `_PROCESSING_BY_MUSOPIA_TAG` 里没有它，跳过 ⇒ 兜底 1）。
+      现在它**同时在两张表里**（映射表给了 5、说明表给了理由）⇒
+      这里必须**先记说明、再照常往下走映射**，否则 `continue` 会让它
+      **继续被跳过**、又落回 1 —— 那就是"改了配置但行为没变"的假修
+      （判据⑧b 钉住了这个形状：日韩的返回值必须是 5，不是 1）。
     """
     tag_by_value = descr.TAGS
     notes = []
@@ -218,12 +241,13 @@ def map_processing(musopia_tags):
                 break
         if name is None:
             continue
+        # ★ 先记"这一支有已知的不精确"，**不 continue** —— 若它在映射表里有值，
+        #   就照常返回那个值（见上面 docstring 里 2026-09-27 那段）。
         if name in _PROCESSING_SPLIT_LOST:
-            notes.append(f"皇后标签「{name}」{_PROCESSING_SPLIT_LOST[name]}")
-            continue
+            notes.append(f"皇后标签「{name}」：{_PROCESSING_SPLIT_LOST[name]}")
         if name in _PROCESSING_BY_MUSOPIA_TAG:
             val = _PROCESSING_BY_MUSOPIA_TAG[name]
-            if len(notes):
+            if len(notes) and not notes[-1].startswith(f"皇后标签「{name}」"):
                 notes.append(f"同时命中多个地区标签 ⇒ 取「{name}」({val})")
             return val, ("；".join(notes) if notes else None)
     return 1, ("；".join(notes) if notes else None)     # ★ 没命中 ⇒ 1 其他
@@ -393,6 +417,14 @@ def build_fields(task, *, anonymous=False):
         #      兜底取列 `opencd_descr`：万一将来有人把 merge 那步挪走，
         #      这里不会**静默**变成空。
         opencd_descr=task.get("descr") or task.get("opencd_descr") or "",
+        # ★★★ 2026-09-27：**蟹黄堡不要日志折叠块**（用户拍板「折叠代码也不需要」）。
+        #   ★ 这一行是**承重的**：不传 `site=` 的话 `_skip_logs` 就是 False
+        #     ⇒ 蟹黄堡的简介里会长出 `[spoiler=LOG][code]…[/code][/spoiler]`，
+        #     而**不会报任何错**（`build_descr` 照常返回一段合法 BBCode）。
+        #   ★ 用法是 `db.SITE_CRABPT` 常量而不是字面量 `"crabpt"` ——
+        #     站名只有 `db` 那两个常量是唯一真值源（`ERR-META-03`），
+        #     本文件也**只**用常量（见文件头"站点名"那条）。
+        site=db.SITE_CRABPT,
     )
     audit.append("descr（简介）← descr.build_descr()（BBCode，两站同构）")
 
@@ -763,3 +795,109 @@ class CrabptClient:
                       f"也没读出报错（最终 URL {r.url!r}，{len(r.text or '')} 字节）。"
                       f"⇒ 请**立刻去站点确认这条种子建了没有**，"
                       f"**不要重跑**（发布不可逆）。")
+
+
+# ==================== 自检（纯离线：零请求、零写库） ====================
+#
+# ★★ 为什么值得给这个文件加自检（它原先一个都没有）：
+#    2026-09-27 改「日韩 → 5」时踩到一个**静默失效**风险 ——
+#    `map_processing` 里原来对 `_PROCESSING_SPLIT_LOST` 是 **`continue`**，
+#    而当时「日韩」**只**在那张表里（映射表里没有）⇒ 跳过 ⇒ 兜底 1。
+#    改法必须**同时**把「日韩」加进映射表、并**去掉那个 continue**。
+#    只做一半（只加表、留着 continue）⇒ 结果**还是 1**，
+#    而代码"看起来"改了、不报错、跑得通 —— 这正是 `ERR-META-01` 的形状。
+#    ⇒ 判据必须钉住**返回值**（5），不是"表里有没有这个键"。
+#
+# ★ 判据分四层（每层都能单独失败）：
+#     ① 日韩 → **5**（不是 1）—— 本次改动的核心
+#     ② 日韩的**说明**必须带出来（落了 5 也要如实标注"可能是韩国"）
+#     ③ 其余四个地区**没被顺手改坏**（阴性对照：改动只影响日韩）
+#     ④ `descr.build_descr` 的调用**确实传了** `site=D.SITE_CRABPT`
+#        —— 只测 `build_descr` 本身（descr 自检⑨）测不到"本文件没接线"
+def selftest(verbose=True):
+    """返回 `(ok, fails)`。★ 纯离线：只调纯函数 + 读自己的源码。"""
+    import ast as _ast
+    import os as _os
+    ok = fails = 0
+
+    def chk(label, cond, detail=""):
+        nonlocal ok, fails
+        if cond:
+            ok += 1
+            if verbose:
+                print(f"  ✅ {label}" + (f"   {detail}" if detail else ""))
+        else:
+            fails += 1
+            print(f"  ❌ {label}" + (f"   ← {detail}" if detail else ""))
+
+    print("=" * 72)
+    print("crabpt_site 离线自检（零请求、零写库）")
+    print("=" * 72)
+
+    # ── ① 本次改动的核心：日韩 → 5 ──────────────────────────────────
+    print("\n① 地区映射：皇后「日韩」⇒ 蟹黄堡 **5 日本**（2026-09-27 用户拍板）")
+    val, note = map_processing([descr.TAGS["日韩"]])
+    chk("日韩 → 5（★ 不是 1 —— 落 1 是**改之前**的行为）",
+        val == 5, f"实得 {val}")
+    # ★ 阴性对照：这条断言**能**失败 —— 把 `_PROCESSING_BY_MUSOPIA_TAG` 的
+    #   "日韩" 删掉（或恢复那个 continue）就能让它挂（已实测，见提交信息）。
+    chk("日韩 ⇒ **不等于** 1（把「回落 1」这个旧行为明写出来对照）",
+        val != 1, f"实得 {val}")
+
+    # ── ② 落了 5 也要如实标注"可能是韩国" ───────────────────────────
+    print("\n② 说明文案：落了 5，但**必须**让人看出这是猜的")
+    chk("日韩有说明（不静默）", bool(note), f"实得 {note!r}")
+    chk("说明里点出「日本」与「韩国」两个选项都存在（信息不足）",
+        note and "日本" in note and "韩国" in note, f"实得 {note!r}")
+    chk("★ 说明里**明确写出**了已知后果（韩国会被标成日本）",
+        note and "韩国条目会被标成日本" in note, f"实得 {note!r}")
+
+    # ── ③ 阴性对照：其余地区**没被顺手改坏** ───────────────────────
+    print("\n③ 阴性对照：改动只影响日韩，其余四个地区原样")
+    for name, want in (("大陆", 2), ("港台", 3), ("欧美", 4), ("其他地区", 1)):
+        v, _ = map_processing([descr.TAGS[name]])
+        chk(f"{name} → {want}", v == want, f"实得 {v}")
+    chk("没有地区标签 ⇒ 兜底 1（不编一个）",
+        map_processing([])[0] == 1)
+
+    # ── ④ build_descr 的接线：本文件**确实**传了 site=crabpt ─────────
+    #
+    # ★★ 为什么必须在这一侧测：`descr.py` 自检⑨ 钉的是 **build_descr 本身**
+    #    的三种行为；而"**本文件调用时有没有传 site**"是**另一个**判据 ——
+    #    不传的话 `site` 默认 None ⇒ 日志折叠块照样长出来，而 descr 那边
+    #    全绿（它测的场景自带 site 参数）。这正是 `ERR-META-01`：
+    #    两条判据各自都"看着在跑"，合起来覆盖不到那条缝。
+    print("\n④ 接线：build_fields 调 build_descr 时**必须**传 site=蟹黄堡")
+    _src = open(_os.path.abspath(__file__), encoding="utf-8").read()
+    _tree = _ast.parse(_src)
+    _calls = [n for n in _ast.walk(_tree)
+              if isinstance(n, _ast.Call)
+              and isinstance(n.func, _ast.Attribute)
+              and n.func.attr == "build_descr"]
+    if not _calls:
+        chk("找到 build_descr 调用点", False, "★ 没找到 ⇒ 本条判据失效（调用被改名了？）")
+    else:
+        _kws = {k.arg for c in _calls for k in c.keywords}
+        chk(f"build_descr 调用传了 `site=`（共 {len(_calls)} 个调用点）",
+            "site" in _kws, f"实得关键字参数 {sorted(_kws)}")
+        # ★ 值必须是 `db.SITE_CRABPT` 而不是字面量 —— 站名只有 db 那两个常量
+        #   是唯一真值源（ERR-META-03）。
+        _vals = [getattr(k.value, "attr", None) or getattr(k.value, "value", None)
+                 for c in _calls for k in c.keywords if k.arg == "site"]
+        chk("site 的值是 `db.SITE_CRABPT`（不是手抄字面量）",
+            all(v == "SITE_CRABPT" for v in _vals) if _vals else False,
+            f"实得 {_vals}")
+
+    print()
+    print("=" * 72)
+    print(f"结果: {ok}/{ok + fails} 通过")
+    print("=" * 72)
+    return (fails == 0), fails
+
+
+if __name__ == "__main__":
+    import sys as _sys
+    _sys.stdout.reconfigure(encoding="utf-8")
+    _ok, _n = selftest()
+    print("★ 退出码：0 = 全过；1 = 有断言不符" if _ok else "★ 退出码 1（有断言不符）")
+    _sys.exit(0 if _ok else 1)

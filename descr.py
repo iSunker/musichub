@@ -467,7 +467,7 @@ def extract_cover_url(descr_text):
 
 
 def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
-                logs=None, extra_note=None, opencd_descr=""):
+                logs=None, extra_note=None, opencd_descr="", site=None):
     """
     生成种子页面 BBCode 简介。
 
@@ -475,8 +475,26 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
         ① 封面图          —— **我们的**（`cover_url`，图链）
         ② 皇后简介正文    —— 皇后 `divdescr` 原文（`opencd_descr`，**已剥图**）
         ③ 曲目列表        —— ★ **皇后原版**优先，退回我们的
-        ④ 抓轨日志（折叠）—— **保留**，多碟每碟一块
+        ④ 抓轨日志（折叠）—— **保留**，多碟每碟一块（★ 蟹黄堡不要，见 `site`）
     末尾不追加任何程序署名兜底（旧版会写"由自动化发布程序生成。"）。
+
+    ── `site` 参数（2026-09-27 加，用户拍板）─────────────────────────────
+    ★★ **蟹黄堡不要 ④ 那个折叠日志块**。用户原话：「折叠代码也不需要」。
+
+    ★ 为什么用参数而不是"直接删掉 ④"：乌托邦**一直有**这一块，删掉会改变
+      已在站上的 254 条的页面形态 —— 那是**没人要求过的改动**。用户要的是
+      "**蟹黄堡**不需要"，不是"两站都不要"。⇒ 分叉点必须显式落在参数上。
+
+    ★ 为什么默认 `None`（= 保留日志）而不是 `"musopia"`：
+      `None` 是"**调用方没声明哪个站**" ⇒ 按**既有行为**（保留）走。
+      这与 `ERR-ENV-02` 那条"缺键时的默认值必须中性"同一个理由 ——
+      老调用点（`descr.py` 自己的 `build_form_fields`、自检）一个字不改，
+      行为就不该变。★ 反过来若默认成"不保留"，所有老调用点会**静默**换行为。
+
+    ★★ 判据（可执行，见本文件自检 ⑨）：同一个 `logs=` 输入下
+        `site="crabpt"` 的产出里**不许**出现 `[spoiler=`/`[code]`，
+        而 `site=None` 与 `site="musopia"` 必须**逐字节相同**且**含**折叠块。
+      ⇒ 三者要**分别**断言（`ERR-META-28`：说不出"什么输入会让它失败"的断言不算判据）。
 
     专辑名称/副标题/原始名称不写进简介：站点页面顶部的表格已经展示了主标题、
     副标题和种子文件名，简介里再重复一遍纯属冗余。
@@ -509,6 +527,10 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
         logs = [{"label":"CD1 LOG","content":..}, {"label":"CD2 LOG","content":..}]
     单 CD 传 log_content/log_filename 即可（内部包成一条 label="LOG"）。
     """
+    # ★ 蟹黄堡：**整块 ④ 都不要**（连 `[spoiler]` 壳带正文一起）。
+    #   判据见上面 `site` 参数的 docstring（三条分别断言）。
+    _skip_logs = (site == "crabpt")
+
     blocks = []
 
     # ① 封面图 —— **我们的**图链（皇后正文里的图已在解析层剥掉）
@@ -539,10 +561,12 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
         body = _truncate(tracklist, TRACKLIST_MAX_CHARS, "曲目列表过长已截断")
         blocks.append(f"[quote][b]曲目列表：[/b]\n{body}[/quote]")
 
-    # ④ 抓轨日志（**保留**）—— 统一成 [{label, content}, ...]
-    items = list(logs) if logs else []
-    if not items and log_content and str(log_content).strip():
-        items = [{"label": "LOG", "content": log_content, "filename": log_filename}]
+    # ④ 抓轨日志（**乌托邦保留；蟹黄堡整块去掉**，见 `site` 参数的 docstring）
+    items = []
+    if not _skip_logs:
+        items = list(logs) if logs else []
+        if not items and log_content and str(log_content).strip():
+            items = [{"label": "LOG", "content": log_content, "filename": log_filename}]
 
     for item in items:
         if not isinstance(item, dict):
@@ -630,6 +654,17 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         #    ★ 兜底：万一调用方没跑过 `merge_mapped`（如蟹黄堡适配层只传了列），
         #      退回列值 —— 否则皇后正文会**静默消失**（那是最难发现的一类 bug）。
         opencd_descr=task.get("descr") or task.get("opencd_descr") or "",
+        # ★ 本函数是**乌托邦**那条路（它要拼 `custom_fields[4][N]`，
+        #   而蟹黄堡**没有** custom_fields ⇒ 走 `crabpt_site.build_fields()`）。
+        #   ⇒ 显式声明 `site`，不让行为依赖 `build_descr` 的默认值
+        #     （默认是 None = 保留日志，恰好等于乌托邦的行为；但**写出来**
+        #      比"靠默认值凑对"强 —— 默认值将来一变，这里会**静默**跟着变）。
+        #   ★ 用**字面量**而不是 `db.SITE_MUSOPIA`：本模块**刻意不 import db**
+        #     （它只要 stdlib，所以能脱离 .env 单独跑自检 —— 与 `opencd_rate.py`
+        #      那条"零项目内依赖"是同一个纪律）。`db` 那个常量本身就等于
+        #     `"musopia"` 这个字面量，两者**由自检 ⑨ 钉住**（`ERR-META-30`：
+        #     两处各写一份要么共用、要么被判据钉住）。
+        site="musopia",
     )
 
     # ★★ `custom_fields[4][N]` 的**真实序号**（2026-09-21 实测自乌托邦 `takeupload.php`
@@ -943,6 +978,53 @@ def _check():
                        opencd_descr="正文[/quote]后面还有话")
     chk("★ 皇后正文里的 [/quote] 被中和（不破坏结构）",
         "[/quote]" not in _inj.split("曲目列表")[0])
+
+    # ══════════════════════════════════════════════════════════════════
+    # ⑨ `site` 参数：蟹黄堡**不要**日志折叠块（2026-09-27 用户拍板）
+    #
+    #   ★★ 为什么三条要**分别**断言（`ERR-META-28`：说不出"什么输入会让它
+    #      失败"的断言不算判据）：
+    #        · 只断言"crabpt 没有 [spoiler]" ⇒ 一个"整个函数返回空串"的
+    #          坏实现也能通过（它当然没有 folded block）⇒ 必须**同时**断言
+    #          封面/曲目**还在**。
+    #        · 只断言"musopia 有 [spoiler]" ⇒ 测不到"crabpt 也保留了"这个回退。
+    #        · 还要断言 `None` 与 `"musopia"` **逐字节相同** —— 这是"默认值
+    #          必须中性"那条（老调用点一个字不改、行为就不该变）。
+    #   ★ `_LOG`/`_TL`/`_COVER` 复用上面 ⑤ 的夹具（同一个输入比三种 site）。
+    # ══════════════════════════════════════════════════════════════════
+    _crab = build_descr(cover_url=_COVER, tracklist=_TL, log_content=_LOG,
+                        site="crabpt")
+    chk("⑨a 蟹黄堡：日志折叠块**不存在**（[spoiler= / [code] 都没有）",
+        "[spoiler=" not in _crab and "[code]" not in _crab,
+        f"实得 spoiler={'[spoiler=' in _crab} code={'[code]' in _crab}")
+    # ★ 阴性对照①：**日志正文**不许换个形式漏进来（比如平铺成普通文本）
+    chk("⑨b 蟹黄堡：日志**正文**也没漏进来（不是只去掉了壳）",
+        "EAC log" not in _crab,
+        f"实得含 'EAC log' = {'EAC log' in _crab}")
+    chk("⑨c 蟹黄堡：封面 + 曲目**仍在**（不是『整段返回空』混过了 ⑨a）",
+        f"[img]{_COVER}[/img]" in _crab and "曲目列表：" in _crab)
+
+    _mus = build_descr(cover_url=_COVER, tracklist=_TL, log_content=_LOG,
+                       site="musopia")
+    chk("⑨d 乌托邦：日志折叠块**仍在**（★ 改动没有误伤老站）",
+        "[spoiler=LOG][code]" in _mus)
+    _none = build_descr(cover_url=_COVER, tracklist=_TL, log_content=_LOG)
+    chk("⑨e `site=None`（没声明）与 `site='musopia'` **逐字节相同**"
+        " ⇒ 默认值是中性的、老调用点行为不变",
+        _none == _mus,
+        "★ 若不同，说明默认值改变了既有行为（那会静默改掉 254 条已上站的页面）")
+    # ★ 阴性对照②：**未知站点名**不许被当成"蟹黄堡"
+    _unk = build_descr(cover_url=_COVER, tracklist=_TL, log_content=_LOG,
+                       site="musopiaa")
+    chk("⑨f 未知站点名 ⇒ 按保留走（**不**把拼错的站名当蟹黄堡）",
+        "[spoiler=LOG][code]" in _unk,
+        "★ 若这条失败，说明判据写成了 `site != 'musopia'`（错在'非乌托邦即蟹黄堡'）")
+    # ★ `logs=[...]` 那条路（多碟）也要跟着关掉 —— 否则只在单条路上生效
+    _multi = build_descr(logs=[{"label": "CD1 LOG", "content": "EAC log\nx"}],
+                         site="crabpt")
+    chk("⑨g 蟹黄堡：多碟 `logs=[...]` 那条路也关掉了",
+        "[spoiler=" not in _multi and "EAC log" not in _multi,
+        f"实得 {_multi!r}")
 
     return ok, fails
 
