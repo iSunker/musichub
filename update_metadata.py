@@ -142,13 +142,37 @@ def main():
         return
 
     if args.torrent_id:
-        tasks = db.get_published(torrent_id=args.torrent_id)
+        # ★★★ 2026-09-27：`require_allow=True` 对**点名指定**也要生效。
+        #   理由：`--torrent_id` 不改"这条路会写站点"的性质。若为了"能手工改"而
+        #   在这里放行，洞就还在（只是从批量路挪到了点名路）—— 而 `--torrent_id`
+        #   正是最容易在不知情时敲到 DENY 行的那条路（人只看到一个 sid）。
+        #   ★ 真要改某个 DENY 行的页面，**先把它标成 ALLOW**（这是一次有记录的动作），
+        #     而不是在这里开一个静默的例外。
+        tasks = db.get_published(torrent_id=args.torrent_id, require_allow=True)
         if not tasks:
+            # ★ 报错文案要把**两种**原因都写出来，并给**分辨判据**（ERR-SITE-06 的教训：
+            #   列出多个原因却不给分辨法，读的人只能猜，而猜错要花好几轮去追）。
+            #   这里能分辨：库里查得到、但被闸门④ 拦住 ⇒ 与"库里根本没有"不同。
+            _raw = db.get_published(torrent_id=args.torrent_id)
+            if _raw:
+                _r = _raw[0].get("transfer_rule")
+                sys.exit(
+                    f"⛔ site_torrent_id={args.torrent_id} 在库里存在，但"
+                    f"`transfer_rule={_r!r}` ⇒ 被**闸门④（edit 路）**拦住，不会编辑。\n"
+                    f"   ★ 闸门④ 只放行 `'ALLOW'`：空 / DENY / NEED_CONFIRM 一律拦"
+                    f"（`transfer_rule` 空的语义是「**不知道**能不能转」，不是「允许」）。\n"
+                    f"   ⇒ 若确认这条有权改，**先显式标 ALLOW**（一次有记录的写库动作），"
+                    f"再重跑本命令。★ 不要绕过闸门。")
             sys.exit(f"❌ 数据库里找不到 site_torrent_id={args.torrent_id} 的记录。\n"
                      f"   如果这条是历史发布，先跑: python sync_site.py --apply")
     else:
+        # ★★★ `require_allow=True` —— 本路**会把内容写到站点上**，必须过闸门④。
+        #   见 `db.EDIT_RULE_GUARD` 上面的长注释（2026-09-27 实测的洞：15972）。
+        #   ★ 探针 `db.count_stale()` 也必须带同一条闸门，否则会出现
+        #     "探针说有活 → edit 选不出来 → 探针还说有活" 的高频空转。
         tasks = db.get_published(only_with_cover=args.only_cover,
-                                 only_stale=args.stale_only)
+                                 only_stale=args.stale_only,
+                                 require_allow=True)
 
     st = db.stats()
     if st["no_site_id"]:

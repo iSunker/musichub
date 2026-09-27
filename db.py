@@ -674,12 +674,57 @@ def get_pending_publish():
 STALE_CONDITION = "(site_synced_at IS NULL OR updated_at > site_synced_at)"
 
 
+# ── ★★★ 闸门④ 的 edit 路副本（2026-09-27 补）────────────────────────────────
+# 与 `PENDING_PUBLISH_WHERE` 里那句 `AND transfer_rule = 'ALLOW'` **同一判据**，
+# 只是**服务另一条路**：那条路的消费者是 `update_metadata.py`（页面**编辑**），
+# 不是 `publish.py`（新种子**发布**）。
+#
+# ★ 为什么要补（2026-09-27 实测的洞）：
+#   闸门④ 原先**只装在发布队列上**。而 `edit` 走的是 `get_published()`，
+#   它的 WHERE 里只有 `site_status='EXISTS'` + `site_torrent_id` 非空 + stale
+#   —— **完全不知道 `transfer_rule` 这回事**。
+#   ⇒ 结果：一条 `DENY`（禁止轉載）的行，只要**已在站上**且**本地更新过**，
+#     `edit` 就会照改不误（实测 15972：16 条同批 stale 里 15 条 ALLOW、
+#     1 条 DENY，那 1 条被 `edit` 按本地内容重写了站点页面）。
+#
+# ★★ 为什么不再走一遍"发布队列那道闸门"（两处各写一份 SQL 的诱惑）：
+#   两条路**选的集合本来就不同** —— 发布队列要 `site_status != 'EXISTS'`（还没发），
+#   edit 要 `site_status = 'EXISTS'`（已在站上）。**两者互斥**，不可能共用一条 WHERE。
+#   但"能不能动这条 DENY 行"**是同一个判断** ⇒ 抽成常量，两边都引它
+#   （`ERR-META-03`：同一件事只能有一处实现；这里"同一件事"= **判据**，不是查询）。
+#
+# ★ 为什么单位是「这个值才放行」而不是「排除 DENY」：
+#   与闸门④ 同一套理由（见 `PENDING_PUBLISH_WHERE` 里那段长注释）：
+#   `transfer_rule` 空的语义是「**不知道**能不能转」，**不是**「允许」。
+#   ⇒ 白名单（`= 'ALLOW'`），不是黑名单（`!= 'DENY'`）。
+#   `NEED_CONFIRM`（拿不准）同样拦 —— 拿不准就不动。
+#
+# ⚠️ 代价（与发布侧同一条，这里再说一次因为它现在也影响 edit）：
+#   第一阶段（本地抓轨）行若确实有权改，必须先**显式**标 `ALLOW`。
+#   这是刻意的：授权该是需要动作的那一方。
+EDIT_RULE_GUARD = "transfer_rule = 'ALLOW'"
+
+
 def _published_where(torrent_id=None, only_missing_id=False,
-                     only_with_cover=False, only_stale=False):
+                     only_with_cover=False, only_stale=False,
+                     require_allow=False):
     """
     get_published() 与 count_stale() 共用的 WHERE 构造，返回 (where, params)。
 
     这两个函数**必须选出同一个集合** —— 抽到这里就是为了让它们没法跑偏。
+
+    ★★★ `require_allow`（2026-09-27 加）：是否要求 `transfer_rule = 'ALLOW'`。
+      **edit 路必须传 True**（否则就是上面那个洞）；**其它调用方传 False**：
+        · `sync_site.py`       —— 它只是去站点**读**现状回填 `site_torrent_id`，
+                                  对 DENY 行做这件事**不违反**"禁止轉載"（没有写任何东西）
+        · `check_db.py`        —— 诊断（数还缺哪些 id），同上
+        · `--list-fields`      —— 只为取一个**样本**渲染字段名，不提交
+        · `gen_counts.py`      —— 只统计
+      ⇒ 判据：**问"这条路会不会把内容写到站点上"** —— 会 ⇒ 必须 require_allow；
+        不会 ⇒ 不要（多拦只会让诊断/对账看不到真实全貌）。
+      ★ 这也解释了为什么**不能**把 `require_allow` 写死成 True：那会让
+        `sync_site` 漏掉 DENY 行的 id 回填 ⇒ 那些行的 `site_torrent_id` 永远空
+        ⇒ 它们既进不了 edit、又在对账里"凭空消失"（ERR-META-10 的形状）。
     """
     where = ["site_status = 'EXISTS'"]
     params = []
@@ -692,6 +737,9 @@ def _published_where(torrent_id=None, only_missing_id=False,
     else:
         where.append("site_torrent_id IS NOT NULL AND site_torrent_id != ''")
 
+    if require_allow:
+        where.append(EDIT_RULE_GUARD)
+
     if only_with_cover:
         where.append("cover_url IS NOT NULL AND cover_url != ''")
 
@@ -702,7 +750,7 @@ def _published_where(torrent_id=None, only_missing_id=False,
 
 
 def get_published(only_missing_id=False, torrent_id=None, only_with_cover=False,
-                  only_stale=False):
+                  only_stale=False, require_allow=False):
     """
     已在站点上存在的任务。
 
@@ -710,11 +758,20 @@ def get_published(only_missing_id=False, torrent_id=None, only_with_cover=False,
     （site_synced_at IS NULL），或同步之后本地又变过（updated_at > site_synced_at）。
     定时任务必须用这个，否则每轮都要把 250+ 个页面全部拉一遍 edit.php 做对比，
     纯属拿站点带宽换空转。
+
+    ★★★ `require_allow`（2026-09-27 加）：见 `_published_where` 的长注释。
+      **凡是会往站点写内容的路，必须传 True**（`update_metadata.py` 的 edit 路）；
+      只读的路（sync_site / check_db / --list-fields / 统计）传 False。
+      ★ 默认值是 `False` —— 因为本函数**也被只读用途调**，而"默认拦住"会让
+        `sync_site` 静默漏掉一批 id 回填。⇒ **是否拦由调用方声明**，
+        而每个调用方都要按"我这条路会不会写站点"来选（判据写在
+        `_published_where` 里，别只写在这里）。
     """
     where, params = _published_where(torrent_id=torrent_id,
                                      only_missing_id=only_missing_id,
                                      only_with_cover=only_with_cover,
-                                     only_stale=only_stale)
+                                     only_stale=only_stale,
+                                     require_allow=require_allow)
 
     conn = connect()
     cur = conn.cursor()
@@ -737,8 +794,20 @@ def count_stale():
     口径与 get_published(only_stale=True) 严格一致（共用 _published_where）。
     daemon 的 edit 命令不带 --only-cover、也不指定 torrent_id，所以这里用
     默认参数选出的就是同一个集合。
+
+    ★★★ `require_allow=True`（2026-09-27 加，**这是修洞的另一半**）：
+      这个函数**是 edit 阶段的待办探针**（`daemon.py` 的 `"pending": db.count_stale`），
+      所以它**必须**带上闸门④ —— 否则会出现最坏的一种错配：
+        探针**算进了** DENY 行（说有活）→ daemon 按 60s 冷却重跑 edit →
+        edit **选不出来**（它带了 guard）→ 探针**还说有活**
+      ⇒ 就是本文件上面警告过的"高频空转，而且不报任何错，只表现为站点被反复敲"。
+      ★ 判据：**探针和它探的那条路必须共用同一个 WHERE** —— 这正是本函数存在的理由，
+        补闸门时**两边都得改**，只改一边比不改更糟（`ERR-META-03`）。
+      ⚠️ `_published_where` 的 `require_allow` 默认是 False，这里**显式传 True**。
+        默认保持 False 是为了让只读调用方（sync_site/check_db）不受影响，
+        而本函数的**唯一消费者就是 edit 探针** ⇒ 这里没有"只读用途"要照顾。
     """
-    where, params = _published_where(only_stale=True)
+    where, params = _published_where(only_stale=True, require_allow=True)
 
     conn = connect()
     n = conn.execute(

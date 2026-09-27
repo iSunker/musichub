@@ -323,10 +323,32 @@ def read_db(dst=None):
     cur = con.cursor()
 
     # ★ stale 的口径与 db.py 的 STALE_CONDITION 严格一致：
-    #   site_status='EXISTS' AND (site_synced_at IS NULL OR updated_at > site_synced_at)
+    #   site_status='EXISTS' AND site_torrent_id 非空 AND STALE_CONDITION
+    #
+    # ★★★ 2026-09-27 修**两处**（原先这里与 `db.count_stale()` 口径**不等**）：
+    #   ① 漏了 `site_torrent_id IS NOT NULL AND site_torrent_id != ''`
+    #      —— 那是 `_published_where()` 的第三步（默认分支），一直在选里。
+    #   ② 闸门④（edit 路，2026-09-27 补）加进 `db.count_stale()` 之后，
+    #      本函数**必须跟着分两个数报**，否则巡检说的"stale 待办"与
+    #      daemon 探针说的**不是同一件事**（`ERR-META-03`，而这正是本文件
+    #      反复警告过的那个形状）。
+    #   ⇒ 现在两个数都给，并**显式标出哪个是 daemon 用的**：
+    #        `stale_edit`     = 带闸门④ ⇒ **daemon edit 探针的真实口径**
+    #        `stale_readonly` = 不带闸门 ⇒ 只读统计口径（gen_counts 沿用这个）
+    #   ★ 两者之差 = "已在站上、本地更新过、但 rule 不是 ALLOW" 的行数
+    #     —— 那些行**不会被 edit**（拦得住），所以它们**会一直 stale**。
+    #     2026-09-27 实测该值为 **1**（就是 15972，那条被误改的 DENY）。
+    #   ★ 判据：**不要把这两个数混成一个** —— 混了就会看到"stale 永远不归零"
+    #     而误以为 edit 卡住了（实际是闸门在正确地把它们挡在外面）。
+    _pub_where = ("site_status='EXISTS' AND site_torrent_id IS NOT NULL "
+                  "AND site_torrent_id != ''")
+    _stale_cond = "(site_synced_at IS NULL OR updated_at > site_synced_at)"
     stale = cur.execute(
-        "SELECT count(*) FROM tasks WHERE site_status='EXISTS' "
-        "AND (site_synced_at IS NULL OR updated_at > site_synced_at)"
+        f"SELECT count(*) FROM tasks WHERE {_pub_where} "
+        f"AND transfer_rule = 'ALLOW' AND {_stale_cond}"
+    ).fetchone()[0]
+    stale_readonly = cur.execute(
+        f"SELECT count(*) FROM tasks WHERE {_pub_where} AND {_stale_cond}"
     ).fetchone()[0]
     exists = cur.execute(
         "SELECT count(*) FROM tasks WHERE site_status='EXISTS'"
@@ -391,7 +413,8 @@ def read_db(dst=None):
     except sqlite3.Error:
         quota_used, quota_known = None, False
     con.close()
-    return {"stale": stale, "exists": exists, "total": total,
+    return {"stale": stale, "stale_readonly": stale_readonly,
+            "exists": exists, "total": total,
             "max_updated_at": mx, "published": published,
             "crawl_todo": crawl_todo, "quota_used": quota_used,
             "quota_known": quota_known}
@@ -896,7 +919,19 @@ def main():
     #   ★ 与下面那个变化检测配合看（它会在差值 >0 时报出来）。
     print(f"  PUBLISHED     {db['published']}   (已上站的条数；★ 只到"
           f"「上站」为止，**不**代表 qB 里在做种)")
-    print(f"  stale 待办    {db['stale']}   (口径 = db.py 的 STALE_CONDITION)")
+    print(f"  stale 待办    {db['stale']}   "
+          f"(★ **daemon edit 探针口径** = db.count_stale()：EXISTS + 有 id + 闸门④(rule=ALLOW) "
+          f"+ STALE_CONDITION)")
+    # ★★ 两个数**必须分开报**（2026-09-27 加）—— 见 read_db() 里那段注释：
+    #   只读口径**不含闸门④** ⇒ 它 ≥ 探针口径。差值 = "本地更新过、但 rule 不是 ALLOW"
+    #   的行数 —— 那些行**会一直被闸门挡着**（`edit` 永远不动它们）。
+    #   ★ 不写清这一点，读的人会看到"只读口径那个数不归零"而误判 edit 卡住。
+    _diff = db["stale_readonly"] - db["stale"]
+    print(f"  ├ 只读口径    {db['stale_readonly']}   "
+          f"(同上前两条，**去掉**闸门④；gen_counts 沿用这个)")
+    if _diff:
+        print(f"  └ ⇒ 差值 {_diff} 条 = 已在站上 + 本地更新过 + **rule 不是 ALLOW** "
+              f"⇒ ★ 被闸门④ **正确地**挡在 edit 之外（它们会**一直 stale**，不是卡住）")
     # ★★ 2026-09-26 加：crawl 的**做功**判据（配额 + 目标行数）。
     #   ★ 单看任何一个都不够：见 read_db() 里那段长注释（两种情形的修法不同）。
     _q = db["quota_used"]

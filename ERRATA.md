@@ -344,6 +344,11 @@
 |---|---|
 | **`.dockerignore` 的一行裸目录名会让 `COPY <dir>/` 静默失效** | `.dockerignore` 只支持**排除**语法，而里面有一行裸 `tools` ⇒ 整个目录不进构建上下文 ⇒ Dockerfile 里的 `COPY tools/ ./tools/` **不报错、也没拷任何东西**，容器里就是没有 `/app/tools/`。实测症状：`docker compose run --rm tools python tools/recall_opencd_descr.py` ⇒ `can't open file '/app/tools/...': No such file or directory`。★ 更坏的配套：`deploy.sh` 的自检只从 Dockerfile 抓 `\.py$` ⇒ **整目录 COPY 它完全看不见**（正是该自检自己注释里警告过、在 reseed-toolkit 上踩过的那个形状）⇒ 白名单漏了目录也照样放行。⇒ 判据：**"这个文件需不需要同步"要按谁拷它去数**，且**目录型 COPY 必须自己能核**（已给 `dockerfile_copy_dirs` 加阴性对照） |
 
+### ERR-META-27
+| 教训 | 根因 |
+|---|---|
+| **同一道判据装在一条路上，就以为它管住了全部 —— 而"哪条路"是按**写不写数据**分的，不是按"哪条路看着像发布"分的** | 闸门④（`transfer_rule='ALLOW'` 才放行）原先**只装在发布队列**（`db.PENDING_PUBLISH_WHERE`）。而**编辑**走的是 `db.get_published()`，它的 WHERE 只有 `site_status='EXISTS'` + 有 `site_torrent_id` + stale —— **完全不知道 `transfer_rule` 这回事**（`update_metadata.py` 里 `transfer_rule` 出现 **0** 次）。★ 实测代价（2026-09-27）：`site_torrent_id=15972`（`transfer_rule='DENY'`）与另外 15 条共享同一个 `updated_at`（同一次批量标脏）⇒ 一起进了 edit 待办 ⇒ 那 15 条恰好 `ALLOW`（改了无害），**这 1 条禁转被 `edit` 按本地内容重写了站点页面**。★★ 最容易误判的一点：它**不是**"漏网的老数据" —— `site_synced_at` 晚于闸门④ 上线 3 天，是**闸门④ 上线之后照漏**。⇒ 判据：**逐条路问"这条路会不会把内容写到站点上"**，会写的**每一条**都要装同一道闸门；"发布"与"编辑"是**两条不同的写路**，装了一条不等于两条都有。★ 修法：判据抽成常量 `db.EDIT_RULE_GUARD`（与发布侧那句**逐字相同**，测试里有断言钉住），`_published_where` 加 `require_allow` 开关由**调用方按"我这条路写不写站点"显式声明**；`get_published`/`--torrent_id` 一律 `True`，`sync_site`/`check_db`/统计保持 `False`（它们只读、回填 id 不违反"禁止轉載"）。★★ **探针必须跟着改**：`db.count_stale()` 是 daemon 的 edit 待办探针，它**也**要带闸门 —— 只改选择器不改探针，就会出现"探针说有活（算进了 DENY）→ daemon 60s 冷却重跑 → edit 一条都选不出来 → 探针还说有活"的**高频空转且不报错**。⇒ **只补一边比不补更糟**（`ERR-META-03`：同一件事必须一处实现、两处同步） |
+
 ### ERR-META-26
 | 教训 | 根因 |
 |---|---|
