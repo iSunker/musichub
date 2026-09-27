@@ -470,16 +470,52 @@ def check_target_where_consistent(verbose=True):
       ⇒ 判据取**最保守**的那一种：**规范化后字符串必须相等**。
         代价是"改了写法但含义没变"也会报红 —— 那**是刻意的**：
         报红时正确的动作是把两份改成同一写法，**不是**把判据放宽。
+
+    ★★ 找对方文件**不许只试 `__file__/../..`**（2026-09-27 实测的坑）：
+      原先写死"仓库根 = 本文件的上一级目录的上一级"⇒ 把本文件 `docker cp`
+      到容器里跑（`/tmp/nas_health.py`）时，它会去找 `/topup_opencd_fields.py`，
+      **找不到就 rc=1** —— 而那不是"漂了"，是"判据跑错了地方"。
+      ⇒ 两种失败**必须分得开**（`ERR-META-13`：同一个非 0 退出码不许盖住两种原因）。
+      这里改成**按顺序找候选位置**，并把"用了哪一个"印出来：
+        ① 显式环境变量 `MUSOPIA_REPO`（CI / 特殊布局用）
+        ② 本文件所在目录的上级（正常仓库布局：`<repo>/tools/nas_health.py`）
+        ③ 本文件所在目录本身（被单独拷出来跑时）
+        ④ 当前工作目录
+      ★ 全部都找不到 ⇒ 报"判据无法执行"（回 False + 非 0），**绝不**回 True。
+        —— "找不到"与"一致"共用一个出口，就是这条判据最大的失败模式。
     """
     def norm(s):
         s = s.replace("\n", " ")
         s = re.sub(r"\s+", " ", s)
         return s.replace('"', "").strip()
 
-    here = pathlib.Path(__file__).resolve().parent.parent  # 仓库根（tools/ 的上一级）
-    tp = here / "topup_opencd_fields.py"
-    if not tp.exists():
-        return False, f"找不到 {tp} —— 判据**无法执行**（不是『通过』）"
+    here = pathlib.Path(__file__).resolve()
+    cands = []
+    env_root = os.environ.get("MUSOPIA_REPO")
+    if env_root:
+        cands.append(pathlib.Path(env_root))
+    cands.append(here.parent.parent)   # <repo>/tools/nas_health.py → <repo>
+    cands.append(here.parent)          # 单独拷出来跑 → 就在同目录
+    cands.append(pathlib.Path.cwd())   # 兜底：当前目录
+    tp = None
+    tried = []
+    for c in cands:
+        p = c / "topup_opencd_fields.py"
+        tried.append(str(p))
+        if p.exists():
+            tp = p
+            break
+    if tp is None:
+        return False, ("找不到 `topup_opencd_fields.py` —— 判据**无法执行**（不是『通过』）。\n"
+                       "        找过这些位置：\n" +
+                       "\n".join(f"          · {t}" for t in tried) +
+                       "\n        ⇒ 用 `MUSOPIA_REPO=<仓库根>` 指定，或在本仓库里跑。\n"
+                       "        ★ 这**不是**『两边一致』—— 请勿据此认为口径没问题。")
+    if verbose:
+        print("=" * 72)
+        print("★ crawl 目标口径一致性（nas_health 副本 vs topup 真值）")
+        print("=" * 72)
+        print(f"  真值文件: {tp}")
 
     src = tp.read_text(encoding="utf-8")
     # ★ 这一步曾经**静默失效**（2026-09-27，我自己踩的）：原先写
@@ -516,9 +552,6 @@ def check_target_where_consistent(verbose=True):
     detail = (f"本文件 CRAWL_TARGET_WHERE = {mine!r}\n"
               f"        topup.TARGET_WHERE = {others!r}")
     if verbose:
-        print("=" * 72)
-        print("★ crawl 目标口径一致性（nas_health 副本 vs topup 真值）")
-        print("=" * 72)
         print(f"  {'✅ 一致' if ok else '❌ **已经漂了**'}")
         print(f"  {detail}")
         if not ok:
@@ -546,7 +579,15 @@ def main():
     # ★ `--check-drift`：纯本地判据自检，**在任何 NAS/网络动作之前**返回。
     #   用途：改完 `topup_opencd_fields.TARGET_WHERE` 后跑一次，确认副本跟着改了。
     if args.check_drift:
-        ok, _ = check_target_where_consistent()
+        # ★★ 这里**必须**把 detail 打出来，不能 `ok, _ = ...` —— 我第一版就是
+        #   那么写的，于是"判据无法执行"（找不到对方文件）时屏幕上**一个字都没有**，
+        #   只有 rc=1。★ 那正是本条判据要防的形状：**"失败的原因"必须能被看见**，
+        #   否则读的人只会去猜（而 rc 相同可能有好几种原因，`ERR-META-13`）。
+        ok, detail = check_target_where_consistent()
+        if not ok:
+            print(detail, file=sys.stderr)
+            print("  ⇒ 退出码 = 1（★ 『不一致』与『判据跑不了』都会回 1，"
+                  "上面那句区分是哪一种）", file=sys.stderr)
         return 0 if ok else 1
 
     dst = pathlib.Path(args.dst) if args.dst else resolve_dst()
