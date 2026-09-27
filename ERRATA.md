@@ -344,6 +344,16 @@
 |---|---|
 | **`.dockerignore` 的一行裸目录名会让 `COPY <dir>/` 静默失效** | `.dockerignore` 只支持**排除**语法，而里面有一行裸 `tools` ⇒ 整个目录不进构建上下文 ⇒ Dockerfile 里的 `COPY tools/ ./tools/` **不报错、也没拷任何东西**，容器里就是没有 `/app/tools/`。实测症状：`docker compose run --rm tools python tools/recall_opencd_descr.py` ⇒ `can't open file '/app/tools/...': No such file or directory`。★ 更坏的配套：`deploy.sh` 的自检只从 Dockerfile 抓 `\.py$` ⇒ **整目录 COPY 它完全看不见**（正是该自检自己注释里警告过、在 reseed-toolkit 上踩过的那个形状）⇒ 白名单漏了目录也照样放行。⇒ 判据：**"这个文件需不需要同步"要按谁拷它去数**，且**目录型 COPY 必须自己能核**（已给 `dockerfile_copy_dirs` 加阴性对照） |
 
+### ERR-META-26
+| 教训 | 根因 |
+|---|---|
+| **"本机读不到生产配置"⇒ 任何**硬编码的副本**都必然是过期值；而拿过期副本判"该不该动"会给出**看着精确的错结论** | `tools/nas_health.py` 的 `INTERVALS` 硬编码 `"publish": 1800`，而 NAS 真值 `PUBLISH_INTERVAL=5400`。★ 病根**不是"忘了改"**：本机**读不到 NAS 的 `.env`**（deploy.sh 的 NEVER 名单，`ERR-ENV-02`）⇒ 那张表**必然是副本**，它**迟早**会漂 —— 而漂了**不报错**，只是把「★ 超过周期」这条判据按错的比例算（实测 publish 会凭空报到 3 小时）。★ 更深一层：源码 `env_int("PUBLISH_INTERVAL", 1800)` 里那个 `1800` 只是**默认值**，真实生效值在 `.env` ⇒ **"把代码默认值当成部署真值"**是这张表的原始病根（表的注释还写着"判据来源是源码"，看着很有依据）。⇒ 修法：**判据来源换成本机真正拿得到的那个** —— 容器自己落的 `daemon_env.json` 快照（`daemon.ENV_SNAPSHOT_KEYS` 2026-09-27 补上 `RUN_ON_START` + 全部 `*_INTERVAL`），硬编码表**降级为兜底**，且**每次运行都印出数据来源**；快照与兜底不等时**报出来**、不静默取一个。★ 一般化：**判据不可用时，正确的动作是"如实说判不了"，不是"退到一份过期副本"** —— 后者会让整份报告带上一个看不见的系统性偏差（`ERR-META-01`：判据失效比不检测更危险） |
+
+### ERR-DOCKER-10
+| 教训 | 根因 |
+|---|---|
+| **compose 里 `once:`（或任何别的服务）与主服务用同名键时，只看键名会得出**反向**结论** | `docker-compose.yml` 第 117 行有 `- RUN_ON_START=true`，而主服务吃的 `.env` 写的是 `RUN_ON_START=false`（实测 `docker exec opencd2musopia env`）。★ 那一行**不属于主服务** —— 它缩进在 `once:` 块的 `environment:` 里（`once` 是 `profiles: ["tools"]` 的一次性服务，跑一轮就退，写 `true` 是**故意且正确**的）。★ 我 `grep RUN_ON_START docker-compose.yml` 拿到第 117 行，**没看缩进**就当成了主服务的配置，于是得出"两处矛盾、机器吃了 false"—— 而真相是**主服务只有一处来源**（`.env`）。⇒ 判据：**`grep` 到的键必须先确认它属于哪个服务** —— YAML 的归属由**缩进**决定，而 `grep` 恰好把缩进抹平成了"同名的一行"。★ 一般化：**`grep` 给你的是"这个字符串出现过"，不是"这个配置生效了"**；凡要判"谁是真值"，必须回到**层级**（compose 的 service → environment）或**机器自己报的**（`docker exec … env` / 容器快照）—— 后者才是权威。★ 与 `ERR-DOCKER-09` 同族：都是"**看起来在的，不是真在的**" |
+
 ### ERR-DOCKER-09
 | 教训 | 根因 |
 |---|---|

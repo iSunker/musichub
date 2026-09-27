@@ -425,6 +425,31 @@ ENV_SNAPSHOT_KEYS = (
     #     `每日上限 = 86400/PUBLISH_INTERVAL × PUBLISH_MAX_PER_CYCLE` 直接印出来
     #     —— 本轮用户问"现在每天最多发多少条"，那个数字不该靠人算。
     "PUBLISH_MAX_PER_CYCLE", "PUBLISH_MIN_GAP",
+    # ══════════════════════════════════════════════════════════════════════
+    # ★★★ 2026-09-27 加的：**调度语义**那两个族 —— `RUN_ON_START` + 全部 `*_INTERVAL`。
+    #
+    #   为什么必须进白名单（与上面 `PUBLISH_INTERVAL` 同一条理由，但这里更硬）：
+    #   ★ `RUN_ON_START` **不是普通开关，它改变的是"时间"的含义**：
+    #       · `true`  ⇒ 启动时把**所有** `last_run` 清 0 = 立刻全跑一轮（见 main()）
+    #       · `false` ⇒ **沿用** state 里的旧 `last_run`，按 `now - last < interval` 判到期
+    #     所以"容器刚重建完，为什么 scan 没跑"这个问题的答案，
+    #     **完全由这个键决定**，而它原先**看不见** ⇒ 只能登 NAS `docker exec env` 问。
+    #   ★ 实测代价（2026-09-27 本机巡检）：我把"日志里没有 scan"读成了「重启后停摆」，
+    #     还据此建议改代码 —— 真因就是 `RUN_ON_START=false`（沿用旧 last_run，
+    #     scan 尚未到期）。★ 判据本身不存在，结论只能靠猜（`ERR-META-01`）。
+    #
+    #   ★ 同理带上全部 `*_INTERVAL`：巡检脚本要回答"这个阶段**该不该动**"，
+    #     就必须知道它的周期；而周期**只有容器知道**（`.env` 在 NEVER 名单里，
+    #     本机读不到，`ERR-ENV-02`）。不落盘 ⇒ 巡检只能用**硬编码的过期副本**
+    #     去判 —— 2026-09-27 实测那份副本写着 `publish 1800`，真值是 `5400`
+    #     （同形错的第二次：**一个量两处来源**，`ERR-META-03`）。
+    #
+    #   ★ 安全：这些值**全是普通整数/布尔**，不含任何凭据（`.env` 里的密钥
+    #     没有一个在这里）⇒ 放进选择性落盘的白名单没有外溢问题。
+    # ══════════════════════════════════════════════════════════════════════
+    "RUN_ON_START",
+    "SCAN_INTERVAL", "PUBLISH_INTERVAL", "SYNC_INTERVAL", "COVERS_INTERVAL",
+    "EDIT_INTERVAL", "VTID_INTERVAL", "CRAWL_INTERVAL",
 )
 
 

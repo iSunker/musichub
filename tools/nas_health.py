@@ -49,15 +49,42 @@ CST = 8 * 3600
 #     并且**在拿不到上一次采样时如实说不判**，不再用一个阈值假装能判。
 HEARTBEAT_FRESH = 120        # 秒；仅用于"是否需要提醒"，**不是**生死判据
 
-# ★★ 必须与 `daemon.build_stages()` 的 6 个阶段**一一对应**（2026-09-22 补齐 crawl）。
-#    这里**曾经漏了 crawl**，后果是它从不进入下面的检查循环 —— 一个被门控关掉的阶段
-#    看起来"正常"，因为你根本没查它。而"没查"和"查了没事"在报告里长得一模一样
-#    （ERR-META-01 一族：检测方法失效比不检测更危险）。
-#    ★ 判据来源是**源码**（`daemon.build_stages()` 里 6 个 `env_bool("ENABLE_*")`），
-#      不是 startup banner —— banner 只列**门控后**进来的阶段，两个 false 就被它吃掉，
-#      拿它当"阶段列表"的判据**已经错过一次**（publish 和 crawl 当时都"不在"）。
-INTERVALS = {"scan": 1800, "publish": 1800, "sync": 86400,
-             "covers": 21600, "edit": 21600, "crawl": 1800}
+# ★★★ 2026-09-27 **订正 + 改判据来源**（这条被漂了整整一天才被发现）。
+#
+#   原表写的是 `"publish": 1800`，而 NAS 上的真值 `PUBLISH_INTERVAL=5400`
+#   （实测 `docker exec opencd2musopia env`）⇒ **周期判据少了 3 倍**，
+#   于是「★ 超过周期」这条会**凭空报到 3 小时**（好在它当前是空转，没人被误伤）。
+#
+#   ★ 根因与 `ERR-DOCKER-09` **同族但更硬**：本机**读不到 NAS 的 `.env`**
+#     （deploy.sh 的 NEVER 名单，`ERR-ENV-02`）⇒ 这张硬编码表**必然是过期副本**。
+#     上面 `INTERVALS` 的注释自己就写着"判据来源是**源码**"—— 而源码里的
+#     `env_int("PUBLISH_INTERVAL", 1800)` 那个 `1800` 只是**默认值**，
+#     真实生效值在 `.env` 里。**把"代码默认值"当成"部署真值"**就是这张表的病根。
+#
+#   ★ 修法（与 `ENV_KEY_TYPE` 表的思路一致：**把口径搬进数据结构，别靠人记得改**）：
+#     · 容器现在会把 `*_INTERVAL` / `RUN_ON_START` 落进 `daemon_env.json` 快照
+#       （`daemon.ENV_SNAPSHOT_KEYS`，2026-09-27 加）；
+#     · `INTERVALS` 降级为**兜底**（快照读不到时用），每次运行都印出**数据来源**；
+#     · ★ 兜底值**必须与代码默认值一致**，且若快照读到了就**以快照为准** ——
+#       两处不一致时**报出来**、不静默取一个（否则又是两处来源，`ERR-META-03`）。
+#
+#   ★ 表里**仍必须**与 `daemon.build_stages()` 的 7 个阶段一一对应
+#     （2026-09-22 补 crawl、2026-09-23 补 vtid）。
+#     ★ 这里**曾经**漏了 crawl：后果是它从不进入下面的检查循环 —— 一个被门控
+#       关掉的阶段看起来"正常"，因为你根本没查它。而"没查"和"查了没事"在报告里
+#     长得一模一样（`ERR-META-01` 一族：检测方法失效比不检测更危险）。
+#     ★ 也曾漏过 `vtid`（`STAGE_ENABLE_KEY` 里有 `ENABLE_VTID`，但 INTERVALS 里没有
+#       ⇒ 它同样不进入循环）。⇒ 判据来源是**源码**（`daemon.build_stages()` 里
+#       每个 `env_bool("ENABLE_*")`），**不是 startup banner** —— banner 只列
+#       门控后进来的阶段，两个 false 就被它吃掉（拿它当"阶段列表"已经错过一次）。
+INTERVALS = {"scan": 1800, "publish": 5400, "sync": 86400,
+             "covers": 21600, "edit": 21600, "vtid": 86400, "crawl": 1800}
+# 阶段名 → 快照里那个周期键（**显式列出**，不靠 `f"{stage.upper()}_INTERVAL"` 拼 ——
+# 拼法在改名时不会报错，只会静默查不到，那种"静默"正是本文件反复记的那类坑）
+STAGE_INTERVAL_KEY = {"scan": "SCAN_INTERVAL", "publish": "PUBLISH_INTERVAL",
+                      "sync": "SYNC_INTERVAL", "covers": "COVERS_INTERVAL",
+                      "edit": "EDIT_INTERVAL", "vtid": "VTID_INTERVAL",
+                      "crawl": "CRAWL_INTERVAL"}
 EDIT_COOLDOWN = 60
 # ★ 旧的 `HEARTBEAT_FRESH = 120` 挪到上面（连同"为什么它不是生死判据"的实测依据）。
 
@@ -111,7 +138,55 @@ ENV_KEY_TYPE = {
     # ---- 速率/时长旋钮：**整数** ----
     "PUBLISH_INTERVAL": "int", "PUBLISH_MAX_PER_CYCLE": "int",
     "PUBLISH_MIN_GAP": "int",
+    # ---- 调度语义（2026-09-27 加）----
+    #   ★ `RUN_ON_START` 是**布尔**（它决定启动是否清空 last_run，见 daemon.main()）；
+    #     其余 `*_INTERVAL` 是**整数秒**。
+    #   ★ 把 `RUN_ON_START` 落在**这里**（而不是只落进 `STAGE_ENABLE_KEY` 那种
+    #     "门控开关"循环）是因为它**不是门控**：阶段开关决定"跑不跑"，
+    #     它决定"**什么时候开始算时间**"。两者的读法不同，别混。
+    "RUN_ON_START": "bool",
+    "SCAN_INTERVAL": "int", "SYNC_INTERVAL": "int", "COVERS_INTERVAL": "int",
+    "EDIT_INTERVAL": "int", "VTID_INTERVAL": "int", "CRAWL_INTERVAL": "int",
 }
+
+
+def resolve_intervals(snap_vals, snap_raw, snap_note="", snap_age=None):
+    """★ 每个阶段的周期：**快照优先，硬编码兜底**，并返回每个值的**来源**以便印出来。
+
+    返回 (intervals: dict[str, int], sources: dict[str, str], warns: list[str])。
+
+    ★★ 为什么不能简单"快照没有就用兜底"就完事：那样两处不一致时会**静默**取一个，
+      而"静默取一个"正是 `ERR-META-03` 的形状（一个量两处来源，读的人不知道信哪份）。
+      ⇒ 凡快照**读到了**却与兜底**不等**，一律记一条 warn 印出来 —— 让"哪个是真"是个
+      **看得见的决定**，而不是一个碰巧的取值顺序。
+
+    ★ 判据必须是 `typed()`（按 `ENV_KEY_TYPE` 取正确视图），**不能**直接从 `vals`
+      （布尔视图）读整数 —— 那会把 `"5400"` 转成 `True`（`ERR-META-13` 一族，
+      本文件 2026-09-24 为 `PUBLISH_MAX_PER_CYCLE` 踩过一次）。
+    """
+    out, src, warns = {}, {}, []
+    for stage, fallback in INTERVALS.items():
+        key = STAGE_INTERVAL_KEY.get(stage)
+        val = typed(snap_vals, snap_raw, key) if key else None
+        if isinstance(val, bool):                 # typed() 对 int 键不该返回 bool
+            warns.append(f"{key} 从快照读出了布尔值（类型表写错了？）⇒ 改用兜底")
+            val = None
+        if isinstance(val, int) and val > 0:
+            n = val
+            src[stage] = f"快照 {key}={n}"
+            if n != fallback:
+                warns.append(f"★ {stage} 周期**两处不一致**：快照 {key}={n}s，"
+                             f"本文件兜底 {fallback}s ⇒ **以快照为准**（容器才是真跑的）")
+        else:
+            n = fallback
+            src[stage] = (f"⚠ 兜底 {fallback}（快照里没有 {key} —— "
+                          f"{snap_note or '键未落盘'}）")
+        out[stage] = n
+    # ★ 兜底值本身也要能被审计：表里漏一个阶段 ⇒ 它根本不进循环（见 INTERVALS 注释）
+    _missing = set(STAGE_INTERVAL_KEY) - set(INTERVALS)
+    if _missing:
+        warns.append(f"★ STAGE_INTERVAL_KEY 里有 INTERVALS 不知道的阶段：{_missing}")
+    return out, src, warns
 
 
 def typed(snap_vals, snap_raw, key):
@@ -373,8 +448,13 @@ def main():
     #    那会让本循环引用一个**尚未赋值**的名字（`NameError`）。
     #    ★ 它是**只读一次**的：心跳那节复用它，不再自己读一遍（同一个量只取一处）。
     prev_snap = json.loads(SNAP.read_text(encoding="utf-8")) if SNAP.exists() else None
+    # ★★★ 2026-09-27：周期**不再直接用硬编码的 `INTERVALS`** —— 改成"快照优先、
+    #   硬编码兜底"，并把每个值**从哪来**记下来印出去（见 `resolve_intervals`）。
+    #   ★ 为什么：本机读不到 NAS 的 `.env`（ERR-ENV-02）⇒ 硬编码表**必然是过期副本**；
+    #     实测它写着 `publish 1800` 而真值 `5400`。⇒ 判据来源必须换成**容器自己落的快照**。
+    iv_map, iv_src, iv_warns = resolve_intervals(snap_vals, snap_raw, snap_note, snap_age)
     rows = []
-    for stage, iv in INTERVALS.items():
+    for stage, iv in iv_map.items():
         st = state.get(stage)
         if not st or st.get("last_run") is None:
             rows.append((stage, None, iv, None, "❔ state 里没有这个阶段"))
@@ -591,9 +671,33 @@ def main():
 
     print("\n【各阶段】state 里该动的有没有动")
     print(f"  「关着」的判据来源：{disabled_src}")
+    # ★★★ 2026-09-27：**周期的来源必须印出来** —— 上面这行判定的每一格都要用它
+    #   （`age <= iv` 里的 `iv` 就是它）。不印来源 ⇒ 读的人不知道"周期"是**实测**
+    #   还是**过期副本**，而这正是 2026-09-27 那次误导的来源（`publish 1800` vs 真值 `5400`）。
+    _sc = sorted({v for v in iv_src.values()})
+    print(f"  「周期」的判据来源：{' ／ '.join(_sc) if len(_sc) <= 3 else '逐阶段如下'}")
+    for _w in iv_warns:
+        print(f"      {_w}")
+    if len(_sc) > 3:
+        for _st in iv_map:
+            print(f"      · {_st:<8} {iv_src.get(_st)}")
     print(f"  {'阶段':<9}{'间隔':>8}  {'last_run (CST)':<21}{'年龄':<26}判定")
     for stage, age, iv, st, verdict in rows:
-        ivs = f"{iv}s" if iv < 3600 else f"{iv // 3600}h"
+        # ★★★ 2026-09-27 修：原先写成 `iv < 3600 → 秒 : 否则 iv//3600 小时`
+        #   ⇒ `5400` 被印成 `1h`（**整数除法静默截断**）。而 `5400` 恰好是
+        #   publish 的真值，也就是说**这条打印错误正好落在这个值上** ——
+        #   一个"看着像 1 小时"的 90 分钟，比不打印更坏（`ERR-META-01` 一族：
+        #   显示口径自己失真，读的人却拿它当判据用）。
+        #   实测症状：publish 那行印 `1h`，而它实际比 `sync 24h` 的量级判断还少一位。
+        # ★ 修法：能整除就除以 3600，不能就**如实写分钟+秒**，绝不截断。
+        if iv % 3600 == 0:
+            ivs = f"{iv // 3600}h"
+        elif iv >= 3600:
+            ivs = f"{iv // 3600}h{(iv % 3600) // 60}m"
+        elif iv % 60 == 0:
+            ivs = f"{iv // 60}m"
+        else:
+            ivs = f"{iv}s"
         lr = cst(st["last_run"]) if st and st.get("last_run") else "-"
         ages = fmt_age(age) if age is not None else "-"
         print(f"  {stage:<9}{ivs:>8}  {lr:<21}{ages:<26}{verdict}")
@@ -644,6 +748,33 @@ def main():
         auto_pub = "★★ 会自动发：两把钥匙都成立 —— 下一轮 publish 到期即提交"
     else:
         auto_pub = "⛔ 不发：ENABLE_PUBLISH=true 但第二把钥匙没通过（每轮退避重试）"
+
+    # ---------- ★★ 调度语义：`RUN_ON_START`（2026-09-27 加） ----------
+    #
+    # ★ 为什么要**单独报**这一条：它**不是门控开关**，它改变的是**"时间"的含义**：
+    #     · `true`  ⇒ 启动时把**所有** `last_run` 清 0 = 立刻全跑一轮（daemon.main()）
+    #     · `false` ⇒ **沿用** state 里的旧 `last_run`，按 `now - last < interval` 判到期
+    #   ⇒ 容器刚重建完"为什么某阶段没跑"**完全由它决定**。
+    # ★ 实测代价（2026-09-27）：这个键原先**不在快照白名单里** ⇒ 本机看不见它
+    #   ⇒ 我把"日志里没有 scan"读成了「重启后停摆」并建议改代码，真因正是
+    #   `RUN_ON_START=false`（沿用旧 `last_run`，scan **尚未到期**）。
+    #   ⇒ 判据不存在时，结论只能靠猜（`ERR-META-01`：判据要可执行，不能靠记忆）。
+    # ★ 三态，照抄上面的教训：键在且真 / 键在且假 / **键不在**（= 未落盘，
+    #   旧版 daemon 的旧快照）—— 第三种**不许**当成 `false`，那会把"看不见"说成"没配"。
+    print("\n【调度语义】RUN_ON_START —— 决定「启动算不算时间起点」")
+    _ros = typed(snap_vals, snap_raw, "RUN_ON_START") if snap_raw else None
+    if not snap_raw:
+        print("  ❔ 读不到快照 ⇒ **判不了**（不许按 false 猜；登 NAS 用 "
+              "`docker exec opencd2musopia env` 问）")
+    elif _ros is None:
+        print("  ❔ 快照里**没有这个键** ⇒ 本快照是 2026-09-27 之前落的（该键当天才进白名单）"
+              "；⇒ **判不了**，等容器重建后重跑本巡检")
+    else:
+        print(f"  RUN_ON_START = {_ros}"
+              f"   ⇒ {'启动**立刻全跑一轮**（清空全部 last_run）' if _ros else '启动**不补跑**，沿用 state 里的旧 last_run（按周期判到期）'}")
+        if not _ros:
+            print("     ★ 读法：所以「刚重建完某阶段没跑」**可能完全正常** —— 先算 "
+                  "`last_run + 该阶段周期` 到没到，**别**拿「日志里有没有」当判据")
 
     print("\n【自动发布】两把钥匙都成立才会真提交（不可逆，见 ERR-META-12）")
     print(f"  ENABLE_PUBLISH      = "
