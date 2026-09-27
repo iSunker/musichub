@@ -258,9 +258,48 @@ def read_db(dst=None):
     published = cur.execute(
         "SELECT count(*) FROM tasks WHERE status='PUBLISHED'"
     ).fetchone()[0]
+
+    # ══════════════════════════════════════════════════════════════════
+    # ★★★ 2026-09-26 加：`crawl` 的「在做功吗」判据
+    #
+    #   起因（当晚实测踩到，且**骗过了本脚本**）：`crawl.last_run` 每 30 分钟
+    #   推进一次、`nas_health.py` 报「✅ 在周期内」—— 而它**一个请求都没发**：
+    #       · 当天配额 50/50 已在 19:58 CST 用满（账本是 data.db:opencd_quota）；
+    #       · 配额满后 `topup` 第 51 个请求被 `RateGate` 拒 ⇒ 立刻返回；
+    #       · 于是阶段耗时 **1.4 秒**、报「✅ 完成」、`last_run` 照常推进。
+    #   ⇒ ★★ **`last_run` 新鲜 ≠ 阶段在做功**（这正是 ERR-META-01 一族：
+    #      判据看着合理，量的却是另一个对象 —— 这里量的是"调度到了"，
+    #      不是"抓到了")。
+    #
+    #   真判据 = 「**目标行数有没有减少**」（与 edit 那条 `no_progress` 同款思路）：
+    #       目标 = 有 opencd_tid 但 mapped_json 空的皇后行（= crawl 要补的那些）
+    #     配额 = 当天已用 / 上限
+    #   ⇒ 「**配额已满 且 目标没减少**」⇒ 这才叫空转，必须报出来。
+    #
+    #   ★ 为什么把两个数**都**报：单看"目标没减少"无法区分
+    #       (i) 配额空了（= 明天会自己好） 与
+    #      (ii) 抓了但没落库（= 真 bug，明天也不会好）
+    #     —— 两者的**修法完全不同**（ERR-META-13/14：不许把两种情形印成同一行）。
+    crawl_todo = cur.execute(
+        "SELECT count(*) FROM tasks "
+        " WHERE opencd_tid IS NOT NULL AND opencd_tid != '' "
+        "   AND (mapped_json IS NULL OR mapped_json = '')"
+    ).fetchone()[0]
+    # ★ 配额账本：`opencd_quota` 表按 (day_key, kind) 记账。★ 表可能不存在
+    #   （早期库）⇒ **读不到就说读不到**，绝不当成 0（ERR-SQL-05）。
+    try:
+        qrow = cur.execute(
+            "SELECT used FROM opencd_quota WHERE day_key = ? AND kind = 'request'",
+            (time.strftime("%Y-%m-%d"),)).fetchone()
+        quota_used = qrow[0] if qrow else 0
+        quota_known = True
+    except sqlite3.Error:
+        quota_used, quota_known = None, False
     con.close()
     return {"stale": stale, "exists": exists, "total": total,
-            "max_updated_at": mx, "published": published}
+            "max_updated_at": mx, "published": published,
+            "crawl_todo": crawl_todo, "quota_used": quota_used,
+            "quota_known": quota_known}
 
 
 def main():
@@ -329,6 +368,11 @@ def main():
     db = read_db(dst)
 
     # ---------- 精确计算 ----------
+    # ★★ 2026-09-26：把 `prev_snap`（上次快照）**提前到这里**读 —— 因为下面的
+    #    `crawl` 空转判据要用它拿"上一轮的目标行数"。原先它在心跳那一节才读，
+    #    那会让本循环引用一个**尚未赋值**的名字（`NameError`）。
+    #    ★ 它是**只读一次**的：心跳那节复用它，不再自己读一遍（同一个量只取一处）。
+    prev_snap = json.loads(SNAP.read_text(encoding="utf-8")) if SNAP.exists() else None
     rows = []
     for stage, iv in INTERVALS.items():
         st = state.get(stage)
@@ -373,6 +417,48 @@ def main():
         if stage == "edit" and st.get("no_progress"):
             verdict += (" · no_progress=true（edit 调度退回长周期，正常；"
                         "★ 与下方 stale 待办**不是同一判据**）")
+        # ══════════════════════════════════════════════════════════════
+        # ★★★ 2026-09-26 加：`crawl` 的「空转」判据（防它再骗过本脚本一次）
+        #
+        #   上面那条 `age <= iv ⇒ ✅ 在周期内` 只说明**调度到了**，
+        #   不说明**抓到了** —— 实测它每轮 1.4 秒、零产出的那晚，
+        #   本脚本报的就是 ✅。这里补上真判据：
+        #       「配额已满 且 目标行数没减少」⇒ 空转（★ 明确说出来）
+        #   ★ 只有**两个数都拿到**时才下这个结论；任一读不到 ⇒ 如实说"判不了"
+        #     （ERR-SQL-05 / ERR-META-14：读不到不许印成"没问题"）。
+        # ══════════════════════════════════════════════════════════════
+        if stage == "crawl":
+            qt = db.get("crawl_todo")
+            qu, qk = db.get("quota_used"), db.get("quota_known")
+            _max = os.getenv("OPENCD_MAX_PER_DAY", "50")
+            try:
+                _maxn = int(float(_max))
+            except ValueError:
+                _maxn = None
+            # ★ 上一轮快照里的那个数（没有上一轮 ⇒ 不判"没减少"）
+            _prev_todo = (prev_snap or {}).get("db_crawl_todo") \
+                if isinstance(prev_snap, dict) else None
+            _fat = (qk and qu is not None and _maxn is not None and qu >= _maxn)
+            _stuck = (_prev_todo is not None and qt is not None
+                      and qt >= _prev_todo)
+            if _fat and _stuck:
+                verdict += (f" · ★★ **空转**：配额 {qu}/{_maxn} 已满，"
+                            f"而目标 {_prev_todo}→{qt} 没减少 ⇒ "
+                            f"本轮**零产出**（明天换天自动恢复；★ 若明天配额未满而目标仍不动，"
+                            f"那才是真 bug）")
+            elif _fat:
+                verdict += (f" · ★ 配额 {qu}/{_maxn} 已满 ⇒ 本轮**发不出请求**"
+                            f"（目标 {qt} 条待补；明天换天恢复）")
+            elif not qk:
+                verdict += " · ❔ 配额账本**读不到** ⇒ 无法判'在不在做功'（不当成 0）"
+            elif _prev_todo is None:
+                verdict += f" · （目标 {qt} 条待补；配额 {qu}/{_maxn}。首次采样，不判增减）"
+            elif qt < _prev_todo:
+                verdict += (f" · ✅ **在推进**：目标 {_prev_todo}→{qt}"
+                            f"（配额 {qu}/{_maxn}）")
+            else:
+                verdict += (f" · ★★ **目标没减少**（{_prev_todo}→{qt}）"
+                            f"而配额只用 {qu}/{_maxn} ⇒ ★ 疑似**抓了没落库**（真 bug）")
         rows.append((stage, age, iv, st, verdict))
 
     hb_age = now - max(hb_mtime, hb_content or 0)
@@ -394,7 +480,6 @@ def main():
     #   ⇒ 保守取 `HEARTBEAT_FRESH`(120s) 作为"没变就值得说一声"的窗口。
     #   ★ 窗口**长于**心跳周期是必须的（`ERR-META-09`：窗口短于静默期，
     #     "没动"就是个假信号）。
-    prev_snap = json.loads(SNAP.read_text(encoding="utf-8")) if SNAP.exists() else None
     prev_hb = (prev_snap or {}).get("heartbeat_epoch")
     prev_at = (prev_snap or {}).get("checked_at")
     if hb_content is None:
@@ -451,6 +536,12 @@ def main():
         "state_last_run": {k: (state.get(k) or {}).get("last_run")
                            for k in INTERVALS},
         "db": db,
+        # ★★ 2026-09-26：把 crawl 的两个做功判据**单独存成顶层键**（而不是只埋在
+        #    `db` 里）—— 因为 `crawl` 那行的判定要按**顶层键**读上一轮的值
+        #    （`db_crawl_todo`）。存进 `db` 会让下一轮得先判"上一轮的 db 里有没有
+        #    这个子键"，多一层三态判断 ⇒ 直接放顶层，缺失即 None，语义最清楚。
+        "db_crawl_todo": db["crawl_todo"],
+        "db_quota_used": db["quota_used"],
     }
     prev = prev_snap          # ★ 上面判心跳时已读过一次，不重复读（同一次运行内必须同一份）
 
@@ -661,6 +752,17 @@ def main():
     print(f"  PUBLISHED     {db['published']}   (已上站的条数；★ 只到"
           f"「上站」为止，**不**代表 qB 里在做种)")
     print(f"  stale 待办    {db['stale']}   (口径 = db.py 的 STALE_CONDITION)")
+    # ★★ 2026-09-26 加：crawl 的**做功**判据（配额 + 目标行数）。
+    #   ★ 单看任何一个都不够：见 read_db() 里那段长注释（两种情形的修法不同）。
+    _q = db["quota_used"]
+    _qn = db["quota_known"]
+    print(f"  crawl 目标    {db['crawl_todo']}   (有 opencd_tid 但 mapped_json 空"
+          f"的皇后行 ⇒ ★ 这是 crawl 的**待办**；★ 上面阶段表里 crawl 那行会判它在不在推进)")
+    print(f"  配额(今天)    "
+          + (f"{_q} / {os.getenv('OPENCD_MAX_PER_DAY', '50')}"
+             f"   (账本 = data.db:opencd_quota；★ 满 ⇒ crawl 本轮出不了网)"
+             if _qn else
+             "❔ **读不到**（opencd_quota 表不在 / 读失败）⇒ ★ 不许当成 0"))
     print(f"  max(updated_at)  {db['max_updated_at']}  ← ★ 这是 **UTC**，加 8h = "
           f"{cst(_utc_to_epoch(db['max_updated_at'])) if db['max_updated_at'] else '-'} CST")
 
