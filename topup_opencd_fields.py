@@ -140,7 +140,9 @@ TRIED_FILE = "topup_tried.jsonl"
 #     `db.PENDING_PUBLISH_WHERE` 的第二句就是
 #     `(site_status IS NULL OR site_status != 'EXISTS')` ⇒ **已上站的行走不到队列**。
 #     而补 `mapped_json` 唯一的**目的**就是让行能过闸门③ 进队列
-#     （见本模块头纪律 5/6：补完还要**另一步**才能发）。
+#     （★ 2026-09-28 订正：原先这里写"补完还要**另一步**才能发" —— 那"另一步"
+#      是改回 `status`，而**根因已修**（见 `ERR-DATA-06`）：本步现在会带回
+#      库里已有的 `torrent_file` ⇒ `status` 保持 `SUCCESS`，**不用再补一步**）。
 #     ⇒ 对 `EXISTS` 的行，这个目的是**不可能达成**的 ⇒ 请求**纯浪费**。
 #
 #   ★★ 更要命的是**排序的连带效应**：选批排序键把 `status='SUCCESS'` 排前
@@ -572,13 +574,18 @@ def main():
     print("\n" + "-" * 74)
     print("④ ★★ 下一步（**本脚本刻意不做**）")
     print("-" * 74)
-    print("""  · 入库后这些行的 `status` 会变成 `NO_TORRENT_FILE`（原因见模块头纪律 5/6）
-    ⇒ **想发它们必须显式把 `status` 改回 `SUCCESS`**，那是**另一件事**、
-      且**需要你决定发哪些**（本脚本不会替你改 status）。
+    print("""  · ★ `status` **不再被本脚本改成 `NO_TORRENT_FILE`**（2026-09-28 修，
+     见 `ERR-DATA-06`）：本步会**把库里已有的 `torrent_file` 原样交回**
+     ⇒ 那些行的 `status` 保持 `SUCCESS`（库里那列本来就为空的行除外 ——
+     那种情况仍落 `NO_TORRENT_FILE`，因为**确实不知道**文件在哪）。
   · `mapped_json`/`artist`/`year`/`transfer_rule` 已经补好了 ⇒
      将来要发**不用再花请求**。
   · 发布队列的闸门④ 要求 `transfer_rule='ALLOW'` ⇒
-     只有 ③ 里 `ALLOW` 的那批进得了队列；`NEED_CONFIRM`/`DENY` 的要你定。""")
+     只有 ③ 里 `ALLOW` 的那批进得了队列；`NEED_CONFIRM`/`DENY` 的要你定。
+  · ⚠️ **若库里那列 `torrent_file` 为空**（如 `status='NO_LOG_FILE'` 的
+     187 条），本步**补不了它们能不能发** —— 它们卡在 `status` 上，
+     不在 `transfer_rule` 上。批量路会把它们一起选中，
+     跑之前请先确认目标集（用 `--tids` 点名最稳）。""")
     print("=" * 74)
     return 0
 
