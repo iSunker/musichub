@@ -344,6 +344,13 @@
 |---|---|
 | **`.dockerignore` 的一行裸目录名会让 `COPY <dir>/` 静默失效** | `.dockerignore` 只支持**排除**语法，而里面有一行裸 `tools` ⇒ 整个目录不进构建上下文 ⇒ Dockerfile 里的 `COPY tools/ ./tools/` **不报错、也没拷任何东西**，容器里就是没有 `/app/tools/`。实测症状：`docker compose run --rm tools python tools/recall_opencd_descr.py` ⇒ `can't open file '/app/tools/...': No such file or directory`。★ 更坏的配套：`deploy.sh` 的自检只从 Dockerfile 抓 `\.py$` ⇒ **整目录 COPY 它完全看不见**（正是该自检自己注释里警告过、在 reseed-toolkit 上踩过的那个形状）⇒ 白名单漏了目录也照样放行。⇒ 判据：**"这个文件需不需要同步"要按谁拷它去数**，且**目录型 COPY 必须自己能核**（已给 `dockerfile_copy_dirs` 加阴性对照） |
 
+### ERR-META-31
+| 教训 | 根因 |
+|---|---|
+| **「没跑」与「跑过」如果落盘时同形，读状态文件的人必然读错 —— 而"我们记得容器几点启动"不是判据，是脑内状态** | `daemon.py` 主循环里，跳过一个未到期阶段是**纯 `continue`**（不写任何东西），而 `last_run` 与 `last_finish` 在**同一行、同一时刻**写入 ⇒ 盘上这两种情形**一模一样**：<br>　(A) 这一轮真跑了 edit　→ `last_finish = T`<br>　(B) 这一轮 edit 被跳过　→ `last_finish = 上一轮的 T`（没动）<br>★ 2026-09-27 实测被骗：容器 `22:27:54` 重建、`RUN_ON_START=false` ⇒ 首轮只有 `crawl` 到期（`now-last_run = 1824s > 1800`），其余 6 个全跳过；但 `save_state()` 在 crawl 那轮**把整份 state 重写**了一遍 ⇒ `edit.last_finish` 显示 `22:27:06`，我据此报成「22:27:06 跑过 edit」。**读错了。**（精确复算：首轮唯一到期者确是 crawl，`edit` 的 `age=1731s < 21600`）<br>⇒ 修法三条：①**跳过时写 `last_skip_at` + `skip_reason`**（`last_run`/`last_finish` 一律不动）②**`last_finish` 只在真跑了的分支里写** ⇒ 此后「`last_finish` 早于容器启动时刻」= **从没跑过**，是个可判的事实 ③`run_stage` 的返回值从 `bool` 改成 `{"ok","code","took","started_at"}` ⇒ **退出码与耗时落盘**（理由见下一条附）<br>★ 一般化：**一个状态文件如果有两种历史会写成同一个样子，那它就没有承载那一bit** —— 别指望读的人"记得上下文"补上这一bit |
+| ★★ 附一：**这条改动第一版就静默失效了，而且失效方式与要修的病完全相同** | 我在跳过支写了 `st["last_skip_at"] = ...` 然后 `continue` —— 但 `save_state(state)` 原先**只在真跑了阶段之后**调用（在 for 内部、`continue` 之后）⇒ **跳过支永远走不到它** ⇒ 我写进内存的痕迹**从不落盘**。**加了跟没加一样，且不报任何错。** 这与本条要修的病（"盘上看不出来"）是**同一个形状**，只是这次被藏起来的是我自己的改动。★ 是 `tools/test_daemon_state.py` 的**第③条断言**（"跳过要**落盘**"）在阴性对照里抓出来的 —— 因为那条断言**读的是文件内容**，而"我写了这行代码"在读文件时**不算数**。⇒ 纪律：**判据必须钉住产物（文件/退出码/DB 行），不许钉住"源码里有这句话"** |
+| ★ 附二：**退出码不是可有可无的元数据 —— 它是区分"零请求的正常收工"与"真干了活"的唯一手段** | `topup_opencd_fields.py` 在**发第一个请求之前**就检查当日配额（早在 2026-09-23 就修好了），配额满时打印「🛑 今日额度已用完 …… **这是保护，不是错误**」并 `return 0`。⇒ 那一轮 daemon 侧看到的是：`last_ok = true`、**无** `↩️` 退避、`docker logs` 里**一行都没有** —— 与「真抓成功 20 条」**完全同形**。<br>★ 2026-09-27 我据此把一次"配额满、零请求收工"读成了"看不见的异常"，还建议"给 crawl 加配额短路"——**而那个短路早就实现了**（`topup_opencd_fields.py` 第 419 行 `if gate.used_day >= gate.max_per_day: return 0`，位置在 `check_login()` **之前** ⇒ 零出网）。**我的建议是多余的**（`ERR-META-14`：一个错的"为什么"会让人去修一个不存在的问题）。<br>⇒ 落盘 `last_code` + `last_took` 后才分得开：`code=0, took≈0.3s` = 零请求收工；`code=0, took≈N分钟` = 真在干活 |
+
 ### ERR-META-30
 | 教训 | 根因 |
 |---|---|

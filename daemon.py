@@ -492,12 +492,28 @@ def beat():
 def run_stage(stage, timeout):
     """
     起子进程跑一个阶段，子进程输出直接透传到 docker logs。
-    返回 True 表示成功（exit code 0）。
+
+    ★★ 返回一个 **dict**（不是 bool）—— 见 `stage_result_ok()`：
+      `{"ok", "code", "took", "started_at"}`。
+
+    ★ 2026-09-27 为什么从 bool 改成 dict：
+      原先只回 `True`/`False`，于是 `save_state` 落盘的 `last_ok` 是**布尔**，
+      **退出码和耗时全丢了**。而 `topup_opencd_fields.py` 的"今日额度用完"
+      是**退出码 0 的正常收工**（它自己叫"保护，不是错误"）⇒ 盘上只留下
+      `last_ok=true`、无 `↩️`、日志里一行没有，**与"真抓成功若干条"完全同形**。
+      2026-09-27 我就据此把一次"配额满、零请求收工"读成了"看不见的异常"。
+      ⇒ 退出码与耗时是**承重信息**，必须落盘（`ERR-META-01` 家族：
+        观测手段分辨不出的两件事，在盘上就成了同一件事）。
     """
     name, cmd = stage["name"], stage["cmd"]
     log("─" * 60)
     log(f"▶️  阶段 [{name}] 开始: {' '.join(cmd)}")
     started = time.time()
+    started_iso = datetime.now().isoformat(timespec="seconds")
+
+    def _res(ok, code, took):
+        return {"ok": ok, "code": code, "took": round(took, 1),
+                "started_at": started_iso}
 
     try:
         proc = subprocess.Popen(
@@ -509,7 +525,9 @@ def run_stage(stage, timeout):
         )
     except OSError as e:
         log(f"❌ 阶段 [{name}] 无法启动: {e}")
-        return False
+        # ★ 起不来用 code=None（**不是 0**）：`None` 与"退 0 的正常收工"
+        #   必须分得开，否则又回到"两件事同形"的老问题。
+        return _res(False, None, time.time() - started)
 
     try:
         code = proc.wait(timeout=timeout)
@@ -521,7 +539,9 @@ def run_stage(stage, timeout):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-        return False
+        # ★ 超时也是 code=None：进程的退出码在这里**没有意义**
+        #   （是被我们杀掉的），编一个数字出来只会误导。
+        return _res(False, None, time.time() - started)
     except KeyboardInterrupt:
         proc.terminate()
         proc.wait(timeout=30)
@@ -530,10 +550,25 @@ def run_stage(stage, timeout):
     took = time.time() - started
     if code == 0:
         log(f"✅ 阶段 [{name}] 完成，耗时 {took:.1f}s")
-        return True
+        return _res(True, 0, took)
 
     log(f"❌ 阶段 [{name}] 退出码 {code}，耗时 {took:.1f}s")
-    return False
+    return _res(False, code, took)
+
+
+def stage_result_ok(res):
+    """`run_stage` 的返回值 → 成功与否。抽出来是为了**调用点不必知道结构**。"""
+    return bool(res.get("ok"))
+
+
+def _skip_reason(age, wait):
+    """把"为什么这轮跳过"写成人能读的一行，随 state 落盘。
+
+    ★ 只描述**算法自己的判据**，不做任何推测 —— 例如不写"配额满了"：
+      调度器**无从知道**配额（那是 crawl 阶段内部的事，要连库/出网才知道）。
+      写上去就是把"我猜的"当成"我查到的"（`ERR-META-14`）。
+    """
+    return f"未到期：距上次 {age:.0f}s < 周期 {wait:.0f}s"
 
 
 def _wait_seconds(stage, st, n_fail, max_backoff, pending_now):
@@ -626,11 +661,39 @@ def main():
         for s in stages:
             state.setdefault(s["name"], {})["last_run"] = 0
 
+    # ★ 退出语在 `run_main_loop()` 末尾打（那里才是循环真正结束的地方）
+    run_main_loop(stages, state, max_backoff)
+
+
+def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
+    """调度主循环。★ 从 `main()` 里抽出来，**只为一件事：能被测**。
+
+    ★★ 为什么值得抽（2026-09-27）：这次的 bug 是「跳过的阶段在盘上冒充自己跑过」，
+      而它**只在"真的驱动一轮循环 + 真的读回文件"时才暴露** ——
+      测 `save_state` 之类的单元函数是测不到的（问题不在它内部，
+      而在**谁调用它、什么时候**）。`tools/test_daemon_state.py` 直接调本函数，
+      用假阶段驱动真代码，再读回 `STATE_FILE`。
+      ⇒ 抽它是为了让那条判据**可执行**，不是为了"结构好看"。
+    """
+    tick = env_int("SCHED_TICK", 30) if tick is None else tick
+    stage_timeout = env_int("STAGE_TIMEOUT", 3600) if stage_timeout is None else stage_timeout
     fails = {s["name"]: 0 for s in stages}
 
     while not _shutdown:
         beat()
         now = time.time()
+        # ★★ 2026-09-27：**本轮有没有阶段被跳过**。用来决定循环末尾要不要落盘。
+        #
+        #   为什么需要它（我第一版改动就在这里静默失效了）：`save_state(state)`
+        #   原先只在**真跑了**阶段之后调用（在 for 内部、`continue` 之后）。
+        #   跳过支是纯 `continue` ⇒ 我在那里写的 `last_skip_at` **只进了内存，
+        #   从不落盘** ⇒ 加了跟没加一样。
+        #   ★ 这正是 `ERR-META-01` 的形状："改动看起来对，但它测的东西不落盘"。
+        #     ⇒ 判据必须钉住**文件内容**，不是"我写了这行代码"。
+        #
+        #   在**循环末尾**（而不是每个跳过支里）落盘还有一个理由：一轮里 7 个
+        #   阶段全跳过时，每阶段都写一次 = 每 30s 写 7 次盘，纯属浪费 SD 卡寿命。
+        skipped = False
 
         for stage in stages:
             if _shutdown:
@@ -646,15 +709,47 @@ def main():
             wait = _wait_seconds(stage, st, n_fail, max_backoff, pending_now)
 
             if now - last < wait:
+                # ★★★ 2026-09-27：跳过时**必须留下痕迹**。
+                #
+                #   原先这一支是**纯 `continue`**，而 `last_finish` 与 `last_run`
+                #   在**同一时刻、同一行**写入 ⇒ 盘上出现了这个歧义：
+                #     「这一轮跑了 7 个阶段」与「这一轮**一个都没跑**」
+                #     留下的 `last_finish` **一模一样**（都是上一轮的时刻）。
+                #   2026-09-27 我就据此把一次「首轮只有 crawl 到期、其余 6 个跳过」
+                #   读成了「22:27:06 跑了 edit」。
+                #
+                #   ⇒ 两处改动：
+                #     ① 跳过时写 `last_skip_at`（**不动** `last_run`/`last_finish`）
+                #     ② `last_finish` 只在**真跑了**的分支里写
+                #   ⇒ 之后「`last_finish` < 容器启动时刻」= **从没跑过**，
+                #     不再依赖"我记不记得启动时间"这种脑内状态。
+                #
+                #   ★ 这里**不额外 log**：本循环每 30s 跑一次，7 个阶段全跳过时
+                #     每 30s 刷 7 行会让日志彻底没法看（真正的异常会被埋掉）。
+                #     "跳过"是**盘上的事实**，不是日志事件 —— 用 state 文件表达。
+                st["last_skip_at"] = datetime.now().isoformat(timespec="seconds")
+                st["skip_reason"] = _skip_reason(now - last, wait)
+                skipped = True
                 continue
 
             before = pending_now
-            ok = run_stage(stage, stage_timeout)
+            res = run_stage(stage, stage_timeout)
+            ok = stage_result_ok(res)
             after = _pending(stage) if before is not None else None
 
             st["last_run"] = time.time()
             st["last_ok"] = ok
+            # ★ `last_finish` 只在这条分支（= 真跑了）里写。见上面跳过分支的注释。
             st["last_finish"] = datetime.now().isoformat(timespec="seconds")
+            # ★★ 退出码与耗时**落盘**（原先只有 bool，见 `run_stage` 的 docstring）。
+            #    `code=0` + `took` 很小 + `last_ok=true` ⇒ 一眼看出是
+            #    「零请求的正常收工」（如 `topup` 的"今日额度用完"），
+            #    而不是"真抓成功若干条"。这两件事以前在盘上同形。
+            st["last_code"] = res.get("code")
+            st["last_took"] = res.get("took")
+            # 跑过就不再有"跳过"的痕迹，清掉免得读者以为它还在跳
+            st.pop("last_skip_at", None)
+            st.pop("skip_reason", None)
             if before is not None:
                 # ★ 防呆：这一轮"跑完了"不等于"推进了"。
                 # 像 14749 那种永远失败（找不到 takeedit 表单）的记录会一直挂在待办里，
@@ -682,6 +777,13 @@ def main():
             #   快照会在重建后的第一轮就跟着变 —— 不必等下一次重启才对上。
             save_env_snapshot()
             beat()
+
+        # ★ 本轮有阶段被跳过 ⇒ 把 `last_skip_at`/`skip_reason` 落盘（见上面
+        #   `skipped = False` 处那段注释：跳过支自己 `continue` 了，
+        #   走不到上面那次 `save_state`）。真跑了阶段的轮次在上面已经存过，
+        #   这里再存一次是幂等的（内容相同），不会写坏。
+        if skipped:
+            save_state(state)
 
         if _shutdown:
             break

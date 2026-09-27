@@ -902,7 +902,37 @@ def main():
             ivs = f"{iv}s"
         lr = cst(st["last_run"]) if st and st.get("last_run") else "-"
         ages = fmt_age(age) if age is not None else "-"
-        print(f"  {stage:<9}{ivs:>8}  {lr:<21}{ages:<26}{verdict}")
+        # ★★★ 2026-09-27 加：**退出码 + 耗时**（`daemon.run_stage` 新增落盘）。
+        #
+        #   为什么承重：`topup_opencd_fields.py` 在**发第一个请求之前**就检查当日
+        #   配额，满则打印「🛑 今日额度已用完（**保护，不是错误**）」并 `return 0`
+        #   ⇒ 那一轮在 daemon 侧留下 `last_ok=true`、**无** `↩️`、日志**一行没有**，
+        #   与「真抓成功 20 条」**完全同形**。2026-09-27 我就据此把一次
+        #   "配额满、零请求收工"读成了"看不见的异常"（`ERR-META-31` 附二）。
+        #   ⇒ 有 `code`+`took` 才分得开：
+        #        `code=0, took≈0.3s`  = 零请求收工（配额满 / 没活）
+        #        `code=0, took≈几分钟` = 真在干活
+        #        `code!=0`            = 真失败（那种才该退避）
+        #   ★ `code=None` 是**起不来 / 被超时杀掉**（不是退 0）—— 与"正常收工"
+        #     必须分得开，所以 `None` 印成 `—` 而不是 `0`。
+        extra = ""
+        if st:
+            code = st.get("last_code")
+            took = st.get("last_took")
+            if code is not None or took is not None:
+                cs = "—" if code is None else str(code)
+                ts = "" if took is None else f" {took:g}s"
+                extra = f"  ↳退出码 {cs}{ts}"
+                # ★ 零请求收工的**特征**（不是判据，只是把它标出来给人看）
+                if code == 0 and isinstance(took, (int, float)) and took < 5:
+                    extra += "  ← 极短：多半是「零请求收工」（配额满 / 没活），**不是**故障"
+        # ★ 没跑过的阶段：`last_finish` 早于容器启动 ⇒ 报出来（见 ERR-META-31）
+        #   ★ 只在**有 last_skip_at** 时报（那是新代码写的痕迹）；老 state 没有
+        #     这个键 ⇒ 不猜、不报，免得对旧数据编一个结论出来。
+        if st and st.get("last_skip_at") and st.get("last_finish"):
+            if st["last_finish"] < st["last_skip_at"][:19]:
+                extra += f"  ↳未跑过：跳过至 {st['last_skip_at'][11:]}"
+        print(f"  {stage:<9}{ivs:>8}  {lr:<21}{ages:<26}{verdict}{extra}")
 
     # ---------- ★★ 自动发布的第二把钥匙（2026-09-24） ----------
     #
