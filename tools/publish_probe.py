@@ -19,6 +19,7 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8")
 
 # ★ 必须在 import config 之前：让脚本能从 /data 跑起来还能 import 到 /app 的模块
+import _bootstrap  # noqa: E402,F401  —— 把 <repo> 与 <repo>/src 都放进 sys.path（源码已移进 src/）
 sys.path.insert(0, os.environ.get("MUSOPIA_APP_DIR", "/app"))
 
 import config

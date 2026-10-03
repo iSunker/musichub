@@ -60,7 +60,18 @@ except Exception:                                       # noqa: BLE001
 
 
 # ==================================================================== ① parse
-HERE = os.path.dirname(os.path.abspath(__file__))
+# ★ 2026-10-06：源码已移进 `src/`，但 `opencdhtml/`（样本/证据**资产**，不是代码）
+#   仍在**仓库根**。所以不能再用 `dirname(__file__)` 直接当"资产根"。
+#   判据：`<此文件所在目录>/opencdhtml` 在 ⇒ 就是它（容器内 /app 平铺）；
+#         否则取上一级（本机 `src/opencd.py` → 仓库根）。
+def _asset_root():
+    _here = os.path.dirname(os.path.abspath(__file__))
+    if os.path.isdir(os.path.join(_here, "opencdhtml")):
+        return _here
+    return os.path.dirname(_here)
+
+
+HERE = _asset_root()
 SAMPLE_DIR = os.path.join(HERE, "opencdhtml", "sanitized")
 
 # ==================== 转载规则（★ 三态，不是布尔） ====================
@@ -1955,8 +1966,7 @@ def _check_map():
     print("\n④ 端到端：拿真实样本走一遍 map_all()")
     import glob
     import os
-    sample = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "opencdhtml", "sanitized", "sample-zhuanzai-jinyong.html")
+    sample = os.path.join(SAMPLE_DIR, "sample-zhuanzai-jinyong.html")
     if not os.path.exists(sample):
         print("  ⚠️  缺样本，跳过（挂载 opencdhtml 后再跑）")
         return ok, fails
@@ -2570,7 +2580,7 @@ def _check_ingest():
         ok, fails = ok + bool(good), fails + (not bool(good))
         print(f"  {'✅' if good else '❌'} {label}{('  ' + extra) if extra else ''}")
 
-    HERE = os.path.dirname(os.path.abspath(__file__))
+    HERE = _asset_root()                       # ★ 见文件上方 `_asset_root()` 的说明
     SAMPLE = os.path.join(HERE, "opencdhtml", "sanitized")
 
     import sys as _sys

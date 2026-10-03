@@ -69,7 +69,10 @@ hdr("④ 闸门④过的那批，再逐条查其余闸门（PENDING_PUBLISH_WHER
 #   既不手抄、也不触发 import 的副作用。
 import ast  # noqa: E402
 import pathlib  # noqa: E402
-_src = pathlib.Path("db.py").read_text(encoding="utf-8")
+# ★ 2026-10-06：源码已移进 `src/`。原先这里是**裸相对路径** `Path("db.py")`
+#   （依赖 cwd = 仓库根）—— 移动后必断，且断得**静默**（cwd 恰好对就"看起来正常"）。
+#   ⇒ 改成基于 `__file__` 定位，与 cwd 无关。
+_src = (pathlib.Path(__file__).resolve().parent.parent / "src" / "db.py").read_text(encoding="utf-8")
 _pw = None
 for _n in ast.parse(_src).body:
     if isinstance(_n, ast.Assign) and any(

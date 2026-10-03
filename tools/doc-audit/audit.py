@@ -451,6 +451,12 @@ def _stale_where():
         sys.modules["config"] = stub
     if str(REPO) not in sys.path:
         sys.path.insert(0, str(REPO))
+    # ★ 2026-10-06：源码已移进 `<repo>/src`（Dockerfile 用 `COPY src/*.py ./`
+    #   保持镜像内 /app 平铺）⇒ `import db` 需要 `src/` 在 sys.path 上。
+    #   容器内该目录不存在，`isdir` 会挡掉（那种布局由 COPY 平铺保证）。
+    _SRC = REPO / "src"
+    if _SRC.is_dir() and str(_SRC) not in sys.path:
+        sys.path.insert(0, str(_SRC))
     import db                                  # 必须在塞桩之后
     where, params = db._published_where(only_stale=True)
     return " AND ".join(where), params

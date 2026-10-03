@@ -23,8 +23,10 @@ output_torrents/  covers/  raw_html/
 > compose 的 `${STATE_DIR:-./data}:/data` 统一寻址，容器内一律 `/data/...`。
 
 ### A.3 **只在本机**的（源码、工具、文档、元层 —— 一概不上生产）
-- **源码**：根目录全部 `.py`（将来收进 `src/`）—— 本机构建时 `COPY` 进镜像，
-  但**不落 NAS 磁盘**。
+- **源码**：`src/` 下全部 `.py` —— 本机构建时 `COPY src/*.py ./` 进镜像（**镜像内 `/app` 平铺，
+  与容器内的相对导入/相对 `cmd` 兼容**），但**不落 NAS 磁盘**。
+  ★ 本机跑 tools 时 `sys.path` 需要**同时**有 `<repo>` 与 `<repo>/src` ——
+    统一走 `tools/_bootstrap.py`（一行 `import _bootstrap`），别各写一套。
 - `tools/` 整个目录（容器内按需 `docker compose run --rm tools ...` —— 跑的是**镜像里**那份；
   源码只在本机维护）。
 - 探测/诊断脚本：`_probe_*.py`、`diag_*.py`、`show_*.py`、`preview_*.py`、`fetch_*.py`。
@@ -65,9 +67,9 @@ export QB_PASS=x MUSOPIA_COOKIE=x MUSOPIA_PASSKEY=x PICGO_API_KEY=x \
        OPENCD_COOKIE=x DATA_DIR="$PWD/.scratch/selftest-data"
 mkdir -p "$DATA_DIR"
 
-python run.py --selftest                 # 主自检（含 ⑧ 接线断言）
+python src/run.py --selftest             # 主自检（含 ⑧ 接线断言）
 python tools/gen_counts.py               # 重生成 counts.json
-python opencd.py parse --selftest        # 合并后：模块自检（子命令分布见 README）
+python src/opencd.py parse --selftest    # 合并后：模块自检（子命令分布见 README）
 
 bash build-push.sh                       # 本机构建 + 推 GHCR（含前置自检）
 SKIP_PUSH=1 bash build-push.sh           # 只本机构建、不推（本地验证）
@@ -113,7 +115,7 @@ cd /volume2/docker_ssd/opencd2others
 
 ## E. 提交前自查清单
 
-- [ ] `python run.py --selftest` ✅
+- [ ] `python src/run.py --selftest` ✅
 - [ ] 相关模块 `--selftest` ✅（数量与改动前一致，或**有意**变更并已在注释里说明）
 - [ ] 改了计数相关 ⇒ `python tools/gen_counts.py` 已重跑
 - [ ] 改了 `Dockerfile` 的 `COPY` 行 / 加了新模块 ⇒ `bash tools/build-preflight.sh` 通过

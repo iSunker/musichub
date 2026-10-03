@@ -85,6 +85,7 @@ import sqlite3
 import sys
 
 # ★ 解析层/渲染层都用这一份口径，别自己再写一遍（`ERR-META-03`）。
+import _bootstrap  # noqa: E402,F401  —— 把 <repo> 与 <repo>/src 都放进 sys.path（源码已移进 src/）
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 DATA_DIR = os.getenv("DATA_DIR", "/data")

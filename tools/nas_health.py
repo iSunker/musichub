@@ -543,9 +543,15 @@ def check_target_where_consistent(verbose=True):
     env_root = os.environ.get("MUSOPIA_REPO")
     if env_root:
         cands.append(pathlib.Path(env_root))
-    cands.append(here.parent.parent)   # <repo>/tools/nas_health.py → <repo>
+    # ★ 2026-10-06：源码已移进 `<repo>/src`（Dockerfile 用 `COPY src/*.py ./` 保持
+    #   镜像内 /app 平铺，但**本机仓库**里代码在 src/）⇒ 候选里必须有 `<repo>/src`，
+    #   否则 `topup_opencd_fields.py` / `daemon.py` / `crawl.py` 全都找不到。
+    #   ★ 本函数找不到会**明确报"判据无法执行"**（不是静默通过），所以加漏了也不会骗人。
+    cands.append(here.parent.parent / "src")   # <repo>/tools/nas_health.py → <repo>/src
+    cands.append(here.parent.parent)   # <repo>/tools/nas_health.py → <repo>（将来若移回根）
     cands.append(here.parent)          # 单独拷出来跑 → 就在同目录
     cands.append(pathlib.Path.cwd())   # 兜底：当前目录
+    cands.append(pathlib.Path.cwd() / "src")   # 兜底：当前目录下的 src/
     tp = None
     tried = []
     for c in cands:
@@ -630,9 +636,12 @@ def _find_repo_file(name):
     env_root = os.environ.get("MUSOPIA_REPO")
     if env_root:
         cands.append(pathlib.Path(env_root))
+    # ★ 2026-10-06：源码已移进 `<repo>/src` —— 与上面那处同款，先试 src/。
+    cands.append(here.parent.parent / "src")
     cands.append(here.parent.parent)
     cands.append(here.parent)
     cands.append(pathlib.Path.cwd())
+    cands.append(pathlib.Path.cwd() / "src")
     tried = []
     for c in cands:
         p = c / name
@@ -1370,7 +1379,10 @@ def check_quota_day_key_consistent(verbose=True):
     cands = []
     if os.environ.get("MUSOPIA_REPO"):
         cands.append(pathlib.Path(os.environ["MUSOPIA_REPO"]) / "crawl.py")
-    cands += [here.parent.parent / "crawl.py", here.parent / "crawl.py",
+    # ★ 2026-10-06：源码已移进 `<repo>/src` ⇒ 先试 src 下的 crawl.py。
+    cands += [here.parent.parent / "src" / "crawl.py",
+              here.parent.parent / "crawl.py", here.parent / "crawl.py",
+              pathlib.Path.cwd() / "src" / "crawl.py",
               pathlib.Path.cwd() / "crawl.py"]
     crawl_src = None
     for c in cands:

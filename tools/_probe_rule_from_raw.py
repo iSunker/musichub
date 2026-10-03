@@ -91,6 +91,7 @@ def main():
     rows = load_targets(args.db, args.limit)
     print(f"  目标行数  : {len(rows)}（口径 status='SUCCESS' + tid 非空 + mapped 空）")
 
+    import _bootstrap  # noqa: E402,F401
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     import opencd as P
 

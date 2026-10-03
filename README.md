@@ -83,7 +83,8 @@ opencd2others/                      # NAS 部署目录（compose 就放这里，
 **本机仓库**（`D:\Projects\opencd2others\zhuanzhong`，**git 只在这里**）—— 除上面全部内容外，还多：
 
 ```
-├─ config.py … qb_client.py 等全部 .py    # 代码（本机构建时 COPY 进镜像；不落 NAS 磁盘）
+├─ src/                             # ★ 全部源码 .py（本机构建时 COPY src/*.py ./ 进镜像；不落 NAS）
+│                                   #   ★ 镜像内仍是 /app 平铺 ⇒ 容器内的相对 import / 相对 cmd 不受影响
 ├─ Dockerfile / .dockerignore        # ★ 构建定义（只在本机 —— 构建上下文 = 本仓库）
 ├─ build-push.sh                     # ★ 本机构建 + 推 GHCR（取代旧的 deploy.sh 同步）
 ├─ deploy.sh                         # ⚠️ 已弃用，只保留 NEVER 名单与教训（见文件头）

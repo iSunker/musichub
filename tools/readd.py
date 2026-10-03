@@ -49,6 +49,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 #      该能 import 到 config** 才对得起"本文件在 --help 阶段就能自查语法"的期待
 #      （`ERR-META-01`：跑不起来的东西等于没有检测）。⇒ 与 `nas_health.py` 同款，
 #      把**仓库根**（`tools/../`）也塞进去，容器与本机都能 import。
+import _bootstrap  # noqa: E402,F401  —— 把 <repo> 与 <repo>/src 都放进 sys.path（源码已移进 src/）
 sys.path.insert(0, os.environ.get("MUSOPIA_APP_DIR", "/app"))
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 

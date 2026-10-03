@@ -23,21 +23,24 @@ RUN pip install --no-cache-dir \
 
 # 代码直接打进镜像，不再依赖 bind mount 到 /app —— 状态（数据库/产物）
 # 走独立的 /data，两者彻底解耦，见 docker-compose.yml 和 config.py。
-COPY config.py db.py descr.py assets.py musopia.py \
-     net.py \
-     run.py publish.py update_metadata.py sync_site.py \
-     backfill_covers.py check_db.py backfill_covers_opencd.py \
-     daemon.py healthcheck.py \
-     crawl.py opencd.py cover_fetch.py \
-     topup_opencd_fields.py observe_custom_fields.py \
-     sync_opencd_tid.py readiness_probe.py qb_probe.py flip_status.py \
-     crabpt_site.py \
-     readd_queue.py \
-     qb_client.py ./
+# ★★ 2026-10-06：源码已收进 `src/`（本机仓库顶层更清爽）。这里 `COPY src/*.py ./`
+#   —— 目标是 **`/app` 根（保持平铺）**，所以**镜像内布局逐字不变**：
+#   `/app/{config.py,daemon.py,…}` 照旧。这一点是承重的：
+#     · compose 的 `command: ["python","daemon.py"]`、`CMD`、`WORKDIR /app` 都不用改；
+#     · `daemon.py` 里 8 条裸相对 `cmd`（`["python","run.py"]` …）依赖 `cwd=/app`；
+#     · tools 里 12 处 `os.environ.get("MUSOPIA_APP_DIR", "/app")` 也默认 `/app`。
+#   ⇒ 只改了"本机仓库的形状"，没改"镜像内的形状"。
+#   ★ 逐文件枚举的旧写法（27 行）已换成通配 —— 但**护栏没消失**：
+#     `tools/build-preflight.sh` 会检查通配源是否有匹配（无匹配时 COPY 会静默拷进
+#     0 个文件、构建却成功），见 .claude/RULES.md §B。
+COPY src/*.py ./
 # ★ 2026-10-04：`opencd_parse/rate/log/map/gate/ingest` 六个模块已合并成
-#   单文件 `opencd.py`（CLI 子命令 parse/rate/log/map/gate/ingest）。上面那行
-#    已同步替换。★ 合并后 `run.py --selftest` 的 ⑧b 判据会扫全仓库断言**没有**
-#    任何文件再 import 那六个旧名（防"合了但没改完"），见 ERRATA。
+#   单文件 `opencd.py`（CLI 子命令 parse/rate/log/map/gate/ingest）。
+#   ★ 合并后 `run.py --selftest` 的 ⑧b 判据会扫全仓库断言**没有**任何文件再 import
+#   那六个旧名（防"合了但没改完"），见 ERRATA。
+
+# ★★ `tools/` 整个目录也打进去（2026-09-26）—— 原先**只 COPY 根目录的 .py**，
+#    于是容器里根本没有 `/app/tools/` ⇒ 任何 `tools/*.py` 都只能在本机跑。
 
 # ★★ `tools/` 整个目录也打进去（2026-09-26）—— 原先**只 COPY 根目录的 .py**，
 #    于是容器里根本没有 `/app/tools/` ⇒ 任何 `tools/*.py` 都只能在本机跑。

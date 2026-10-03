@@ -17,7 +17,7 @@
 ## 1. 目录与部署（最容易搞错的）
 
 - **本机仓库**：`D:\Projects\opencd2others\zhuanzhong`（= 本项目地址，**git 只在这里**）。
-  代码在根目录（**将来会收进 `src/`**，见 §3）。
+  源码在 **`src/`**（28 个 `.py`）；`Dockerfile` 用 `COPY src/*.py ./` 保持**镜像内 `/app` 平铺**。
 - **生产端（NAS）**：`\\iSunker-DS423\docker_ssd\opencd2others`（SMB 路径）
   = NAS 上的 `/volume2/docker_ssd/opencd2others`。
 - **★ 生产端只有"容器定义类 + 状态"两类东西**（2026-10-06 起）：
@@ -76,7 +76,7 @@
 
 ## 4. 改代码的固定动作
 
-1. **改完必跑**：`python run.py --selftest`（含接线断言）。
+1. **改完必跑**：`python src/run.py --selftest`（含接线断言）。
 2. 改了 `Dockerfile` 的 `COPY` 行 / 加了新模块 ⇒ 构建前会有 `tools/build-preflight.sh`
    查"Dockerfile 说要 COPY 的源在本机存在吗"（缺了**构建不会报错**、要到跑阶段才
    `ModuleNotFoundError`——本仓库已踩过 `qb_client.py`、`readd_queue.py` 两次）。

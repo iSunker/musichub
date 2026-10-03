@@ -60,6 +60,7 @@ try:
 except Exception:  # noqa: BLE001 - 老 Python 没有 reconfigure，忽略即可
     pass
 
+import _bootstrap  # noqa: E402,F401  —— 把 <repo> 与 <repo>/src 都放进 sys.path（源码已移进 src/）
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 _fail = 0

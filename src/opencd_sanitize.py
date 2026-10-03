@@ -31,7 +31,11 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# ★ 2026-10-06：源码已移进 `src/`，但 `opencdhtml/`（资产）仍在**仓库根**。
+#   故不能直接用 `dirname(__file__)` 当资产根：`<此目录>/opencdhtml` 在就用它
+#   （容器内 /app 平铺），否则取上一级（本机 `src/` → 仓库根）。
+_HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = _HERE if os.path.isdir(os.path.join(_HERE, "opencdhtml")) else os.path.dirname(_HERE)
 DEFAULT_IN = os.path.join(HERE, "opencdhtml")
 DEFAULT_OUT = os.path.join(DEFAULT_IN, "sanitized")
 

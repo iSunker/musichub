@@ -540,7 +540,32 @@ def selftest():
     #           之后的裸 `Client(...)`）。 `crawl.Client` / `transmissionrpc.Client` 名字对不上。
     #     ★ `auth_log_in` 同理：只在该文件确实用 `qbittorrentapi` 时才算数。
     import pathlib as _pl2
-    _ROOT = _pl2.Path(__file__).resolve().parent
+    # ★★ 2026-10-06：源码已移进 `src/`，但本判据要扫的是**整个仓库**
+    #   （⑧ 抓的是 `qb_client.py` 之外的裸构造点，⑧b 抓旧模块名 —— 两边都可能在
+    #   `tools/` 里出现，例如 `tools/readd.py` 就真的 import qb_client）。
+    #   ★ 若这里继续用 `Path(__file__).parent`（= `src/`），`rglob` 会**静默缩到
+    #     `src/` 一棵子树**、`tools/` 整棵不再被审、**而判据照样显示绿** ——
+    #     这是"判据测了个寂寞"（ERR-META-14 / ERR-META-21 一族），比报红坏得多。
+    #   ⇒ 锚到**仓库根**：`src/run.py` 的上一级。
+    #   ★ 兜底：容器里代码在 `/app` 根平铺（来源是 `COPY src/*.py ./`），此时
+    #     `Path(__file__).parent` 就是仓库根；`MUSOPIA_REPO` 可显式覆盖（同
+    #     `tools/nas_health.py` 的四级候选思路）。
+    import os as _os3
+    _HERE = _pl2.Path(__file__).resolve().parent
+    _REPO_ENV = _os3.environ.get("MUSOPIA_REPO")
+    if _REPO_ENV and _pl2.Path(_REPO_ENV).is_dir():
+        _ROOT = _pl2.Path(_REPO_ENV).resolve()
+    elif (_HERE / "tools").is_dir():
+        _ROOT = _HERE                      # 容器内 /app：与 tools/ 同级
+    else:
+        _ROOT = _HERE.parent               # 本机：src/ 的上一级 = 仓库根
+    # ★ 自检这条锚点本身：扫到的根必须能看见 `tools/` 与 `src/`（本机）或 `tools/`（容器）。
+    #   看不见 ⇒ 说明 _ROOT 算错了，判据会静默缩范围 —— 当场报红，别让它伪装成通过。
+    if not (_ROOT / "tools").is_dir():
+        ok[0] = False
+        detail.append(
+            f"✗ ⑧ 扫描根算错：{_ROOT} 下没有 `tools/` ⇒ 本判据会**静默缩范围**"
+            f"（ERR-META-14：没测到 = 不是通过）。检查 run.py 的 _ROOT 推导。")
     # ★ 要跳过的目录名（出现在路径的**任意层级**即跳过该文件）。
     #   ★★ 故意写得**宽**（宁可跳过也不误报）：判据的价值在"挡住新写的构造点"，
     #     不在"审第三方的 .venv / 别的项目源码"。
@@ -549,7 +574,12 @@ def selftest():
                   ".pytest_cache", ".idea", ".vscode", "repos"}
     # ★ 根下这些**代际/备份**后缀的目录也跳过（DNA 是另一份快照，非本次改名范围）。
     _SKIP_DIR_SUFFIX = ("_bak", "_backup", "_old", "-bak", "-backup")
-    _FACTORY = _ROOT / "qb_client.py"
+    # ★ 2026-10-06：工厂文件现在可能在 `src/`（本机）或 `/app` 根（容器）。
+    #   两处都试；都找不到 ⇒ 下面 `if not _FACTORY.exists()` 报红（不会静默）。
+    _FACTORY = next(
+        (p for p in (_ROOT / "qb_client.py", _ROOT / "src" / "qb_client.py")
+         if p.exists()),
+        _ROOT / "qb_client.py")
     # ★ 命中一个就记 (相对路径, 行号, 类别)。类别分开报，便于一眼看出是哪种回归。
     _qbhits = []
 

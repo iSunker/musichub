@@ -61,6 +61,7 @@ os.environ.setdefault("MUSOPIA_PASSKEY", "x")
 os.environ.setdefault("PIGGO_API_KEY", "x")
 os.environ.setdefault("PICGO_API_KEY", "x")
 
+import _bootstrap  # noqa: E402,F401  —— 把 <repo> 与 <repo>/src 都放进 sys.path（源码已移进 src/）
 sys.path.insert(0, REPO)
 
 # 落盘目录指到临时目录，别污染真实的 raw_html/

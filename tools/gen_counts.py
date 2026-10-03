@@ -63,14 +63,14 @@ DEFAULT_DST = f"{NAS}/docker_ssd/opencd2others/data"
 #     log/map/gate/ingest）⇒ 这里改成**参数列表**：字符串 = 单脚本，列表 =
 #     `python <第一项> <其余参数>`（例：`python opencd.py parse --selftest --json`）。
 SELFTEST_SCRIPTS = [
-    "descr.py",
-    ["opencd.py", "gate"],
-    ["opencd.py", "ingest"],
-    ["opencd.py", "map"],
-    ["opencd.py", "parse"],
-    ["opencd.py", "rate"],
-    "cover_fetch.py",
-    "tools/opencd-crawl-selftest.py",
+    ("src", "descr.py"),
+    ("src", "opencd.py", "gate"),
+    ("src", "opencd.py", "ingest"),
+    ("src", "opencd.py", "map"),
+    ("src", "opencd.py", "parse"),
+    ("src", "opencd.py", "rate"),
+    ("src", "cover_fetch.py"),
+    ("tools", "opencd-crawl-selftest.py"),
 ]
 
 # 阶段间隔：**从 .env.example 的默认值读**，不在这里另抄一份。
@@ -170,15 +170,19 @@ def _disabled(env):
 def _selftests():
     """跑每个脚本的 --selftest --json，读**末行** JSON。
 
-    ★ 条目可以是字符串（单脚本）或列表（`[脚本, *前置参数]`）——
-      后者给合并后的 `opencd.py <子命令>` 用。键取 JSON 里的 `script` 字段
-      （含子命令，如 `opencd.py parse --selftest`），拿不到才退回路径标识。
+    ★ 条目是元组 `(dir, script, *前置参数)`：
+        · `dir`    = 相对仓库根的目录（`"src"` / `"tools"`）—— 2026-10-06 源码移进
+                     `src/` 后，脚本路径不再是根级裸名；
+        · `script` = 脚本名；
+        · 其余    = 传给脚本的前置参数（给合并后的 `opencd.py <子命令>` 用）。
+      键取 JSON 里的 `script` 字段（含子命令，如 `opencd.py parse --selftest`），
+      拿不到才退回路径标识。
     """
     out = {}
-    for rel in SELFTEST_SCRIPTS:
-        parts = [rel] if isinstance(rel, str) else list(rel)
-        label = parts[0] + ((" " + " ".join(parts[1:])) if len(parts) > 1 else "")
-        cmd = [sys.executable, str(REPO / parts[0]), *parts[1:], "--selftest", "--json"]
+    for spec in SELFTEST_SCRIPTS:
+        d, script, *extra = spec
+        label = script + ((" " + " ".join(extra)) if extra else "")
+        cmd = [sys.executable, str(REPO / d / script), *extra, "--selftest", "--json"]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True,
                                encoding="utf-8", errors="replace",
@@ -206,7 +210,12 @@ def _sh_array(name):
 
 
 def _dockerfile_copy_files():
-    """Dockerfile 里 `COPY` 的 .py 文件（★ 跨 `\\` 续行还原）。"""
+    """Dockerfile 里 `COPY` 的 .py 文件（★ 跨 `\\` 续行还原）。
+
+    ★ 2026-10-06：Dockerfile 现在用通配 `COPY src/*.py ./`（源码已移进 src/）。
+      所以这里要**展开通配**成真实文件名 —— 否则会返回字面量 `src/*.py`，
+      下游拿它去对文件永远对不上（`ERR-META-01`：判据看着在跑、量的不是那件事）。
+    """
     text = (REPO / "Dockerfile").read_text(encoding="utf-8")
     text = re.sub(r"\\\s*\n\s*", " ", text)      # 先并掉续行
     files = []
@@ -217,8 +226,13 @@ def _dockerfile_copy_files():
         for tok in ln.split()[1:]:
             if tok.startswith("--"):
                 continue
-            if tok.endswith(".py"):
-                files.append(pathlib.Path(tok).name)
+            if "*" in tok or "?" in tok:
+                # 通配源：按相对仓库根展开（如 `src/*.py`）
+                for m in sorted(REPO.glob(tok)):
+                    if m.is_file() and m.suffix == ".py":
+                        files.append(str(m.relative_to(REPO)).replace("\\", "/"))
+            elif tok.endswith(".py"):
+                files.append(tok)
     return sorted(set(files))
 
 
@@ -268,7 +282,8 @@ def collect_offline():
     copy_py = _dockerfile_copy_files()
     # ★「Dockerfile 说要 COPY 的 .py」必须真的在磁盘上（本机）。
     #   这是 tools/build-preflight.sh 的同一条判据，在这里出个计数便于巡检。
-    copy_py_present = sorted(f for f in copy_py if (REPO / f).exists() or (REPO / "src" / f).exists())
+    #   ★ 2026-10-06：路径现在是仓库根相对（如 `src/opencd.py`）。
+    copy_py_present = sorted(f for f in copy_py if (REPO / f).exists())
     return {
         "generated_at": _now_iso(),
         "generator": "tools/gen_counts.py",

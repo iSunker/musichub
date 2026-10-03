@@ -36,7 +36,7 @@ def _where_const(name):
     import ast
     import pathlib
 
-    src = pathlib.Path(__file__).resolve().parent.parent / "db.py"
+    src = pathlib.Path(__file__).resolve().parent.parent / "src" / "db.py"
     ns = {}
     for n in ast.parse(src.read_text(encoding="utf-8")).body:
         if not isinstance(n, ast.Assign):
