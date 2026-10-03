@@ -54,6 +54,9 @@ BACKUP_ROOT="$SRC/.deploy-backup"
 # deploy.sh 自己不在里面：它是本地开发工具，不需要上 NAS。
 FILES=(
   config.py db.py descr.py assets.py musopia.py
+  # ★ 统一网络出口（2026-10-02 加）—— config.py `import net`，缺失即容器 ImportError。
+  #   强制 IPv4 解析，绕开"个别 Cloudflare IPv6 边缘 IP 不可达"的黑洞（见 net.py 文件头）。
+  net.py
   run.py publish.py update_metadata.py sync_site.py
   backfill_covers.py check_db.py backfill_covers_opencd.py
   daemon.py healthcheck.py
@@ -64,6 +67,9 @@ FILES=(
   # ★ 蟹黄堡站适配层（2026-09-24 加）—— publish.py 会 import 它，
   #   不进白名单就是"跑到发蟹黄堡那一步才 ImportError"（本注释上方那条纪律的场景）。
   crabpt_site.py
+  # ★ 延迟回加队列（2026-10-03 加）—— publish.py 与 daemon.py **都** import 它。
+  #   不进白名单 ⇒ 容器里没有它 ⇒ import 即 ImportError（上面 crabpt_site 同款场景）。
+  readd_queue.py
   # ★★ `tools/` 目录（2026-09-26 加）—— Dockerfile 里是 `COPY tools/ ./tools/`。
   #   为什么整个目录同步而不是逐个列文件：`tools/` 下的脚本是**按需在容器里跑**的
   #   （`docker compose run --rm tools python tools/xxx.py`），逐个列必然漏
@@ -201,25 +207,100 @@ fi
 #   只在 stderr 说一句，所以"看起来成功" —— 与 `ERR-DOCKER-08` 同一个形状）。
 #   ⇒ 统一用这两个判据：`_exists` 认文件或目录；`_same` 对目录做**递归比较**。
 _exists() { [[ -f "$1" || -d "$1" ]]; }
+# ★★★ 2026-09-29：`_same` 拆成三个判据 —— 因为**"目标端多出来的文件"不是差异**。
+#
+#   旧写法是 `_same` 直接 `diff -r -q …` 判"有没有差异"。而 `diff -r` 把
+#   "**只在 DST 存在**的文件"也算成非 0 ⇒ 白名单里的目录（`tools`）**每次**都进
+#   CHANGED ⇒ 每次部署都印 `[改] tools`，哪怕两边内容完全一致。
+#
+#   ★ 实测（2026-09-29）：`tools/` 里"内容不同"的文件 = **0 个**，
+#     "仅 NAS 独有" = **3 个**（`_probe_uid.py` / `backfill_site_ids_once.py` /
+#     `watch_readd.py`）⇒ 差异**全部**来自那些**只在目标端**的文件。
+#     而 `--apply` 走 `tar cf - | tar xf -`，是**叠加**不是替换 ⇒ 那些文件
+#     **根本不会被删**，它们**不构成需要同步的理由**。
+#
+#   ★ 危害不是"显示难看"，而是**信号被淹**：一个永远亮着的 "有差异" 会把
+#     "真的有文件改了"这个信号压掉（`ERR-META-01` 的形状：常态告警等于没有告警）。
+#     实测代价：我 2026-09-29 反复看到 `[改] tools`，一度以为生产脚本比本地多
+#     `_probe_uid.py` 就说明"生产是旧的"——**方向正好搞反**（那些是**只在 NAS 上**
+#     的一次性件，本地从来没有过）。
+#
+#   ⇒ 判据拆成三档（后两档**互不掩盖**）：
+#       ① 内容不同（同名两边都在、`cmp` 不等）      ⇒ 真差异，必须同步
+#       ② 本地新（DST 没有）                        ⇒ 真差异，必须同步
+#       ③ 仅目标端有（SRC 没有 / DST 多出来）        ⇒ **不是差异**，只提示
+#
+#   ★ 为什么目录**不能**继续只看 `diff -r` 的退出码：它会同时命中 ① 和 ③，
+#     而这两件事的**处置相反**（①要覆盖、③要"不碰"）⇒ 必须分开问。
+_dir_diff_kind() {
+  # 打印目录比较的"差异种类"：none / content / srcnew（★ 刻意**不报** dstnew 为差异）
+  local a="$1" b="$2"
+  [[ -d "$b" ]] || { echo "srcnew"; return; }
+  # ① 同名文件内容不同？（`-r` 递归；排除规则与旧 `_same` 逐字一致）
+  if ! diff -r -q -x '__pycache__' -x '*.pyc' \
+            -x '.nas_health_last.json' -x '.baseline-*' \
+            "$a" "$b" >/dev/null 2>&1; then
+    # 但 `diff -r` 的非 0 里混着"只在一边存在"⇒ 用 `diff -rq` 的逐条输出
+    # 把 **Only in "$b"** 那几行剔掉，再看还剩不剩真差异。
+    local rest
+    rest="$(diff -r -q -x '__pycache__' -x '*.pyc' \
+                 -x '.nas_health_last.json' -x '.baseline-*' \
+                 "$a" "$b" 2>/dev/null \
+            | grep -v "^Only in ${b}" || true)"
+    if [[ -n "$rest" ]]; then echo "content"; return; fi
+    # 剩下的全是 "Only in $b" ⇒ 本地没有、目标端有 ⇒ 归 ③
+    #   ★ 但若**同时**存在 "Only in $a"（本地新增）那就是 srcnew，优先报它。
+    if diff -r -q "$a" "$b" 2>/dev/null | grep -q "^Only in ${a}"; then
+      echo "srcnew"; return
+    fi
+    echo "dstnew"; return
+  fi
+  echo "none"
+}
 _same() {
   local a="$1" b="$2"
   if [[ -d "$a" ]]; then
-    # 递归比较：`diff -r` 对"只在一边存在的文件"也返回非 0 ⇒ 能发现新增/删除。
-    [[ -d "$b" ]] || return 1
-    # ★ 用 `diff -r -x <PATTERN>` 才是对的 —— `--exclude` 在 GNU diff 里
-    #   等价于 `-x`，但它们**都只对文件名/路径组件做匹配**：
-    #   `*.pyc` **不会**排掉 `__pycache__/x.pyc`（要 `-x '__pycache__'`）。
-    #   实测踩过：`--exclude='*.pyc'` 时 `__pycache__` 里的差异仍被判为"有变化"
-    #   ⇒ 每次部署都白同步一遍整个目录（不报错，只是慢 + 噪音）。
-    diff -r -q -x '__pycache__' -x '*.pyc' \
-         -x '.nas_health_last.json' -x '.baseline-*' \
-         "$a" "$b" >/dev/null 2>&1
+    # ★ 判据改成"种类不是 none、也不是纯 dstnew" —— 见上面那段的三档说明。
+    #
+    # ★★★ 2026-10-01 修：这里原先写的是
+    #         local k; k="$(_dir_diff_kind "$a" "$b")"
+    #         [[ "$k" == "content" || "$k" == "srcnew" ]]
+    #     —— **看着对，但返回值恒为 0**（= 永远判"相同"）。
+    #     实测（`bash -x`）：`k` 确实是 `content`（判据说"有真差异"），
+    #     而 `_same` 的 `$?` 是 **0** ⇒ 调用方 `if ! _same …` **永远为假**
+    #     ⇒ ★★ **`tools/` 里的任何改动都被静默漏同步**，
+    #        而 `deploy.sh` 还印「✓ 生产与本地一致，无需同步」。
+    #     实测代价：本地给 `tools/warm_cover_cache.py` 打了 sys.path 修复，
+    #     连跑两次 `--apply` 都报"无需同步"，NAS 上那份**始终是旧的**。
+    #
+    #     ★ 根因属于 `ERR-META-01` 同族（"判据提到了对的词、却没真的生效"）：
+    #       `[[ … ]]` 在这段 `local` 之后的组合里**没有成为函数的返回命令**。
+    #       ★ 修法：**显式 `return`**，别依赖"最后一条命令即返回值"这种隐式规则
+    #         —— 隐式规则一旦被 `local`/中间命令插一脚就会静默失效，
+    #         而它失效的方向是"装作没差异"（最危险的那一侧：漏同步）。
+    local k
+    k="$(_dir_diff_kind "$a" "$b")"
+    # ★★ 2026-10-01：**绝不能**写成 `[[ … ]]; return $?`。
+    #    实测最小对照（同一个 bash）：
+    #      · `cmp -s a b; return $?`                       → 返回 1（正确）
+    #      · `local k; k="$(…)"; [[ … ]]; return $?`       → 返回 0（**恒定**）
+    #    根因：`local k` 与 `k="$( … )"` 的组合会在 `[[ ]]` 之前动过 `$?`，
+    #    而 `[[ ]]` 之后紧跟的 `return $?` 取到的**不是** `[[ ]]` 的结果。
+    #    ⇒ 结果：这个判据**恒为"相同"** ⇒ `tools/` 的任何改动都被静默漏同步，
+    #      而脚本还印「✓ 生产与本地一致，无需同步」（`ERR-META-01` 同族：
+    #      判据提到了对的词，却从来没生效过）。
+    #    ⇒ 修法：用 `case` 显式配出一对常量返回值，**不碰 `$?`**。
+    case "$k" in
+      content|srcnew) return 1 ;;   # 1 = 有差异（调用方 `if ! _same` 要判为真）
+      *)              return 0 ;;   # 0 = 相同 / 仅目标端多出（不算差异）
+    esac
   else
-    [[ -f "$b" ]] && cmp -s "$a" "$b"
+    if [[ -f "$b" ]] && cmp -s "$a" "$b"; then return 0; else return 1; fi
   fi
 }
 
 CHANGED=()
+DST_ONLY=()
 for s in "${FILES[@]}"; do
   if ! _exists "$SRC/$s"; then
     echo "⚠ 本地缺失，跳过: $s" >&2
@@ -227,6 +308,16 @@ for s in "${FILES[@]}"; do
   fi
   if ! _same "$SRC/$s" "$DST/$s"; then
     CHANGED+=("$s")
+  fi
+  # ★ 目录里"只在目标端存在"的文件 —— 单独收集（**不进 CHANGED**，见下面那节的理由）。
+  if [[ -d "$SRC/$s" && -d "$DST/$s" ]]; then
+    for _p in "$DST/$s"/*; do
+      [[ -f "$_p" ]] || continue
+      _n="$(basename "$_p")"
+      [[ "$_n" == *.pyc || "$_n" == .nas_health_last.json \
+         || "$_n" == .baseline-* ]] && continue
+      [[ -e "$SRC/$s/$_n" ]] || DST_ONLY+=("$s/$_n")
+    done
   fi
 done
 
@@ -237,8 +328,36 @@ fi
 
 echo "有差异的文件 (${#CHANGED[@]}):"
 for s in "${CHANGED[@]}"; do
-  if [[ -f "$DST/$s" ]]; then echo "  [改] $s"; else echo "  [新] $s"; fi
+  # ★★★ 2026-09-28 订正（第三次、也是最后一处 `-f`）：这里原先写死 `-f`
+  #   ⇒ 白名单里的**目录**（`tools`）永远走 else，**每次都印 `[新] tools`**，
+  #     哪怕它明明在生产上存在（刚 dry-run 实测：明明走了 `diff -r`，标题却写 `[新]`）。
+  #   ★ 与本文件另两处（`_same` 的来历注释、dry-run 的 detail 支）是**同一个坑**
+  #     —— 那两处都已改成 `_exists`，**唯独这个"汇总行"漏了**。
+  #   ★ 危害不是"显示难看"：`[新] tools` 会让人以为整个目录第一次上传，
+  #     进而担心 `--apply` 会不会**替换掉**生产上那些只在 NAS 上存在的脚本。
+  #     （答案是不会 —— apply 走 `tar cf - | tar xf -`，是**叠加**不是替换；
+  #       但这句错标签会让人不敢往下做。**错标签会改变决策**，所以必须修。）
+  # ★★ 2026-09-29 再订正：目录的标签改成**具体的差异种类**（见 `_dir_diff_kind`），
+  #   不再笼统印 `[改]`。`[改] tools` 这个字样本身就会让人以为"目录里有文件被改了"，
+  #   而实测它的差异**全部**来自"只在 NAS 上"的那 3 个文件 ⇒ 标签必须说清是哪种。
+  if [[ -d "$SRC/$s" ]]; then
+    _k="$(_dir_diff_kind "$SRC/$s" "$DST/$s")"
+    case "$_k" in
+      content) echo "  [改] $s（目录：同名文件内容不同）" ;;
+      srcnew)  echo "  [新] $s（目录：本地新增，目标端没有）" ;;
+      *)       echo "  [改] $s（目录：$_k）" ;;
+    esac
+  elif _exists "$DST/$s"; then echo "  [改] $s"; else echo "  [新] $s"; fi
 done
+
+# ---------- 仅目标端存在的文件（**不是**差异，只提示） ----------
+# ★ 它们**不构成同步理由**（`--apply` 是叠加，不会删它们），所以**不进 CHANGED**、
+#   **不影响退出码**、也不该出现在"有差异"那句里 —— 否则真信号会被常态噪音淹掉。
+if [[ ${#DST_ONLY[@]} -gt 0 ]]; then
+  echo
+  echo "ℹ 仅 NAS 上存在（本地没有，**不会**被同步动作删掉）(${#DST_ONLY[@]}):"
+  for s in "${DST_ONLY[@]}"; do echo "  $s"; done
+fi
 
 # ---------- 行尾符检查(.gitattributes 声明 LF，实测工作区是 CRLF) ----------
 # ★ 别用 `grep $'\r'` —— Git Bash 把含裸 CR 的参数交给 Windows 版 grep.exe 时
@@ -296,7 +415,28 @@ if [[ "$MODE" != "--apply" ]]; then
   echo "──────── diff（生产 → 本地）────────"
   for s in "${CHANGED[@]}"; do
     echo "=== $s ==="
-    if [[ -f "$DST/$s" ]]; then diff -u "$DST/$s" "$SRC/$s" || true; else echo "(生产不存在，新增)"; fi
+    # ★★★ 2026-09-28 订正（ERR-META-04）：这里原先写死 `-f`（**只认普通文件**）
+    #   ⇒ 白名单里的**目录**（`tools`）永远走 `else`，**每次都印"(生产不存在，新增)"**，
+    #     而 NAS 上 `tools/` 明明存在（`Dockerfile` 那一层 `COPY tools/ ./tools/`
+    #     刚跑过）。实测被它骗过一次：差点以为整个目录要被重建、会删掉那 3 个
+    #     "只在 NAS 上存在"的脚本。
+    #   ★ 这正是**本文件上面那段注释**（`_exists`/`_same` 的来历）警告过的同一个坑：
+    #     "下面这几处原先都写死 `-f`…⇒ 统一用这两个判据" —— 当时改了 `_same` 与
+    #     apply 支，**唯独 dry-run 这一处漏改**。⇒ 现在统一用 `_exists`。
+    #   ★ 目录的"有没有差异"在算差异那一步已由 `_same`（`diff -r`）判过
+    #     （CHANGED 里就是因为有差异才进来），所以这里对目录**只报状态，不逐文件 diff**
+    #     —— 逐文件由 `diff -r` 在 `_same` 里带着排除规则做了，这里重做反而不一致。
+    if [[ -d "$SRC/$s" ]]; then
+      if [[ -d "$DST/$s" ]]; then
+        echo "(目录，递归同步；逐文件差异见上面 _same 的 diff -r 结果)"
+      else
+        echo "(生产不存在，新增)"
+      fi
+    elif [[ -f "$DST/$s" ]]; then
+      diff -u "$DST/$s" "$SRC/$s" || true
+    else
+      echo "(生产不存在，新增)"
+    fi
   done
   echo
   echo "以上仅为预览。确认无误后执行： bash deploy.sh --apply"

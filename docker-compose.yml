@@ -90,6 +90,41 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  # ==================== qB 下载调度器（常驻 · 默认关闭）====================
+  # ★ 与 daemon 并列的**第二个常驻容器**：daemon 管"发布到站点"，本服务只管
+  #   "qB(3020) 里的下载怎么排队/怎么分带宽"，互不 import、互不阻塞。
+  #   为什么独立而不是塞进 daemon.py：daemon 的阶段是**同步阻塞**的（单阶段最长
+  #   STAGE_TIMEOUT=3600s），60s 的调优节拍会被别的阶段饿死（见 daemon.py run_main_loop）。
+  # ★ 它**不写 data.db**（本文件顶部纪律：共享 SQLite 不许两个容器并发写，
+  #   ERR-DOCKER-03）—— 状态落在 /data/qbtune_state.json，心跳落 /data/qbtune_heartbeat
+  #   （与 daemon_heartbeat 分开，两个主体各一份，同名会互相覆盖）。
+  # ★ 默认 QBTUNE_ENABLE=false ⇒ 起来也只读、不写 qB（先 --dry-run 看计划）。
+  #   要真跑：NAS 的 .env 里设 QBTUNE_ENABLE=true（ERR-ENV-02：本机 .env 不进容器）。
+  # ★ 刻意**不写 `environment:`**：`*common-env` 是**覆盖**语义，写了会把
+  #   DATA_DIR / QB_HOST / VERTEX_DB 全丢掉 —— QBTUNE_* 一律经 env_file(.env) 传入。
+  qbtune:
+    <<: *common
+    container_name: musopia_qbtune
+    command: ["python", "tools/qbtune.py", "--loop"]
+    restart: unless-stopped
+    # 本服务无长任务，一轮最多几秒 ⇒ 5s 足够（别照抄 musopia 的 5m，那是给
+    # "一次编辑请求 + 校验回读"留的）。
+    stop_grace_period: 5s
+    healthcheck:
+      # ★ **不复用**根级 healthcheck.py —— 它硬编码读 daemon_heartbeat，会让
+      #   qbtune 的健康取决于 daemon（看门狗互锁）。本服务自带 --healthcheck
+      #   分支读自己的心跳。
+      test: ["CMD", "python", "tools/qbtune.py", "--healthcheck"]
+      interval: 60s
+      timeout: 15s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
   # ==================== 以下都是手动一次性任务 ====================
   # 加了 profiles 就不会被 docker compose up 带起来，只能显式 run。
   # 用法示例：

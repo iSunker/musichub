@@ -9,6 +9,185 @@
 
 ---
 
+## 2026-10-04（凌晨）—— ★★★ 蟹黄堡"最近两个种子没做种"根因：qB 升级改登录响应（`ERR-QB-07`）
+
+### 0. 起因（用户报障）
+
+用户原话：「为什么蟹宝王最近两个种子没有做种？」（蟹宝王 = 蟹黄堡 = CrabPT。
+用户先让读上一个会话（`abf5ef44`）倒数十轮，再点名 SSH `iSunker@192.168.0.7:36688` 去查。）
+
+### 1. 根因链（**全部实测坐实**）
+
+1. **qB 3020 于 2026-10-03 16:12 从 5.0.4 升级到 `linuxserver/qbittorrent:5.2.4`**
+   （`docker inspect qbittorrent-opencd` → `Created=2026-10-03T16:12:12Z`）。
+   ★ 这次升级发生在**两个会话之间的空档**，当事会话（到 15:01）未记录 —— 我一度把
+   "3020 是 5.0.4"当既定事实（上会话记录），**跨会话的环境事实已过期**。
+2. qB 5.1.2+ 成功登录响应由 `200 "Ok."` 改为 **`204` 空 body**（实测裸 HTTP：`login HTTP 204 body=''`）。
+3. 容器里 `qbittorrent-api==2024.9.67` 的 `auth_log_in()` 判据是
+   `if auth_response.text != "Ok.": raise LoginFailed()` ⇒ **抛无参 `LoginFailed()`，`str(e)==''`**（实测：`EXC type = LoginFailed; EXC str = ''`）。
+4. `publish.py::connect_qb()` 捕获后返回 `None`。**关键分叉**：
+   - `readd_to_qb_crabpt` 开头 `if qb is None: print("⚠️ 回加跳过…"); return`
+     ⇒ **发布成功但静默跳过回加 ⇒ 不做种**（本障真因）。日志只留
+     `⚠️ 连不上 qBittorrent ()，本次不做回加`（**括号空**，看着像网络问题、实为登录被拒）。
+   - `run.py:524-526` / `publish.py:1821-1823` 的 `qb.auth_log_in()` **无 try/except**
+     ⇒ 阶段**硬崩**（退出码 1）。
+5. **"为什么延迟做种没兜住"**：`SEED_DELAY_MIN=15` 虽已在 `.env`，
+   但 qb=None 时 `readd_to_qb_crabpt` **在 enqueue 之前就 return** ⇒ `readd_queue.json` **从未生成**
+   （实测：`/data/readd_queue.json` 不存在）。⇒ 延迟做种**实际从未生效过**。
+
+### 2. 影响面（实测，daemon 日志）
+
+| 阶段 | 症状 | 类别 |
+|---|---|---|
+| `scan`（`python run.py`） | ❌ 硬崩，退出码 1，栈：`run.py:866 → 526 → qbittorrentapi/auth.py:98 raise LoginFailed()` | 主线停摆 |
+| `publish`（乌托邦） | ❌ 硬崩，退出码 1 | 主线停摆 |
+| `publish_crabpt` 回加 | ⚠️ 阶段"完成"（退出码 0）但**不做种** | **软失败（本障元凶）** |
+| `_drain_pending_readds` | ⚠️ 同理无法回加 | 软失败 |
+| `crawl`（不碰 qB） | ✅ 正常 | 无影响 |
+
+★ 教训：**"阶段成功" ≠ "这件事做成了"** —— `publish_crabpt` 是**唯一软失败**路径，
+在日志里只留一行 `⚠️ 回加跳过`，不像 scan/publish 那样有 `❌ 退出码 1` 醒目。
+
+### 3. 修法（已做并**在生产验证**）
+
+| 项 | 判据 | 结果 |
+|---|---|---|
+| `Dockerfile` pin：`qbittorrent-api==2024.9.67` → `2026.10.0` | 本地 + NAS 都改（NAS 留 `Dockerfile.bak-before-qbit-api-*`） | ✅ |
+| 新版 `auth_log_in` 判据 | `text == "" or "Ok."`（认 204 空 body）+ 原生支持 API Key（v5.2.0+） | ✅ 读源码坐实 |
+| 重建范围 | `docker compose up -d --build musopia`（**只这个服务**，未动 qbtune） | ✅ |
+| 镜像内库版本 | `importlib.metadata.version('qbittorrent-api')` = **2026.10.0** | ✅ |
+| `publish.connect_qb()` 实测 | 返回 **OK**，`app_version()=v5.2.4` | ✅ |
+| `run.py --selftest` | `✅ 自检通过` | ✅ |
+| `run.py --limit 1`（真实 scan，复刻崩掉的路径） | `✅ 已连通 qBittorrent` → `🎯 扫描完成…失败 0 个` | ✅ |
+| 重建后 daemon 日志 | LoginFailed / 连不上 qB / 回加跳过 计数 **= 0** | ✅ |
+| `ERRATA.md` | 新增 `ERR-QB-07`；`tools/doc-audit/02_refs.py` 悬空 **0**；已同步 NAS | ✅ |
+
+### 4. 用户手工处置（已确认生效）
+
+- 用户**已手动添加**那 3 条已在站的蟹黄堡种子（215682 黄清元 / 215701 Gene Krupa / 215715 鲍正芳）：
+  实测 `category=CrabPT` 的 2 条在 `uploading`/`stalledUP` 正在做种；
+  **`鲍正芳`（hash `14f46591…`）分类为空**（`cat=''`）——待补（见 TaskList #5）。
+
+### 5. 待办（已入 TaskList，勿只活在对话里）
+
+- #4 停掉 `musopia_qbtune`（up 但内部进程已死：心跳停 13887s > 上限 180s）
+- #5 把鲍正芳那条分类补成 `CrabPT`
+- #6 rotate qB 3020 的 API Key（排查时明文打印进了会话 ⇒ 视为已泄露）
+- #7 排查 qbtune 进程为何停止写心跳
+- #8 决定 3020 qB 崩溃（`ERR-QB-06` 的 bad_alloc/VmSize 泄漏）怎么修 —— ★ 前提变了：
+  3020 已升 5.2.4，**先确认 5.2.4 是否还崩**再定
+- #9 补记录延迟做种部署 + **实测它这次真能生效**（修好 qb 库后 `readd_queue.json` 该能生成）
+- #10 订正 `ERR-QB-06` 的"3060 稳"假设 + 记 s6 守护真相
+- #11 长尾：opencd_rate 量纲 / qbtune budget / 邮件告警
+
+---
+
+## 2026-09-28（日间）—— ★★★ 转种口径缺闸门④（`ERR-DATA-08`）：已修 **一半**，另一半带病在产
+
+### 0. 起因（用户点名要查，不是我自己发现的）
+
+用户原话：「要我去读 `publish.py` / `crabpt_site.py` 的转种筛选口径，确认它用的是哪一个吗？
+**这个必须先查 —— 若它筛的是"已上站"，那 15972 会被转过去，违反禁转；而转种不可逆。**」
+
+⇒ **用户的前提是对的。** 实测确认：转种路原先只按 `CROSS_SITE_DEDUP_WHERE`（= 已上站 + id 非空）筛，
+**没有** `transfer_rule = 'ALLOW'`。而 `EXISTS` 的 28 行里 **27 ALLOW / 1 DENY**，
+那条 DENY 是 `site_torrent_id=15972`（真实 info_hash = **`144f017ad0c0…`**，`opencd_tid='200002'`，
+`Mary Black - Babes In The Wood 1991`）⇒ **它会进队列、会被搬到蟹黄堡**。
+
+### 1. 已修并**已在生产验证**的部分（这一半是硬的）
+
+| 判据 | 结果 |
+|---|---|
+| 新常量 `db.TRANSFERABLE_WHERE` = `CROSS_SITE_DEDUP_WHERE` + `AND transfer_rule = 'ALLOW'` | 新增 |
+| `transferable_to()` / `count_transferable_to()` 改用它 | ✅ |
+| `CROSS_SITE_DEDUP_WHERE` **一字未动** | ✅ 故意（见下） |
+| `run.py --selftest` ⑦e / ⑦e-2 / ⑦e-3 | ✅ 新增，**7 个变异 7/7 全被抓**，基线绿 |
+| NAS 部署后 sha256 四份全等 | ✅ |
+| 镜像重建 `sha256:7a847f13653d238e3332df87a49c7b9a2cbf82d8578666a55fb4ac20b1dcc6e6` | ✅ |
+| 容器内 `run.py --selftest` | ✅ `✅ 自检通过`（**且印出 ⑦e/⑦e-3 两行 ⇒ 证明镜像真更新了**，`ERR-DOCKER-09` 的正面用法） |
+| `tools/` 快照 vs 宿主 | ✅ 44 = 44 |
+| ★ `publish.py --site crabpt --dry-run` | ✅ **队列 27 条**（原 28），`15972` 不在其中 |
+| ★ 差集探针 | ✅ **仍报出 1 条** `144f017ad0c0 transfer_rule='DENY'` ⇒ **检测器没被弄死** |
+
+★★ **为什么 `CROSS_SITE_DEDUP_WHERE` 不许被合并**（这是本次最容易做错的修法）：
+`publish.py` 里那条"**应当恒为空**的差集断言"问的**正是**「已上站 ∧ **非** ALLOW 的有哪些」。
+把 `ALLOW` 并进 `CROSS_SITE_DEDUP_WHERE` ⇒ 它**恒返回 0 行** ⇒ **永远显示"通过"** =
+**检测器静默失效**（比不检测更危险）。
+★ 用 fixture 实测证明：并进去后差值 = **0**。⇒ **一条 WHERE 服务两个方向相反的问题 ⇒ 必须分叉成两个常量。**
+（`TRANSFERABLE_WHERE` = 判据；`CROSS_SITE_DEDUP_WHERE` = 事实，继续供探针用。）
+
+### 2. ★★★ 未修完，而且**带病在产**：`is_transferable_to()` 仍是旧口径（= Task #7）
+
+**这条是本次最该记住的 —— 因为它是我"查了函数名却没查完"的直接后果。**
+
+用户的清单里明确写着待确认项：「whether the per-row `db.is_transferable_to(h, SITE_CRABPT)`
+called at `publish.py:535` tests `transfer_rule`」。**我查到了那个函数名、写进了清单，然后改了代码、
+部署了生产，始终没有回头回答它。**
+
+⇒ 实测后果（一条命令里**自己跟自己矛盾**）：
+
+```
+sudo docker compose run --rm tools python publish.py --site crabpt --dry-run --only 144f017a
+  ❌ 144f017a 不在转种队列里（被闸门拦下 / 已发过 / hash 打错）     ← 队列实际筛选（对）
+  ✅ 它**在**转种队列里（源站有（乌托邦）、目标站（crabpt）没有 ⇒ 该转） ← 解释文案（错）
+```
+
+根因：`db.is_transferable_to()`（`db.py:1419-1459`）只判**两**件事（源站有 + 目标站没有），
+**不含闸门④**。而 `explain_not_transferable()`（`publish.py:508-553`）正是走它生成给人看的 `why`。
+
+⇒ 危害定级：比原来那个洞**更隐蔽**。原来只是"会多发一条"（数据风险）；
+现在是**"工具会告诉你'它在队列里'，而实际不会发"** ⇒ **误导人做决定**（`ERR-META-14` 的形状）。
+
+### 3. 顺带抓到的第二个缺陷：`--only` 的标识类型（= Task #8）
+
+`--only 15972`（传的是 **site_torrent_id**）报「库里没有这个 hash（打错了？）」——
+★ 这句是**误导**：它查的是 `info_hash LIKE '15972%'`，而 `15972` 是**站点 id**。
+
+★ 更要紧：我据此**误判过** —— 我上一条曾说"命令 3 证明了闸门④ 挡住了 15972"。
+**那句是错的**：它只证明了"`15972` 不是一个 info_hash"，**与闸门④ 无关**。
+★ 教训：**"零交集"这条判据会因为传错参数而"碰巧成立"** ⇒ 判据通过 ≠ 判据测了它想测的东西。
+
+### 4. 本轮方法论收获（都已落成**可执行判据**，不是文字承诺）
+
+1. **一个"推理"被写进注释却从没落成判据 ⇒ 它会在被推翻的那天静默失效。**
+   `publish.py` 的 `_gaps` 断言注释**自己写着**「…**但那段是推理**」；`db.py` 里还有一句引用
+   `crabpt_rule_gaps()` 的注释（**那函数全仓库不存在**）。⇒ 实测证明推理已破。
+2. **`ast.literal_eval` 不认 `Name` 节点** ⇒ `TRANSFERABLE_WHERE = CROSS + "…"` 写法虽干净，
+   但会让**4 个靠 AST 抽常量的工具**（它们**不能** `import db`：`config` 在 import 期 `require_env()`）
+   在**运行时**才炸（不是构建期）—— 而它们正是用来"半夜在 NAS 上查紧急问题"的。
+   ⇒ 已加 **⑦e-3** 在构建期钉住；`db.py` 里那段"刻意的重复"就是为满足它，**注释里写明了理由**。
+3. **判据提到了对的词、却问了个错的问题**：⑦e 只查"尾巴提到 `transfer_rule`"
+   ⇒ `transfer_rule != 'DENY'` **也会通过**，而它与闸门④ **语义相反**
+   （空 / `NEED_CONFIRM` 在闸门④ 是**拦**，在 `!= 'DENY'` 下是**放**）。
+   ⇒ 必须有 **⑦e-2 逐字比**。已用变异 ② 证明它会被抓到。
+4. **给用户的命令，flag 必须逐个在源码里 grep 过**（不能凭记忆）。
+   实测：我把 `--site crabpt` 写成 `--crabpt`（该 flag **全仓库不存在**）。
+   ★ 同族第二次（上次是位置参数 `torrent_id` 写成 `--torrent_id`）。
+   ★ 好消息：两次都被 argparse 挡在 `main()` **之前**，**零副作用**（一条库、一条请求都没发）。
+
+### 5. 未解 / 待验（**已进 TaskList**）
+
+- **Task #7**（最紧急）：`is_transferable_to()` 补闸门④ + 钉住"队列口径与解释口径同源"。
+- **Task #8**：`--only` 标识类型的报错文案。
+- **Task #9**：把本页 §4 的 4 条 + §2 的教训补进 `ERRATA.md`（`ERR-DATA-08` **已写完**，别重复）。
+- **Task #10**：`15972` 的标题不一致 —— **要用户拍板**（它是上游的 DENY 语义决定，
+  不是我们能单方面"修"的；`stale 待办 0 / 只读口径 1` 是**正确拦截**，不是卡住）。
+- **Task #11**：清理 `.scratch/` 与 NAS 上的 `q4_before.json`（第 4 步已判定，可删）。
+- **Task #12**：7 条既有 watch items（原样留着，别再往下挖）。
+
+### 6. 另：第 4~6 步的结论（本轮早段完成，独立于上面）
+
+- **第 4 步 ✅ 通过**：`scan` 跑完**一整轮**（exit 0，223.6s，`18:03:10 → 18:37:13`），
+  28 条皇后路已上站行的标题 **`updated_at` 动过 0 条** ⇒ **C' 生效**（"没被动"，**不是**"变得对了"）。
+- **第 5 步 ✅ 零工作**：28 行的 `formatted_title` **已逐字节等于** `mapped_json.title`。
+- **第 6 步 ✅ 结论为"不动手"**：站点 `name` 与库值 27/28 已一致；唯一不一致的 `15972`
+  **被闸门④ 正确拦住**（`require_allow=True`）⇒ 不是失败，是**设计如此**。
+- ★ 期间修掉一个工具真缺陷：`verify_cprime_step4.py` 在印了 `❌★ C' 没生效` 之后
+  **仍以 `return 0` 收尾** ⇒ "失败"对机器读起来是"成功"。已修 + 加**拒绝闸门**
+  （不到点不印判据，`rc 3`）—— 根因是工具**没把"时机"当前置条件**，导致同一条命令被连跑 8 次。
+
+---
+
 ## 2026-09-24（夜）—— ★★★ **自动发布一次都没成功**：`--yes` 被误删 ⇒ `EOFError`
 
 ### 0. 症状（实测，不是推测）
@@ -3532,3 +3711,646 @@ PUBLISHED     8   (已上站的条数；★ 只到「上站」为止，**不**�
 1. ★ **git 提交**（今晚改动仍**无版本记录**）—— 现在可以做（本线已闭环）
 2. ★ **`CRABPT_COOKIE`** + 蟹黄堡「填写规范全文」/「音乐种编辑页」（见 `PLAN-crabpt.md` 附录 A.5 / B.8）
 3. ★ `publish.py` 的 `- OpenCD` 后缀是否保留 —— **待用户判断**（是发布组位；站上写 `-CHDMusic`）
+
+---
+
+## 2026-09-29 深夜 收尾落盘（用户 exit 前的交接）
+
+★ 本轮**净零写入**（有一处改了又回滚，字节相同）。下面按「你回来先做什么」排序。
+
+### ★★ 0. 最重要：有一个决定卡在你手上，且只有你能做
+
+**凭据是否按"已泄漏"处理**（详见任务表 Task #12）。
+决定性的一步 —— 我判定不了：
+
+```
+DSM → 控制面板 → 共享文件夹 → docker_ssd → 编辑 → 权限
+```
+
+看左侧有没有**非你本人**的账号且勾了**可读写**。
+- 只有你 ⇒ 风险低，轮换可选
+- 有别人 ⇒ 按已泄漏办
+
+我给的三个选项 + 建议（**C：只换 `LSKY_TOKEN` / `OPENCD_COOKIE` 两个纯配置凭据**）
+都在 Task #12 描述里。
+
+### ★ 1. 我在本轮犯的两个错（都已订正，但你要知道）
+
+**① 我编了一个不存在的键。** 我在给你的命令里写了 `CRABPT_PASSKEY` ——
+**全项目零引用**（`config.py` / `crabpt_site.py` / `publish.py` / `.env.example` 全查过）。
+蟹黄堡按 **Cookie** 鉴权（`CRABPT_COOKIE`），不按 passkey。
+我把乌托邦的 `MUSOPIA_PASSKEY`（announce passkey）串到蟹黄堡上了。
+⇒ 你照着跑出的那 40 字节随机串**作废**。
+
+**② ★ 更严重：我改了 `.env` 就以为换成了钥匙。**
+`publish.py:186-187`：
+```python
+AUTO_KEY_ENV   = "PUBLISH_I_AM_HERE"
+AUTO_KEY_VALUE = "i-am-here"      # ← 硬编码常量，编译进镜像
+```
+**这把"钥匙"比的是代码里的常量**，不是配置 ⇒ 我只改 `.env` 会让两边不等
+⇒ 下一轮 publish 判「值不对」⇒ **拒绝发布，而且每晚都拒**。
+★ 已当场回滚，`.env` 现为 `i-am-here`，巡检仍报「两把钥匙成立」。
+★ 讽刺点：这正是我反复写进 ERRATA 的 `ERR-DOCKER-11`（"宿主改了 ≠ 容器里是新的"），
+  我拿它警告过别人，然后自己踩。**根因**：我把"凭据轮换"当成了"改文件"。
+  真规则是 —— **任何凭据类值，先查它被谁读、跟什么比**。
+
+### ★ 2. 提示词里那句「NAS SSH 未开」**已过期**
+
+本轮实测**SSH 直连是通的**（此前多轮我误以为不通，把部署推给你手做 —— `ERR-META-44`）：
+
+```
+ssh -p 36688 -o StrictHostKeyChecking=no -i "/c/Users/艾森克/.ssh/id_ed25519" iSunker@192.168.0.7 '<命令>'
+```
+
+- ★ 必须 `-i` **显式指定 key**。**别**用 `HOME=/c/Users/艾森克 ssh ...` ——
+  Git Bash 把中文 HOME 转成 GBK 字节（`/c/Users/\260\254\311\255\277\313`）⇒ `Permission denied`。
+- ★ `docker` 不在 PATH：宿主上用 `/usr/local/bin/docker`；但
+  `ssh host 'docker ...'` 里 `docker` 反而找不到 ⇒ 给全路径。
+- ★ `sudo` 要密码；`iSunker` 在 `docker` 组 ⇒ 裸 `docker` 够用。
+- 噪声过滤（每次都要）：`2>&1 | grep -vE "WARNING|post-quantum|store now|upgraded|Could not create|Failed to add"`
+
+### ★ 3. 巡检本轮结论：无异常
+
+- 心跳停 5m15s ⇒ 当场定性 **(c) 正在跑长阶段**（旁证：同一次采样里 state 写着
+  `跳过至 22:40:51` ⇒ 22:41 时调度器还活着；且本轮**没有**重建过容器 ⇒ 排除 (b)）。
+  `scan` 实测跑过 384s，`STAGE_TIMEOUT=3600` ⇒ 远未到门槛。**不报异常。**
+- `EXISTS 46` / `PUBLISHED 40` / `stale 0`（只读口径 1 = 闸门④正确拦住的那条）—— **无变化**
+- `crawl` 配额 `50/50` 满 ⇒ 空转、目标 `233→233`，**预期内**（明天换天恢复）
+
+### 4. 新发现（小，但值得记）
+
+`ENABLE_PUBLISH_CRABPT` **不在 `daemon_env.json` 快照里** ——
+`daemon.save_env_snapshot` 是**白名单制**（`config.py:51` 注释已自陈这个代价）。
+⇒ 判蟹黄堡开关**只能读 `.env`**（现为第 147 行 `=false`），**别从快照判**。
+
+### 5. 本轮待办（任务表 #13 / #14）
+
+- **#13** 把上面 ①②③ 写进 `ERRATA.md`；顺带**改提示词里"SSH 未开"那句**
+  （那是常态化的错前提，`ERR-META-01` 的形状）
+- **#14** 清理 NAS 上本轮产生的 2 份 `.env` 探路备份
+  （`.env.before-rotation-20260929` / `.env.pre-publishrotate-20260929-*`）
+  ★ **等 #12 落地后再删**；★ 删前先确认 `.dockerignore` 的 `.env*` 排除**覆盖得住**它们
+
+### 6. 仍然挂着的旧待办（未变）
+
+1. **git 提交** —— 今晚改动仍**无版本记录**（工作区有一批 `M`/`??`，含本轮 `deploy.sh`、
+   `ERRATA.md`、`.gitignore`、`SESSION-NOTES.md`）
+2. 提示词里的「仍未解」清单：重复叶惠美（真 uid **85068**，旧结论作废要重观测）、
+   `OPENCD_COOKIE` 的 `$` 插值、空 body、`publish_crabpt` 队列基数、
+   `beat()` 长阶段不刷新（读法上已缓解）
+
+---
+
+## 2026-10-01（凌晨）—— 蟹黄堡转种未开 + 暖封面缓存受阻 + `deploy.sh` 假阴性
+
+### 0. 本轮实测到的硬事实（全部现场核对，非推断）
+
+| 项 | 值 | 判据来源 |
+|---|---|---|
+| 容器 | `running` / **`healthy`** / StartedAt=`2026-09-29 21:25:54 CST` 未变 / ExitCode=0 | `docker inspect` |
+| `ENABLE_PUBLISH_CRABPT` | **`false`**（容器 env + NAS `.env:147` + 两个轮换前备份**都是 false**） | `printenv` / `grep .env` |
+| 蟹黄堡已发 | **0 条**（`site_publish` 280 行**全部** `site='musopia'`） | 容器内 SQL |
+| 近 7 天日志含 `crabpt` | **0 次命中** | `docker logs \| grep -ic` |
+| 转种队列 | **55 条**；闸门④ 断言报 `144f017ad0c0 transfer_rule='DENY'` **1 条**（= `15972`）且**不在队列** | `publish.py --site crabpt --dry-run --auto` |
+| 闸门④ 修复在不在生产 | ★ **在**（生产 `db.py` 有 **15 处** `TRANSFERABLE_WHERE`，`is_transferable_to()` 含 `transfer_rule=='ALLOW'`） | `docker exec grep` |
+
+★★ **纠错**：我曾说"闸门④ 修复没部署到生产" —— **那是错的**。本地 `git status` 的 `M` 只说明工作区脏，不代表生产没这个修复。
+
+### 1. ★★★ "没有可上传的源"到底指什么（这是本轮最有用的结论）
+
+`publish.py:_crabpt_cover()` 三步，**第 ② 步是唯一断点**：
+
+```
+① site_publish(site='crabpt').cover_url   → 表里 crabpt 0 行 ⇒ 恒空
+② cover_fetch._cached_file(tasks.cover_url) → ★ 返回 ""（= 那句报错的来源）
+③ assets.upload_to_lsky(<本地文件>)        → 也要本地文件
+```
+
+- `cover_fetch.COVER_DIR = /data/covers` —— **现在存在**（09-28 16:14 建），
+  **不再是** 09-28 那次"从未建过"的状态 ⇒ 本文件旧描述已过时。
+- `_cached_file()` 判据：按 **`sha1(url)[:12]` 前缀**在目录里找**非空**文件。
+- 实测该目录里**只有 1 个文件**；全库 **306 行有 `cover_url`**，**305 行没进缓存**。
+
+★★ **"预检绿 vs 最终预览红"不是矛盾**（我一度误判成 `ERR-META-14`，收回）：
+  预检查的是 `tasks.cover_url` **字段非空**；最终预览要求**磁盘上真有那个文件**。
+  两者是**不同判据**，可以同时成立。
+
+### 2. `tools/warm_cover_cache.py` —— 能用，但有个真缺陷（已修 + 已部署）
+
+- 它**本来就在镜像里**（Dockerfile `COPY tools/ ./tools/`）——我曾说"没部署"，**错**。
+- 真缺陷：`python tools/warm_cover_cache.py` 时 **`sys.path[0]` 是 `/app/tools` 而非 `/app`**
+  ⇒ `ModuleNotFoundError: No module named 'cover_fetch'`。
+  ★ 容器里 `docker compose run --rm tools python tools/xxx.py` 走的正是这条路
+  ⇒ ★★ **每一个不在 `/app` 根目录下的 `tools/*.py` 都受影响**。
+- 修法：用 `__file__` 反推仓库根目录插进 `sys.path`（从哪调都对）。
+- 已 `deploy.sh --apply` 同步到 NAS（11755 字节），容器内**跑通**。
+
+### 3. ★★★ `deploy.sh` 的假阴性 bug（本轮的第二个真收获）
+
+`_same()` 里写成：
+
+```bash
+local k; k="$(_dir_diff_kind "$a" "$b")"
+[[ "$k" == "content" || "$k" == "srcnew" ]]
+return $?
+```
+
+★ 最小对照实验（同一个 bash）：
+
+```
+cmp -s a b; return $?                          → 返回 1（正确）
+local k; k="$(…)"; [[ … ]]; return $?          → 返回 0（**恒定**）
+```
+
+⇒ **函数返回值恒为 0** ⇒ 调用方 `if ! _same …` 永远为假
+⇒ **`tools/` 里的任何改动都被静默漏同步**，脚本还印「✓ 生产与本地一致，无需同步」。
+★ 实测代价：连跑两次 `--apply` 都是假阴性，NAS 上那份**一直是旧的**。
+★ 属 `ERR-META-01` 同族：**判据提到了对的词，却从来没生效过**。
+★ 修法：`case` 显式配常量返回值，**不碰 `$?`**。修完立刻正确报出 `[改] tools`。
+
+### 4. 未解 / 待办（见 TaskList）
+
+- **T1**：容器连不上 picgo —— 宿主 `curl` **200/200/超时**，容器 `requests` **6/6 全 ReadTimeout**
+  ⇒ "宿主能拉容器不能"是个**真异常**，且可能同时解释"publish 一直缺封面"。**未定性，待查**。
+- **T2**：暖封面缓存（305 条待暖）—— 被 T1 挡住。
+- **T3**：Lsky 上传 token —— 用户说"晚点解决"（第 ③ 步，暖缓存只解决 ②）。
+- **T4**：`ENABLE_PUBLISH_CRABPT` 仍 `false` —— 用户要"开 + 发 3 条"，**尚未执行**（我停在等确认）。
+- **T5**：`publish`（乌托邦）连续失败 3 次退避至 21600s，根因 `www.musopia.vip` **间歇** ReadTimeout。
+- **T6**：`crawl` 01:35 那轮 `open.cd` ReadTimeout，退避 3600s。同一族网络抖动。
+
+---
+
+## 2026-10-01（03:00 续查）—— T1 有重大进展：这是 IPv6 问题
+
+### 新增硬事实（全部实测）
+
+**1. NAS 地址是 `192.168.0.7`（SSH 36688），不是 192.168.1.100。**
+   上一轮我用的 `192.168.1.100` 是**错的**（超时）。正确地址在
+   `~/.ssh/known_hosts` 里（`[192.168.0.7]:36688`）。
+
+**2. ★★★ 宿主 `curl` 拿到的决定性一行：**
+
+```
+try1 http=301 ip=2606:4700:3034::ac43:81c9 connect=0.280s tls=0.773s total=0.988s  → 成功(IPv6)
+try2 http=000 ip=2606:4700:3032::6815:2e7 connect=0.185s tls=0.000s total=40.001s → 超时(IPv6)
+try3 http=301 ip=104.21.2.231            connect=0.521s tls=1.093s total=1.347s  → 成功(IPv4)
+```
+
+★ 关键**不是**"宿主能拉容器不能"，而是 —— **宿主自己也是 3 次里错 1 次**，
+  而**失败那两次的 `remote_ip` 全是 IPv6**（`2606:4700:...` = Cloudflare IPv6），
+  成功那次是 **IPv4**（`104.21.2.231`）。
+  ⇒ **根因是 IPv6 出网不通**（TCP connect 能过、TLS 握手 0 秒失败 ⇒ 黑洞），
+    不是 picgo 的问题，也不是容器的特殊问题。
+
+**3. 容器与宿主的 DNS 配置**完全相同（都是 `nameserver 223.5.5.5` +
+   `2400:3200::1`），解析结果也相同（`origin.picgo.net -> 104.21.2.231`）。
+
+**4. `origin.picgo.net` 是 Cloudflare 双栈**（A: 104.21.2.231 / 172.67.129.201；
+   AAAA: 2606:4700:3032::6815:2e7 / 2606:4700:3034::ac43:81c9）。
+
+### 推论（待验证，别当结论用）
+
+- Python `requests` **默认优先 IPv6**（`getaddrinfo` 顺序 + Happy Eyeballs 支持差）
+  ⇒ 容器里"6/6 全 ReadTimeout"完全可能是**每次都挑到 IPv6 死路**。
+- 宿主 `curl` 有 Happy Eyeballs（`--happy-eyeballs-timeout-ms`），所以只有 ~1/3 失败。
+  ⇒ 这解释了"宿主能拉容器不能"的**表观矛盾**，两边的差异**不**在容器网络，在**选地址的策略**。
+
+### ★★ 修法（下一步就做这个，风险低）
+
+容器里加环境变量强制走 IPv4 —— python 没有全局开关，但有两个办法：
+
+1. **`docker exec` 里直接验**（先证伪，再改 compose）：
+
+```
+docker exec opencd2musopia python -c "import socket; print(socket.getaddrinfo('origin.picgo.net','443',socket.AF_INET))"
+```
+
+```
+docker exec opencd2musopia python -c "import requests;r=requests.get('https://origin.picgo.net/',timeout=30,headers={'Host':'origin.picgo.net'});print(r.status_code,len(r.content))"
+```
+
+   再做**强制 IPv4** 的对照（用 `socket.setdefaulttimeout` + 自建 adapter，
+   或最简：`requests.get(url_that_resolves_v4_only)`）。
+
+2. **改 compose 加 `sysctls` 禁 IPv6**（治本，但要重建容器 ⇒ 会重启 daemon）：
+
+```
+sysctls:
+  - net.ipv6.conf.all.disable_ipv6=1
+```
+
+   ★ 注意：**这会重启容器**，等于 `up -d --build`。daemon 正在跑，选时机。
+
+3. **最省事且不重启**：在 `cover_fetch.py` / `assets.py` 的会话上挂
+   `HTTPAdapter` + `socket.AF_INET` 强制（代码改动，需重建镜像才生效
+   ⇒ 也重启）。**唯一"今天就能用"的办法是宿主先抓图喂 `/data/covers`**
+   （= 我上一轮列的"路 2"，不治本但立刻能推进 T4 发 3 条）。
+
+### 下一步（回来第一件事）
+
+先跑上面那两条 `docker exec` 验**强制 IPv4 能不能通**（只读、无副作用）。
+通了就写进 ERRATA + 改 compose；不通就换查 TLS/SNI 层面。
+
+### ★ 交给下轮的环境须知
+
+- SSH：`ssh -p 36688 -i ~/.ssh/id_ed25519 iSunker@192.168.0.7`
+  （`HOME=/c/Users/艾森克`；`192.168.1.100` **是错的**，别再用）
+- NAS 上跑 docker 要 `PATH=$PATH:/usr/local/bin`；`iSunker` 在 docker 组，**不用 sudo**。
+- NAS 上**没有** `getent`（用 `nslookup` 或 `python -c socket`）。
+
+---
+
+## 2026-10-02（20:00 续查）—— T1/T3/T5 的真根因坐实并修复：不是"IPv6 黑洞"，是"个别 Cloudflare v6 边缘 IP 不可达 + requests 不做 Happy Eyeballs"
+
+### 本轮的起点
+用户提供了**蟹宝王图床（蟹黄堡专用 Lsky Pro）的 token**：
+`https://img.crabpt.vip/api/v1`，token `14|jusQ5S1k17CvfnbnhgEkkUXIXtZHw2lXF8u518Y1`。
+
+### 1. ★★★ 根因更正（推翻前几轮的"IPv6 出网黑洞"结论）
+
+前几轮把 T1 归因为"IPv6 出网黑洞"。**本轮实测证伪**：
+
+**逐 IP 直连 TLS 测试（NAS 上，宿主与容器各测一次，结论一致）：**
+
+| 域名 | IPv6 | IPv4 |
+|---|---|---|
+| `img.crabpt.vip`（蟹黄堡图床） | ❌ 部分 v6 超时（同域不同 IP 表现不同） | ✅ TLS1.3 ~0.4s |
+| `origin.picgo.net`（乌托邦图床） | ✅ 可用（所以 T1 时好时坏） | ✅ 可用 |
+| `www.musopia.vip`（乌托邦站点） | ❌ 两个 v6 全超时 | ✅ 可用 |
+
+- **宿主 `curl -6 https://img.crabpt.vip/` 能通**（404，<1s）⇒ IPv6 **整族没问题**，
+  "黑洞"这个词用错了。
+- 真相：**个别 Cloudflare 边缘 IPv6 单点不可达**（TCP connect 能过——内核层，
+  但 TLS 握手挂到超时 = 典型单点黑洞）。
+
+**为什么 curl 通、Python 不通（这才是"宿主能拉容器不能"的真相）：**
+- `socket.getaddrinfo` 返回 **IPv6 排在 IPv4 之前**（实测，宿主与容器一致）；
+- `curl` 有 **Happy Eyeballs** ⇒ 坏的那族被好的那族盖过；
+- `requests`→`urllib3` **取第一条、不竞速** ⇒ 稳定选中坏 v6 IP，挂到超时。
+- ★ 容器是 `network_mode: host`，与宿主**共用网络栈**，实测两侧行为**逐字一致**
+  ⇒ "容器特殊"从来就不是真的；差异在**选地址策略**。
+
+### 2. 修法：新增 `net.py`（全局强制 IPv4）+ `config.py` import 它
+
+- 新增叶子模块 `net.py`：`import` 时 patch
+  `urllib3.util.connection.allowed_gai_family = lambda: socket.AF_INET`
+  （只影响 urllib3 = requests 的地址选择，最小侵入，不动 `socket.getaddrinfo`）。
+  开关 `NET_FORCE_IPV4`（默认 true）可回退。带 `--selftest`（含**阴性对照**：
+  先还原默认断言 AF_UNSPEC，再 patch 断言 AF_INET ⇒ 判据**能失败**，ERR-META-32）。
+- `config.py` 顶部 `import net`（config 被全项目 33 处 import ⇒ 一处生效覆盖全部，
+  含 4 处**裸** `requests.get/post`）。`net.py` 不 import config、不读 env ⇒ 自检零负担。
+- 3 处 `requests.Session()` → `net.new_session()`（明文约定，防将来漏改）。
+- `deploy.sh` FILES 与 `Dockerfile` COPY 都加了 `net.py`（★ 漏一处 = 容器 ImportError）。
+- **不动** `qbittorrentapi`（9 处）：目标是 `http://127.0.0.1:3020` 字面 IP，不走 DNS（已核实）。
+
+### 3. 蟹黄堡图床 token：验证 + 落地
+
+- **只读验证**：`GET /api/v1/profile` → **200**；坏 token / 无 token → **401**（阴性对照成立）。
+- **真上传**：`POST /api/v1/upload`（字段 `file`）→ `status:true` + `data.links.url` ✅（测试图已删）。
+- NAS `.env`（第 29/30 行）**:清洗**：
+  - `LSKY_API_URL` 行尾多余空格已去；
+  - 坏的 `LSKY_TOKEN`（**714 字符浏览器 Cookie 串**，ERRATA 已记的那个）→ 用户给的真 token
+    （43 字符、`14|` 开头，Sanctum `{id}|{plain}`）。
+  - 备份：`/volume2/docker_ssd/musopia_script2/.env.bak-before-lskytoken-*`。
+  - ★ 真 token 是**兜底路径**；容器另有 9-28 落盘的**有效缓存 token**（iSunker 账号），
+    且已配 `LSKY_EMAIL/PASSWORD`。三条路都能走通。
+
+### 4. 部署 + 重建 + 验证（全部实测）
+
+- `deploy.sh --apply` → 同步 `net.py` + 4 个改动文件（`[改] tools` 也正确报出）。
+- NAS `docker compose up -d --build` → 重建成功（COPY 行含 `net.py`），容器 recreate+start。
+- **验证修复生效**：
+  - 容器内 `allowed_gai_family() = AF_INET` ✅；`python net.py` 自检 ✅。
+  - **决定性对照**：容器内默认策略（已 patch）打图床 `/profile` → **200，3/3 次，~1s**
+    （**修复前是 TLS 握手超时**）。
+  - 三个目标一起测：`www.musopia.vip`→200 / `origin.picgo.net`→200 / `img.crabpt.vip`→404(裸路径，正常)。
+  - `assets.upload_to_lsky()` 容器内**真上传成功** → `https://img.crabpt.vip/xhb-image/.../xxx.png`。
+- **一次修复同时解决 T1（picgo 封面）+ T3（蟹黄堡图床）+ T5（乌托邦发布间歇超时）**
+  —— 三者的共同点是"目标都在 Cloudflare 后面"。
+
+### 5. 暖封面缓存（T2）已恢复
+
+- `tools/warm_cover_cache.py --db /data/data.db --apply --limit 5` → **5/5 成功**
+  （含一张 10MB 图，无超时）—— 修复前这一步被 IPv6 黑洞全挡。
+- 全量 301 条在 NAS 后台跑（日志 `/volume2/docker_ssd/musopia_script2/_warm_cover.log`）。
+
+### ★ 交给下轮的环境须知
+- SSH：`ssh -p 36688 -i ~/.ssh/id_ed25519 iSunker@192.168.0.7`（NAS 目录 `/volume2/docker_ssd/musopia_script2`）。
+- NAS 上 docker 要 `PATH=$PATH:/usr/local/bin`；`iSunker` 在 docker 组，**不用 sudo**。
+- ★ 排查网络务必**逐 IP 直连**，别拿域名级 `curl` 一次当判据（ERR-NET-01）。
+- ★ "宿主通/容器不通"在 host 网络下**不成立**——别再从容器网络找原因（ERR-NET-02）。
+
+---
+
+## 2026-10-02（21:00 续）—— 蟹黄堡发布链路打通：又抓到两个真缺陷
+
+### 6. ★★★ 缺陷 A：daemon 的 `publish_crabpt` 阶段**永远发不出去**（漏了 `--yes`）
+
+`daemon.py` 里：
+- 乌托邦 publish 阶段（161 行）：`apply_flag("--yes", "--auto")` —— **两个都传**；
+- 蟹黄堡 publish 阶段（202 行）：`apply_flag("--auto")` —— ★ **漏了 `--yes`**。
+
+后果：容器里**没有 TTY**，`publish.py` 走到交互确认那行 `input()` 立刻 `EOFError` 崩掉
+⇒ 即使把 `ENABLE_PUBLISH_CRABPT` 打开、队列里全是待发，**一条也发不出去**，
+且每轮都以非 0 退出、触发退避。**实测复现**：手工 `docker exec ... publish.py --site crabpt --auto`
+（不带 `--yes`）→ `EOFError: EOF when reading a line`。
+★ 修法：改成 `apply_flag("--yes", "--auto")`（与乌托邦同形）。
+★ 这是 ERRATA「保险看起来在、其实没生效」那族的又一例 —— 而且更隐蔽：
+  代码读了像"只是少个交互参数"，实际是"这条路**从未跑通过**"。
+
+### 7. ★★★ 缺陷 B：蟹黄堡发布**从不回加 qB 做种**（用户问出来的）
+
+用户原话：「目前为止发了四个种，都合格的，但是为什么**不添加做种**呢？」
+★ 查清：`run_crabpt()` 里**根本没有** `readd_to_qb` 调用（乌托邦路径有），
+  PLAN-crabpt.md §3.4 / D.5 记为「不回加 qB（蟹黄堡尚未接线）」。
+⇒ 后果：**种子发上站了却没人做种** ⇒ 蟹黄堡那边记 hit-and-run，等于白发。
+
+**实现前先核实了关键事实（逐条实测）：**
+- 蟹黄堡服务端那个 `.torrent`（`/download.php?id=N`）**已被重写**：
+  announce = `https://crabpt.vip/announce.php?passkey=8fb322d2…`（蟹黄堡自己的 passkey）。
+- 同一条（皇后 `69c5ee1b…`）：乌托邦种子 infohash `edda64b7…`、
+  蟹黄堡服务端种子 infohash `03c17802…` —— ★ **两者不同**（站点重写了 piece length/name）
+  ⇒ 属于 PLAN §3.4 的「**重新生成**⇒ 两个种子、两份回加」那一支，不是"同文件只回加一次"。
+- 但**文件内容逐字节相同**：同 name、同 80 个文件、同总大小 ⇒ 可共用**乌托邦那条的 `save_path`**。
+
+**实现**（`publish.py`）：
+- 新增 `connect_qb()`（从 `main()` 抽出，两条路共用）。
+- 新增 `readd_to_qb_crabpt(qb, client, info_hash, torrent_id)`：
+  ① 做种路径取**乌托邦那条**（`info_hash` = 皇后原种）的 `save_path`；
+  ② 种子字节取**蟹黄堡服务端**那份（`client.download_torrent(tid)`，新增到 `crabpt_site.py`；
+     ★ **不能**拿本地 `tasks.torrent_file` —— 它带乌托邦 announce ⇒ 做种报到乌托邦、
+     蟹黄堡仍记 hit-and-run，是**假成功**，比不做种更坏）；
+  ③ 参数只有 `torrent_files/save_path/is_paused/category` ——
+     **不传 layout、不传 is_skip_checking**（逐字沿用 `readd_to_qb` 的教训）；
+  ④ 复核按**蟹黄堡那份**的 infohash 查 `state`，且把「还没入库（正常）」
+     与「回加没发生（故障）」**分开说**（`torrents_add` 异步）；
+  ⑤ 失败**不算阶段失败**（不 `sys.exit`）—— 种子已上站，回加失败是本地问题，退避无意义。
+- `run_crabpt()` 里：`--no-readd` 时才连接 qB（`connect_qb()`），提交成功后调 `readd_to_qb_crabpt()`。
+
+**验证（全部实测）**：把已发的 4 条（215344/345/346/347）手工回加：
+- 全部到达 **`progress=1.0`**（= 文件对上，无 `missingFiles`）、
+  state ∈ {`uploading`, `stalledUP`}、tracker = `https://crabpt.vip/announce.php?passkey=…`
+  ⇒ **4 条都在向蟹黄堡做种** ✅。（`up=0` 是正常的——还没有人下载。）
+
+### 8. 本轮完成的总账
+- ✅ T1（picgo 封面）/ T3（蟹黄堡图床）/ T5（乌托邦发布间歇超时）—— 一次 IPv4 修复全解。
+- ✅ T2 暖封面缓存：**300/301 成功**。
+- ✅ T4 开蟹黄堡发布：`ENABLE_PUBLISH_CRABPT=true`；已发 **4 条**（215344~215347），
+  每条带**自己那份**蟹黄堡图链。
+- ✅ 新增：蟹黄堡**回加做种**（本轮补的缺口，4 条已做种）。
+- ✅ 修：daemon `publish_crabpt` 漏 `--yes`（不修则一条都发不出）。
+
+### ★ 遗留（下轮）
+- 乌托邦 `publish` 阶段本轮失败 1 次（退避 10800s）—— **未定性**，需看 `docker logs` 那一条的原因。
+- 「已上站、却没标 ALLOW」的有 1 条（`144f017ad0c0`，`transfer_rule='DENY'`）—— 建议人工过一遍。
+- 暖缓存那 **1 条失败**的封面（可重跑一次）。
+
+---
+
+## 2026-10-02（21:15）—— 蟹黄堡发布节奏调整（用户要求）
+
+用户要求：**改成 1 小时一条**消化存量；并因刚发了 4 条，**开始时间定在 4 小时后**。
+
+- NAS `.env`：`CRABPT_INTERVAL=1800 → 3600`（1h/条）。备份 `.env.bak-before-crabpt-interval-*`。
+- **延迟首轮**：`daemon_state.json` 的 `publish_crabpt.last_run` 设为 **now+3h**。
+  ★ 机制：daemon 判到期用 `now - last_run >= interval`；令 `last_run` 落在**未来**
+    ⇒ 头 4 小时恒"未到期"，到 `last_run+3600`（= now+4h）才首次触发，之后按 1h 走。
+  ★ 为什么必须**先停容器再改盘**：`load_state()` 只在 `run_loop` 开头读一次，
+    之后内存态每轮覆盖盘 —— 容器在跑时改 `daemon_state.json` 会被立刻冲掉。
+    顺序 = `compose stop` → 改 `.env`+state → `compose up -d`。备份 `daemon_state.json.bak-before-crabpt-delay-*`。
+- 实测确认：启动计划 `publish_crabpt 每 3600s`；state `skip_reason=未到期：距上次 -10756s < 周期 3600s`
+  （负的 age 正是"未来时刻"的指纹）；首次触发 **2026-10-03 09:10:59 CST**，之后每 3600s。
+- 其余 7 个阶段周期**未动**（scan 1800 / publish 5400 / sync 86400 / covers 21600 / edit 21600 / vtid 86400 / crawl 1800）。
+
+## 2026-10-03 诊断：乌托邦 publish 连续 code=1（三天没发新种）
+
+### 现象
+- 生产 `daemon_state.publish`: `last_ok=false, last_code=1, last_took≈8s`，连续多轮。
+- 队列**不是空的**：闸门①②③④后仍有 **72 条**（不是 51）。
+- 最近一次成功发布：2026-10-02 20:44（tid 18896）。
+
+### 复现（容器内，`docker exec -w /app opencd2musopia python publish.py --yes --auto --limit 1 --no-readd`）
+```
+✅ Cookie 有效，user_id = 10427
+[1/1] 🚀 发布: Infinity Naked In The Rain 2001 - FLAC 整轨 - OpenCD
+    ❌ 发布失败: 未拿到重定向 ID，HTTP 200
+🎯 发布完成：成功 0 条，失败 1 条
+```
+
+### 抓到的原始回包（决定性的）
+`POST /takeupload.php` → **HTTP 200, 无 Location**，页面标题 = `音乐乌托邦 :: 上传失败！`
+但 `#outer` 区（NexusPHP stderr 放消息处）**只有站点横幅**，**没有任何错误文字**（412 字节，无 table/消息）。
+`_extract_error()` 抓不到东西 ⇒ 报"未拿到重定向 ID"。
+
+### 已排除（逐条实测）
+| 假设 | 结论 | 证据 |
+|---|---|---|
+| Cookie 失效 | ❌ 排除 | 站点问候 `iSunker`，user_id=10427，首页可读 |
+| passkey 失效 | ❌ 排除 | announce.php 返 `Invalid info_hash`（过了鉴权），非鉴权错 |
+| 字段名不符 | ❌ 排除 | `medium_sel[4]/audiocodec_sel[4]/team_sel[4]/type=408` 与站点表单逐字一致 |
+| multipart 畸形 | ❌ 排除 | PreparedRequest 检查：boundary×16、name 全对、file 在末 |
+| 单字段触发 | ❌ 排除 | descr 简/仅图/空、去 custom_fields、medium_sel=8、tags — **全部同样失败** |
+| torrent 文件损坏 | ❌ 排除 | torf 可解析，announce/passkey 正确 |
+| **无 file 字段 / file 空** | ⚠️ | **同样返回"上传失败！"空页** ⇒ 空页是站点的"通用拒绝模板" |
+| 重复种子 | ✅ 有 1 条 | `コニファー` → `302 details.php?id=19333&existed=1`（站点**认**这条） |
+
+### 关键对照
+- **重复种** → `302 ...existed=1`（站点 accept 路径**正常**）
+- **任意新种** → `200 上传失败！`（空消息）—— 与字段/文件**全无关**
+
+### 推断（**未证实，需站点侧或抓包**）
+站点 `takeupload.php` 对**新种**走了一条**静默拒绝**路径（标题置"上传失败！"但**不写消息**）——
+像是站点侧新增的**反滥用/审核/入库钩子**在 `stderr()` 之前 `die()`。
+可能是：站点改版、Redis 缓存层异常、或对新上传的全局限制。
+**这超出本项目代码的控制范围**，需站点管理员或浏览器抓包（HAR）确认具体拒绝原因。
+
+### 附带发现
+1. **队列 72 条 torrent 文件 infohash ≠ DB info_hash（72/72 全不一致）**。
+   `torf` 读文件 infohash vs DB `info_hash` 全部不同 —— 说明**输出种子是重新生成的**
+   （DB 的 info_hash 来自 scan 时读 qB，文件是 torf 现做的）。站点自行算 hash 入库，
+   故**不直接致因**，但值得记录（可能是历史设计）。
+2. **`edit` 的 code=1 是另一回事**：`id=19320 种子已被删除`（details 读不到），非本次根因。
+3. **`crawl` 的 code=1** 未单独查（与 publish 无直接关系）。
+
+## 2026-10-03 【更正上一条诊断】乌托邦 publish 失败的真因 = 账号等级 + 发种大赛窗口
+
+★★ 上面那节「推断：站点侧反滥用/静默拒绝」是**错误归因**，此处更正。用户提示"站点发种权限正常"后，
+继续深挖（补了：抓浏览器全头 / 换域名 / 预热会话 / 候选页 / 等级页 / FAQ / 首页公告），真因如下：
+
+### 真因
+- 账号 10427 等级 = **`User`**（`userdetails.php` → `<img alt="User">`；`upload.php` 原文
+  「NFO文件（不允许 **Power User 以下**用户查看）」再次佐证）。
+- 站点 FAQ 原文：**「User：新用户的默认级别。只能在每周六中午12点至每周日晚上11点59分发布种子。」**
+  **「Power User：…可以直接发布种子。」**
+- **首页公告**：**「音乐乌托邦社区第一届发种大赛」9-01 ~ 9-30 24:00**，参与对象写
+  **「所有注册用户都可以参与」「User 及以上用户组均可自由发布」** ⇒ **活动期内工作日也能发**。
+- **活动已于 9-30 24:00 结束** ⇒ **10-01 起回到"仅周六12:00~周日23:59"限制**。
+
+### 时间线（实测，北京时间）
+| 时间 | 能否发 | 说明 |
+|---|---|---|
+| 09-28(一)~09-30(三) 全天 | ✅ | 发种大赛期内，User 自由发（**工作日也发，10-02 前那批 40+ 条都是这时发的**） |
+| 10-01(四) 起 | ❌ | 大赛结束，User 回到周末限时 |
+| 10-03(六) 06:0x | ❌ | **未到 12:00 窗口** |
+
+### 实测证据（排除一切代码侧原因）
+- 浏览器全头（`sec-ch-ua`/`Sec-Fetch-*`/`DNT`…）→ 仍失败 ⇒ 不挑 UA/头。
+- 无 www 域名 → `musopia.vip` 无 DNS 记录，站点只有 `www.`。
+- 先 GET `upload.php` 预热会话再 POST → 仍失败 ⇒ 非调用顺序问题。
+- 字段名与站点表单逐字一致、multipart 结构正确、torrent 文件合法、passkey 有效
+  （announce 返 `Invalid info_hash` = 过了鉴权）。
+- **决定性对照**：**重复种**（队列里 `コニファー`）→ `302 details.php?id=19333&existed=1`（站点 accept 路径正常）；
+  **任意新种** → `200 上传失败！`（`#outer` 区零消息）⇒ 权限/时段拒绝，非代码。
+
+### 作业（已做）
+1. `PUBLISH_INTERVAL`：5400 → **3600（1h/条）**（用户要求；`.env.bak-before-publish-interval-20261003-054859`）。
+2. **退避处理**：`fails` 是**内存变量**（重启归零），但窗口前会反复失败把退避推大（实测已见 `wait=7200=3600×2`）。
+   ⇒ 方案：**北京时间 10-03 11:58 定时重启容器**（脚本 `NAS:_reset_publish_window.sh`：停→把
+   `publish.last_run` 提前 2h→起，`fails` 归零 + 立即到期）⇒ 12:00 窗口一开即发。
+   ★ 定时挂在本机（`CronCreate`），**注意本机 shell 时区是 UTC**（用户桌面是北京时），故 cron 用 `58 3`（=北京11:58）。
+3. **队列体检**：72 条 → **63 条现成可发**；9 条缺封面（`backfill_covers --all` 实测**无源，补不了**），
+   但 publish 的 `valid` 是**过滤后才 `[:limit]`** ⇒ 缺封面的会被**跳过、不堵队**（设计正确）；
+   18 条缺副标题**不影响**（52 条已发布里有 10 条副标题为空）。
+
+### 待用户
+- 向站点申请 **`Power User`** 权限（升级硬条件含"下载≥50G"，而账号下载量=0 ⇒ 多半要**管理员特批**）。
+  拿到后**随时可发**，不必等周末。
+
+---
+
+## 2026-10-03 【修正上条作业#2】窗口重置改为 NAS 自带容器（不再依赖 Claude 会话）
+
+上一条作业#2 用 **`CronCreate`（session-only）** 挂定时 —— 它**随 Claude 退出即失效**，
+且依赖本机开机。已废弃（job `d95db686` 已删）。
+
+**改为**：NAS 上跑一个自调度容器 `musopia-window-reset`（`alpine` + `--restart unless-stopped`），
+每天 **UTC 03:58 = 北京 11:58** 执行 `_reset_publish_window.sh`。跨重启/关机/会话退出均存活。
+
+### 实测踩到的 3 个坑（已修）
+1. **`docker compose` 在 alpine 里不可用**（compose 插件是 glibc 二进制，alpine 是 musl）
+   ⇒ 重置脚本改用 **`docker stop` / `docker start`**（单服务与 `compose stop/up -d` 等价）。
+2. **容器 `restart: unless-stopped`** ⇒ `docker stop` 后 Docker 立刻拉起，daemon 用**内存旧值**覆盖编辑
+   ⇒ 必须先 **`docker update --restart=no`** → 停 → 改 → 起 → **恢复 `--restart=unless-stopped`**。
+3. ★★ **`daemon_state.json` 每个阶段块都有 `last_run`，`scan` 在最先**
+   ⇒ "替换第一处 `last_run`"会改到 **scan** 而不是 **publish**（这个坑静默）。已改为 **awk 状态机**：
+   进入 `"publish": {` 块后只改该块第一处 `last_run`。
+   - 处置：误改的 `scan.last_run` 已用 python 精确还原为原值（1790979054.0338974）。
+
+### 验证（已做，非"我以为对"）
+- 修正脚本**实跑**：`publish.last_run 1790978152 → 1790974103`（提前 ~2h，age≈2.1h ⇒ 立刻到期），
+  JSON `VALID`，`scan` 未受影响。
+- 倒计时**实算**：下次触发 = `2026-10-03 03:58:00 UTC` = **北京 11:58**，剩余 ~18175s。
+- ⚠️ 已知代价：`docker stop` 因 daemon `stop_grace_period: 5m` 可能耗时数十秒~数分钟（无人值守可接受，届时容器自会重启）。
+
+### 保留（用户明确要求）
+- `publish_crabpt` 的 `note_delayed_until = 2026-10-03T09:10:59` **保留**（用户本地 4 个种子还没传完）。
+
+---
+
+## 2026-10-03 【新作业】qB 3020 升级 5.0.4 + 下载调度器 qbtune（有源优先×公平轮转）
+
+### 背景（用户诉求演进）
+1. 用户先把 3020 设成"最多 10 个并发下载"解决卡 IO，但**总速度只有 ~0.02 MB/s**（500M 宽带闲置）。
+2. 上一步同时设了 `max_active_uploads=5` ⇒ qB 把 1892 个种子排进 `queuedUP`（**不做种**）
+   —— 用户发现"种子都没在做种了"。**根因就是这一步配置**（`ERR-QBTUNE-01`）。
+3. 用户要求：**保持做种** + 活动下载 ≤10 + 活动上传 ≤5 + 全种 500KB/s。
+   ★ **关键冲突**：实测证明"活动上传≤5"与"全部做种"**物理上不能共存**（qB 会将其余排 queueUP）。
+   ⇒ 用户拍板：**做种不设上限**（下载才卡 10）。
+
+### 已做（本轮，均实测）
+| 项 | 结果 |
+|---|---|
+| **修做种** | `max_active_uploads` / `max_active_torrents` 设为 **100000**（★ 实测 qB 4.6.5/5.0.4 **不认 0=不限**）⇒ 1897 个顺利完成种子**全部在做种**，`queuedUP → 0` |
+| **补限速** | 62 个漏网的种子补上 500KiB/s ⇒ **2294 个全覆盖** |
+| **qB 升级** | `linuxserver/qbittorrent` **4.6.5 → 5.0.4**（WebAPI 2.11.2 / libtorrent 2.0.11）。配置自动迁移（`MigrationVersion 6 → 8`）。**2294 个种子一个没丢**，做种/下载上限/分类全保留。备份在 `qbittorrent-opencd/config-backup-20261003-120959.tgz`。 |
+| **瓶颈定性** | 下载集 397 个里 **`num_seeds>0` 的只有 5 个**（392 个零源）⇒ **带宽是被"上游没源"卡住的，不是队列顺序**。调度器只能"别浪费槽位"，造不出带宽。 |
+
+### 新增：`tools/qbtune.py`（下载调度器，sidecar 常驻 · ★ 默认关闭）
+- **两套策略合一**：A=有源优先+死种轮转（准入），B=公平轮转+带宽加权（名单内排序）。
+- **实测核过的 qB 机制**（见 `tools/qbtune_probe.py`）：
+  - `torrents_top_priority` 实测有效（prio 397→1，state queuedDL→stalledDL）。
+  - `stalledDL`（0源）**会占着活动槽不被自动换下** ⇒ `bottom_priority` **足以腾槽**，不需要 `force_start`（force 会破 10 上限）。
+  - `torrents_set_download_limit(limit=-1)` = 无限，**qB 回读把无限报成 0** ⇒ 代码一律写 -1、绝不写 0。
+- **踩到并修掉的真 bug**：第一版用工具**自己的记忆**算 promote/demote ⇒ 与 qB 现场不符 ⇒ `promote` 恒 0、永不生效。改成用 **qB 现场队列顺序**当基准后立即生效（`ERR-QBTUNE-01` 第 3 条）。
+- **纯函数单测**：`tools/test_qbtune.py`（不需要 qB，本机绿灯；判据能失败）。
+- **形态**：独立 sidecar 容器 `musopia_qbtune`（`<<: *common`；**不写 data.db**，状态在 `/data/qbtune_state.json`、心跳 `/data/qbtune_heartbeat`；自带 `--healthcheck`，不复用根级 healthcheck.py 以免看门狗互锁）。
+- **纪律**：默认只读；`QBTUNE_ENABLE=false` + `--apply` 双保险；写后回读断言 cap；`queueing_enabled=false` 时拒绝运行。
+
+### 部署验证（已做，非"我以为对"）
+- `deploy.sh --apply` 同步；NAS `docker compose up -d --build qbtune`（只重建该服务，daemon 不受影响）。
+- 容器内 `ls /app/tools/` 见 `qbtune.py`（ERR-DOCKER-09 判据，宿主文件数 == 容器文件数）。
+- `musopia_qbtune` **healthy**，日志有 60s 节拍，`qbtune_heartbeat` 在动，`enable=False dry=True`（只读）。
+- `opencd2musopia` daemon **未受影响**（Up 9h healthy）。
+
+### 待用户
+- **启用调度器**：NAS `.env` 里设 `QBTUNE_ENABLE=true` → `docker compose up -d --build qbtune`。
+  建议先观察日志几轮（确认被踢的确实是零源种、有源的确实上位）再开。
+
+## 2026-10-03 【续·下午】分类接线 + 延迟做种 + qB 崩溃归因
+
+### 起因
+用户观察到两个问题：① 发到蟹黄堡的种子分类到了乌托邦（`Musopia`）下；
+② "ptd 往 3020 推种子失败"，怀疑"安全校验规则变了"。
+
+### ① 蟹黄堡分类：不是 bug 里的"设计如此"，而是**定义了没接线**（已修）
+- 现象：`readd_to_qb`（乌托邦）与 `readd_to_qb_crabpt`（蟹黄堡）**都**用
+  `config.PUBLISH_CATEGORY`（=`Musopia`）⇒ 两站种子混进同一分类，无法按站辨识/统计。
+- **真因**：`config.py` 早在 2026-09-24 就定义了 `CRABPT_PUBLISH_CATEGORY`
+  （默认 `"CrabPT"`，注释白纸黑字写"与乌托邦分开"），但 **`grep` 全项目零引用**
+  —— 键定义了、注释写了、**接线漏了**（`ERR-ENV-03` 形状）。
+- **修**：`publish.py::readd_to_qb_crabpt` 改用 `config.CRABPT_PUBLISH_CATEGORY`
+  （399 行仍 `PUBLISH_CATEGORY`，542 行改 `CRABPT_PUBLISH_CATEGORY`）。
+- **前置**：qB **不会自动创建分类** ⇒ 已在 qB 建好 `CrabPT`（`savePath=''`，同 `Musopia`）。
+- **范围**：只影响**此后新加**的种子；已有 291 条混在 `Musopia` 里的**不会自动迁移**
+  （回迁需按判据筛：tracker 含 `crabpt.vip` 或 `db.site_publish.site='crabpt'`，**待办**）。
+- 记 `ERR-PUBLISH-01`。
+
+### ② "推种子失败"：真因是 **qB 5.0.4 自身 `std::bad_alloc` 崩溃**（已归因，用户决定先不修）
+- 日志实测：3020 的 qB 近 3h 崩 6 次 `terminate … std::bad_alloc`
+  ⇒ 客户端 `RemoteDisconnected` ⇒ `APIConnectionError` ⇒ 发布/scan 阶段失败
+  （"现在能推进去一些"= 崩-重启-短暂窗口，**假象**）。
+- **★ 归因（关键）**：`bad_alloc` 最早两次（12:53、13:11 UTC）发生在 **qbtune 首启（13:16）
+  之前** ⇒ **与 qbtune 无因果**，是升级引入的 qB 版本 bug（升级后 43 分钟即崩）。
+- 内存证据：容器用 2.1G/17.4G、无限制、系统 available 11.9G ⇒ **非真内存不足**。
+- 用户决定：**崩溃先放着**（未回退/未升级）。记 `ERR-QB-05`。
+- ⚠️ 副作用记录：过程中一次 `docker compose up -d --build`（**没带服务名**）把
+  `musopia_qbtune` 一并重建启动了（本该 `up -d --build musopia`）。随后**只**重建
+  `musopia` 服务，qbtune 未再被动。
+
+### ③ SSH 通道（本机 → NAS）
+- 正确地址是 **`192.168.0.7:36688`**（从 `~/.ssh/known_hosts` 查到；先前误用 `192.168.1.100`
+  超时）。命令：`ssh -p 36688 -i ~/.ssh/id_ed25519 iSunker@192.168.0.7`。
+- ★ `iSunker` 在 `docker` 组 ⇒ **免 sudo**；● **非交互 SSH 里 sudo 要密码**（用不了）。
+- ★ `scp` 子系统被禁 ⇒ 传文件用 `ssh 'cat > /tmp/x' < localfile`。
+
+### ④ 延迟做种（**已实现，默认关闭**）
+- 需求（用户）：种子**发布成功后隔 N 分钟**再 `torrents_add`（让别人 RSS 时差过去、
+  更多人**同时**下载）。15 是暂定值，用户说"先不用验证这个 15 分钟最优不最优"。
+- ★ 用户方案比"延迟 start"更简：既然是延迟，就**让 add 本身延迟**，qB 收到后自己校验、
+  自己做种，**不需要再调一次 qB**（也绕开了"`is_paused` 是否仍 announce"的未知项）。
+- 形态（用户拍板）：**执行者塞进 `opencd2musopia` 容器**（不新容器、不塞 qbtune）。
+  实现 = 写盘队列 + daemon 主循环**到点代发**（不在阶段里 sleep；阶段同步阻塞会拖垮全流水线）。
+- 新增 `readd_queue.py`（publish 写 / daemon 读，**同源**；存 `.torrent` **字节 base64**，
+  自包含不依赖 15 分钟后站点可达；`/data/readd_queue.json`，原子写；`pop_due`+`ack` 两步
+  防抖丢；幂等去重；版本不符/坏文件降级为空队列不抛）。
+- `daemon.py`：主循环末尾 `_drain_pending_readds()`（事件驱动、绝不 raise、失败留队重试、
+  上限 `READD_GIVE_UP`）。
+- `config.SEED_DELAY_MIN`（默认 **0 = 关闭 = 老行为**；>0 才延迟）。
+- 单测 `tools/test_readd_queue.py`（15 条判据全绿；本机要 `PYTHONIOENCODING=utf-8`——
+  只是 Windows 控制台 GBK，容器是 UTF-8）。
+- ★ 已知干扰（用户说先忽略、记录即可）：延迟窗口内 reseed/iyuu 那套辅助工具可能**抢先**
+  把站点新种加进 qB ⇒ 延迟失效。本项目不拦不检测。记在 `config.py`/`.env.example`/`readd_queue.py`。
+- 记 `ERR-ENV-04`。
+
+### 部署验证（已做）
+- `readd_queue.py` 加进 `Dockerfile`（COPY）与 `deploy.sh`（FILES 白名单）；`deploy.sh` 自检通过。
+- `deploy.sh --apply` → NAS `docker compose up -d --build musopia`（**只重建该服务**）。
+- 容器内验证：`readd_queue.py` 在、`import` 成功、`SEED_DELAY_MIN=0`、
+  `CRABPT_PUBLISH_CATEGORY='CrabPT'`、`daemon.py` 含 `_drain_pending_readds`（×2）。
+- daemon 启动日志**无 ImportError/readd 报错**，正常跑 scan 阶段。
+
+### 待用户
+- **开启延迟做种**：NAS `.env` 设 `SEED_DELAY_MIN=15` → `docker compose up -d --build musopia`。
+- **回迁已有蟹黄堡种子**到 `CrabPT`（需先定筛法判据）——待办。
+- **qB 崩溃**：回退 4.6.5 / 升 5.0.5 —— 用户说先放着。

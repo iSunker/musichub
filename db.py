@@ -817,6 +817,56 @@ def count_stale():
     return n
 
 
+def queen_published_rows():
+    """★ C' 第 4 步的判据取样：**皇后路 + 已上站**这批行（**只读**）。
+
+    返回完整 dict 列表（含 `formatted_title`），供"拍基线 / 比对"用。
+
+    ★ 口径**唯一真源** = `QUEEN_PUBLISHED_WHERE`（本函数**不手写** WHERE）。
+      逐字同 `count_stale()` 的理由：两处各写一份必然漂移，而漂移**不报错**，
+      只给出一个看着合理、其实不同口径的错数字（`ERR-META-03`）。
+
+    ★ 为什么连 `updated_at` 一起取：C' 第 4 步的判据是"**标题没被动**"，
+      而 `updated_at` 只能当**旁证**（`scan` 写别的列也会刷它）——
+      ⇒ 二者都要印出来，**不许**拿 `updated_at` 代替"标题的值"（`ERR-META-05`）。
+    """
+    conn = connect()
+    rows = _rows_to_dicts(conn.execute(
+        f"SELECT info_hash, site_torrent_id, formatted_title, torrent_name,"
+        f"       mapped_json, site_synced_at, updated_at, transfer_rule"
+        f"  FROM tasks WHERE {QUEEN_PUBLISHED_WHERE}"
+        f" ORDER BY info_hash"))
+    conn.close()
+    return rows
+
+
+def queen_published_gap():
+    """★ `EXISTS` ⇒ 皇后路 **是不是**推理 —— 用一条**可执行**判据回答。
+
+    ★ 为什么必须有（`ERR-DATA-08`）：
+      `CROSS_SITE_DEDUP_WHERE` 上面的注释曾写"所以 `run_crabpt()` 里另有一条
+      **可执行**的断言，见那里的 `rule_gaps`（`crabpt_rule_gaps()`）"。
+      **实测那两个函数都不存在** ⇒ 那条断言**从没被写出来**，
+      "`EXISTS` ⇒ ALLOW"至今只是一句**推理**。⇒ 这里不留同样的洞。
+
+    返回 `(exists_total, queen_total, exists_without_tid)`。
+      `exists_without_tid > 0` ⇒ 已上站的行里**混着抓轨路** ⇒
+      第 4 步的判据**必须分栏报**（抓轨路本来就会被 `scan` 写），
+      不许把两栏合并成一个数（`ERR-META-05`：不同口径不能混减）。
+      `== 0` ⇒ 才可以简化成一条判据。
+
+    ★ 三个数**并排返回**，不是只返回差 —— 差是"算出来的"，
+      三个原始数才是"读出来的"（`ERR-META-01`：判据要能被人自己复核）。
+    """
+    conn = connect()
+    exists_total = conn.execute(
+        "SELECT count(*) FROM tasks WHERE site_status = 'EXISTS'").fetchone()[0]
+    queen_total = conn.execute(
+        f"SELECT count(*) FROM tasks WHERE {QUEEN_PUBLISHED_WHERE}").fetchone()[0]
+    conn.close()
+    return exists_total, queen_total, exists_total - queen_total
+
+
 def count_pending_publish():
     """
     现在有多少条会进发布队列。给 daemon 探针 + `opencd_ingest --selftest` 用。
@@ -1222,6 +1272,34 @@ def site_status_of(info_hash, site=SITE_MUSOPIA):
     return site_publish_get(info_hash, site)[1]
 
 
+def transfer_rule_of(info_hash):
+    """皇后的**转载规则**（`tasks.transfer_rule`）—— 闸门④ 的输入。
+
+    ★ 返回**原始值**（可能是 `None` / `''` / `'ALLOW'` / `'DENY'` /
+      `'NEED_CONFIRM'` …）—— **不做**归一化、**不说**"能不能转"：
+      判"能不能转"是调用方的判据（`is_transferable_to()` / `EDIT_RULE_GUARD`），
+      本函数只负责**取数**。★ 两件事混在一起 = 兜底值与真实结果混报
+      （`ERR-META-14`）。
+
+    ★★ 为什么要有这个窄函数（而不是每次手写一条 `SELECT`）：
+      闸门④ 现在有**两处** Python 侧消费者 —— `db.is_transferable_to()`
+      （转种解释）与 `db.edit_rule_ok()` 一族（`EDIT_RULE_GUARD`）。
+      ★ 手抄 SQL 必然漂移（`ERR-META-03`）⇒ 取数落成**有名字的一处**。
+
+    ★ 注意"空规则"的语义（这条是本项目反复踩的坑，别按直觉改）：
+      `NULL` / `''` 的含义是「**不知道**能不能转」，**不是**「允许」
+      ⇒ 只有 `'ALLOW'` 放行（见 `PENDING_PUBLISH_WHERE` 附近那段长注释）。
+    """
+    if not info_hash:
+        return None
+    conn = connect()
+    row = conn.execute(
+        "SELECT transfer_rule FROM tasks WHERE info_hash = ?", (info_hash,)
+    ).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
 def site_cover_url_of(info_hash, site=SITE_MUSOPIA):
     """该站**自己那份**封面 URL。★ 没记录 ⇒ `""`（不是 None，调用方一律当"没有"）。
 
@@ -1257,19 +1335,151 @@ def site_cover_url_of(info_hash, site=SITE_MUSOPIA):
 #      对"这条在**乌托邦**发过"一无所知。⇒ Jellyfin 种子里乌托邦已发过的那批
 #      会被**重复搬**到蟹黄堡。这是**静默多发**，不是静默少发 —— 多发不可撤销。
 #
-# ★ 为什么不需要 `annotate_transfer_rule` 那条 ALLOW 白名单：
-#   这条路径的**上游**是 `tasks.site_status = 'EXISTS'`，而"能上乌托邦"
-#   本身就已经过过 `PENDING_PUBLISH_WHERE` 的闸门④（`transfer_rule='ALLOW'`）。
-#   ⇒ 再查一次是**冗余**，而且会引入一个假判据（见 `crabpt_rule_gaps()`）。
-#   ★ 但这是**推理**，不是 `CROSS_SITE_DEDUP_WHERE` 自己保证的 ——
-#     所以 `run_crabpt()` 里另有一条**可执行**的断言，见那里的 `rule_gaps`。
+# ★ 为什么本常量**不**并进 `transfer_rule='ALLOW'`（2026-09-28 订正 —— 原先这段
+#   写的是"不需要 ALLOW 白名单，因为能上乌托邦本身就已经过过闸门④"，
+#   **那段推理已被实测推翻**，逐条如下）：
+#   ① 推理**不成立**：实测 `EXISTS` 的 28 行里**有 1 行 `transfer_rule='DENY'`**
+#      （`site_torrent_id=15972`）⇒ "能上乌托邦 ⇒ 已过闸门④"是**假的**。
+#      ★ 正是本条注释下面那句"但这是**推理**，不是本常量自己保证的" ——
+#        实测证明它连**结论**都不成立。
+#   ② 所以**转种路**必须自己把闸门④ 补上 ⇒ 那是**另一个常量**：
+#      `TRANSFERABLE_WHERE = 本常量 + " AND transfer_rule = 'ALLOW'"`（定义在下面）。
+#   ③ ★★ 为什么**不在这里加**（本次最容易做错的一步）：本常量还有**别的**消费者，
+#      其中 `publish.py` 里那条"**应当恒为空**的差集断言"问的正是
+#      「已上站 ∧ **非** ALLOW 的有哪些」⇒ 把 ALLOW 并进来会让它**恒返回 0 行**
+#      = **检测器静默失效**（`ERR-META-14` 里最贵的一种：比不检测更危险，
+#        因为你会以为检查过了）。
+#      ⇒ **一条 WHERE 同时服务两个方向相反的问题 ⇒ 必须分叉成两个常量，各司其职。**
+#
+# ★★★ 2026-09-28 **订正**：这句注释原先写的是"所以 `run_crabpt()` 里另有一条
+#   **可执行**的断言，见那里的 `rule_gaps`"（还提到 `crabpt_rule_gaps()`）。
+#   **实测：那两个函数在全仓库都不存在**（`grep -rn "def crabpt_rule_gaps"` 无输出，
+#   只有上面那行注释在引用它）⇒ **注释承诺了一条判据，而那条判据从没被写出来**
+#   （`ERR-META-04` 的形状）。⇒ 本条注释**不再指向一个不存在的函数**。
+#   ★ 2026-09-28 追记：那条"应当恒为空"的断言**现在有了** —— 它在 `publish.py`
+#     的 `run_crabpt()` 里（查 `CROSS_SITE_DEDUP_WHERE` ∧ 非 ALLOW）。
+#     ★★ 它**仍然用本常量**（不是 `TRANSFERABLE_WHERE`）—— 见上面 ③：
+#        它就是靠"事实口径 vs ALLOW 要求"的差集来发现漏洞的，
+#        换成 `TRANSFERABLE_WHERE` 它就成了恒空废码。
 CROSS_SITE_DEDUP_WHERE = (
     "site_status = 'EXISTS' AND site_torrent_id IS NOT NULL AND site_torrent_id != ''"
+)
+
+# ── ★★★ C' 的判据口径（2026-09-28）：**皇后路 + 已上站** ────────────────────
+#
+#   `run.py` 的 C' 改的是"**皇后路**（`opencd_tid` 非空）的行不再由 `scan` 写
+#   `formatted_title`"（那一列归 `opencd_ingest.build_row()` = `mapped.title`）。
+#   ⇒ 要**验**它，就得能精确取出这批行 —— 这个常量就是这个口径的**唯一真源**。
+#
+#   ★ 为什么是**新**常量，而不是复用现成的两个（逐条说明，否则会被问"为什么不复用"）：
+#     · `_published_where(only_stale=True)` —— **多了 `stale`**。而 C' 的判据是
+#       "**不管 stale 与否，这批行的标题都不许变**"（`scan` 根本不挑 stale）
+#       ⇒ 带上 `stale` 会**漏掉**"本地没更新过"的行，而那些行正该被判。
+#     · `CROSS_SITE_DEDUP_WHERE` —— 只封了 `site_status='EXISTS'` + id 非空，
+#       **缺 `opencd_tid` 那一层**（它服务的是"转种"，不是"标题"）⇒ 会把
+#       抓轨路的已上站行也捞进来，而那些行**本来就该被 scan 写**（假失败）。
+#   ⇒ 两个都不对。而"在调用点当场手拼一条"正是 `ERR-META-03` 的原始动作
+#     （口径活在脑子里、漂移了也不报错）⇒ 所以落成常量。
+#
+#   ★★ 纪律（与 `CROSS_SITE_DEDUP_WHERE` 上面那段同源）：`EXISTS` ⇒ 皇后路
+#     **是推理、不是约束** —— 数据库**不保证**"已上站的行都带 `opencd_tid`"。
+#     ⇒ 消费方**不许**假定"取出来的必然都是皇后路"，必须**先数一遍**
+#       `EXISTS` 里 `opencd_tid` 为空的有几条并报出来（见 `queen_published_gap()`）。
+#
+#   ★ 与 `CROSS_SITE_DEDUP_WHERE` 的**共同前缀**由 `run.py --selftest` ⑦e 钉住：
+#     两者要么共用一份，要么被一条判据钉住 —— "两处各写一份、谁也不看着谁"
+#     是不允许的（`ERR-META-03`）。
+QUEEN_PUBLISHED_WHERE = (
+    "site_status = 'EXISTS' AND site_torrent_id IS NOT NULL AND site_torrent_id != ''"
+    " AND opencd_tid IS NOT NULL AND opencd_tid != ''"
+)
+
+# ── ★★★ 转种口径（2026-09-28）：**已上站 ∧ 过闸门④** ──────────────────────
+#
+#   ★★★ 为什么必须**另立**常量，而不是把 `transfer_rule` 那条加进
+#     `CROSS_SITE_DEDUP_WHERE`（这是本次改动的**全部要点**，别简化掉）：
+#
+#     ① `CROSS_SITE_DEDUP_WHERE` **不**是转种专用的，它还有别处消费者；
+#        最要紧的一处是 `publish.py` 里那条"**应当恒为空**的差集断言"
+#        —— 它问的正是「已上站、却没标 ALLOW 的有哪些」：
+#            SELECT ... WHERE {CROSS_SITE_DEDUP_WHERE}
+#                       AND (transfer_rule IS NULL OR transfer_rule != 'ALLOW')
+#     ② ⇒ 若把 `transfer_rule='ALLOW'` 并进 `CROSS_SITE_DEDUP_WHERE`，
+#        那条断言**恒返回 0 行**：它想找的就是"非 ALLOW 的已上站行"，
+#        而那批行**恰好**被合并后的 WHERE 排除掉了。
+#        **断言不会报错，它会永远显示"通过"** —— 这是 `ERR-META-14` 里最贵的
+#        一种：检测器本身静默失效，比不检测更危险（你会以为检查过了）。
+#     ③ 所以两层**各司其职**：
+#          · `CROSS_SITE_DEDUP_WHERE` —— 保持原样（"乌托邦上有"这个**事实**），
+#            供差集断言与 `queen_published_gap()` 等使用；
+#          · `TRANSFERABLE_WHERE`（本常量）—— "**有源 ∧ 允许转**"这个**判据**，
+#            供转种路使用。
+#        ★ 多出来的一层是 `transfer_rule` ⇒ 两者必须**逐字共享前缀**，
+#          由 `run.py --selftest` ⑦e 钉住（与 `QUEEN_PUBLISHED_WHERE` 同款纪律：
+#          "两处各写一份、谁也不看着谁" = `ERR-META-03`）。
+#
+#   ★★★ 为什么这条修法是**必要**的（2026-09-28 实测的洞，不是假设）：
+#     `transferable_to()` 原先只按 `CROSS_SITE_DEDUP_WHERE` 筛 ⇒ 它筛的是
+#     **"乌托邦上有没有"**，而**不是**"允不允许转"。
+#     实测：`EXISTS` 的 28 行里有 **27 ALLOW / 1 DENY**，那条 DENY 是
+#     `site_torrent_id=15972`（`opencd_tid='200002'`）⇒ **它会进转种队列，
+#     会被搬到蟹黄堡**，而 `transfer_rule='DENY'` 的语义正是"**不许再分发**"。
+#     ⇒ 而**转种不可逆**（蟹黄堡没有批量删种）⇒ 这是个"一旦跑到就无法收拾"的洞。
+#
+#   ★ 为什么**不是**"反正 `publish.py` 里有断言会报出来"就够了：
+#     那条断言是 `print` **非阻断**的（注释自己写了"拦住会把整批卡住"）
+#     ⇒ 它把安全**寄托在"有人会看日志"**上。而 `run_crabpt` 是**无人值守路径**
+#       —— 一条警告会淹没在整轮日志里。★ 安全判据不能靠"读日志的人"。
+#
+#   ★★ 为什么**不**顺手把 `run_crabpt` 那条 `_gaps` 断言删掉：
+#     改完之后队列里**不可能**再有非 ALLOW 的行 ⇒ 那条断言**恒空**，
+#     看起来成了"废码"。★ 但它是**故意的**：它现在是一条**回归探针**
+#     —— 若将来有人再让某行绕过闸门④ 上站（手工 `set_site_id`、或新写一条
+#       不查闸门的路径），差集**会重新变非空**，而它**正好**指着那句话。
+#     删掉它 = 把"将来会坏的那一天"变成静默。⇒ 断言留着，且**不该**跟着改口径
+#     （它就是"拿事实口径问一个应当恒为空的问题"，改了口径它就没用了）。
+#
+#   ★★★ 为什么这里**把前缀字面值抄了一遍**（看起来是"与 `CROSS_SITE_DEDUP_WHERE`
+#     重复"，而本项目的纪律一向是"不许两处各写一份"）—— 这是**刻意的重复**，
+#     理由是一条**可执行的判据**，不是懒：
+#
+#     · 本仓库有 **4 处工具**靠「AST 抽取 `db.py` 里的常量字符串」拿到这些口径
+#       （`tools/fix_onsite_titles_and_subtitles.py`、`tools/fix_no_torrent_file_status.py`、
+#        `tools/_probe_a3_risk.py`、`tools/_probe_280_vs_16.py`）。
+#     · 它们**不能** `import db` —— 那会连 `config` 一起拉，而 `config` 在 import 期
+#       就 `require_env()`（`QB_PASS` 等）⇒ 没有 `.env` 的机器上**连工具都起不来**。
+#     · 而 `ast.literal_eval` **不认 `Name` 节点** ⇒ 若本常量写成
+#       `CROSS_SITE_DEDUP_WHERE + " AND transfer_rule = 'ALLOW'"`，那 4 处工具会
+#       **在运行时**才 `ValueError`（不是在构建期）—— 而它们正是用来"半夜在 NAS 上
+#       查一个紧急问题"的。
+#     · ⇒ 所以 `run.py --selftest` ⑦e-3 **规定**：这几个常量必须能被
+#       `literal_eval` 直接解出。**本处的重复就是为满足那条判据。**
+#     ★ 重复带来的漂移风险由 ⑦e 兜住：它断言本常量必须以 `CROSS_SITE_DEDUP_WHERE`
+#       **逐字开头** ⇒ 前缀若改了、这里没跟着改，`--selftest` **当场红**。
+#       判据 > 记忆：重复一段**被钉住**的字符串，比"省略掉但会让 4 个工具静默坏掉"安全。
+TRANSFERABLE_WHERE = (
+    "site_status = 'EXISTS' AND site_torrent_id IS NOT NULL AND site_torrent_id != ''"
+    " AND transfer_rule = 'ALLOW'"
 )
 
 
 def is_transferable_to(info_hash, site=SITE_CRABPT):
     """★ **转种判据**：这条能不能从**别的**站转去 `site`。
+
+    ★★★ 本函数**必须**与 `transferable_to()`（实际选行）**同口径** ——
+      两者对**同一行**给出相反答案是**实测发生过**的事故（2026-09-28）：
+
+        publish.py --site crabpt --dry-run --only 144f017a
+          ❌ 144f017a 不在转种队列里                      ← 队列实际筛选（**对**）
+          ✅ 它**在**转种队列里（源站有、目标站没有 ⇒ 该转）← 本函数的 why（**错**）
+
+      ★ 根因：当时本函数只判 ①②（源有 ∧ 目标没有），**缺**闸门④；而
+        `transferable_to()` 已改用 `TRANSFERABLE_WHERE`（含 `ALLOW`）。
+        ⇒ 队列口径与"给人看的解释"口径**分叉**。
+      ★ 危害形状（`ERR-META-14`）：不是"多发一条"（数据风险），而是
+        **工具告诉你"它在队列里"、实际不会发** ⇒ **误导人做决定**。
+      ★ 一般化：**给人看的判据必须与实际判据同源**；否则同一命令里会
+        自己跟自己矛盾，而**读的人只能猜哪句是真的**。
 
     返回 `(ok, why)`：
       · `ok=True`  ⇒ 该转，且**必须**转（`site` 上还没有）
@@ -1285,7 +1495,20 @@ def is_transferable_to(info_hash, site=SITE_CRABPT):
            ★ 代价：`why` 里只能写"源站没有"，说不出更细的（哪个列空）。
              这是刻意的 —— 细化到列名会让**两个**消费者（SQL 与这里的报文）
              各写一份判据（`ERR-META-03` 的漂移形状）。
-      ② `site` 上**没有**这条 —— 已经有了就不叫"转种"叫"重复"。
+      ② ★ **过闸门④**：`transfer_rule == 'ALLOW'`（只有 `ALLOW` 放行；
+         空 / `NEED_CONFIRM` / `DENY` **一律拦**）。
+         ★★ 这一条是 2026-09-28 补的 —— 本函数**原先没有它**，于是它会对
+           `15972`（`EXISTS` + `DENY`）回答"该转"，而那条**明明被闸门④ 拦着**。
+         ★ 它必须与 `TRANSFERABLE_WHERE` 的尾巴**语义**一致（逐字由
+           `run.py --selftest` ⑦e-2 钉住）；★ 注意**不许**写成
+           `!= 'DENY'` —— 那会把空规则/`NEED_CONFIRM` 判成**放行**，
+           与闸门④ **语义相反**（`ERR-META-30` 的形状："提到了对的词、
+           却问了个错的问题"）。
+         ★ 为什么在这里查而不是"复用 `transferable_to()` 的返回集"：
+           那要**再拉一遍全队列**（O(队列) 次查询只为解释一行）；
+           而口径同源的保证**不靠**复用代码路径，靠的是 ⑦e 的**常量前缀判据**
+           + 本函数与 `TRANSFERABLE_WHERE` 同读一个 `tasks` 列。
+      ③ `site` 上**没有**这条 —— 已经有了就不叫"转种"叫"重复"。
     """
     if not info_hash:
         return False, "info_hash 为空"
@@ -1299,6 +1522,27 @@ def is_transferable_to(info_hash, site=SITE_CRABPT):
         if got[1] is None:
             return False, "源站（乌托邦）没有这条的记录（`site_publish` 里查无此行）"
         return False, f"源站（乌托邦）上不是 EXISTS 而是 {src!r} ⇒ 没有可转的源"
+    # ★★★ 闸门④（`TRANSFERABLE_WHERE` 的尾巴）——
+    #   ★ 放在 ① 之后、③ 之前：与 `transferable_to()` 的 SQL 里
+    #     `WHERE <CROSS> AND transfer_rule = 'ALLOW'` 的**求值顺序无关**
+    #     （三条都是 AND，全部成立才转），放这里只是为了让 `why` **先**报
+    #     "源站没有"这种更根本的原因。
+    rule = transfer_rule_of(info_hash)
+    # ★★ 归一化必须在**一处**：库里这一列可能是 `NULL` / 空串 / 带空格。
+    #   ★ 与 SQL 侧 `transfer_rule = 'ALLOW'` **等价**（SQL 里 `NULL` 与
+    #     `'DENY'` 都不等于 `'ALLOW'` ⇒ 都拦）⇒ 语义一致，只是这里要**归一**
+    #     成 `''` 好在报文里说话（`ERR-META-14`：兜底值不许冒充真结果 ——
+    #     所以 `None` 报成 `''` 之后还要**说清**"空规则也拦"）。
+    if (rule or "").strip() != "ALLOW":
+        # ★ 报文分档：`DENY` 是"上游明令不许"（要人看一眼），
+        #   空 / 其它是"没标过 ALLOW"（规则缺失）。两者**拦法相同、含义不同**
+        #   ⇒ 不许压成一句（`ERR-SITE-06` 的形状：报错文案把多种原因
+        #     压成一句，读的人只能猜）。
+        if rule == "DENY":
+            return False, ("transfer_rule='DENY' ⇒ 闸门④ 拦下（只有 'ALLOW' 放行）"
+                           "—— 上游明令**不许再分发**")
+        return False, (f"transfer_rule={rule!r} ⇒ 闸门④ 拦下（只有 'ALLOW' 放行）"
+                       f"{'（规则为空：没标过）' if not (rule or '').strip() else ''}")
     dst_status = site_status_of(info_hash, site)
     if dst_status is not None:
         # ★★ 这里**必须**区分"记录在但 id 空"（写坏了）与"正常已发"，
@@ -1308,11 +1552,12 @@ def is_transferable_to(info_hash, site=SITE_CRABPT):
             return False, (f"目标站（{site}）**有记录但 torrent_id 为空** ⇒ "
                            f"记录坏了，需人工核（状态 {dst_status!r}）")
         return False, f"目标站（{site}）上已有（id={site_torrent_id_of(info_hash, site)}）"
-    return True, f"源站有（乌托邦）、目标站（{site}）没有 ⇒ 该转"
+    return True, (f"源站有（乌托邦）、过闸门④（`transfer_rule='ALLOW'`）、"
+                  f"目标站（{site}）没有 ⇒ 该转")
 
 
 def transferable_to(site=SITE_CRABPT):
-    """★ 转种队列：源站有、目标站没有的全部行。
+    """★ 转种队列：**有源（乌托邦已上站）∧ 过闸门④（`ALLOW`）∧ 目标站没有**的行。
 
     ★ 返回**完整 task 行**（`TASK_FIELDS`），因为调用方（`publish.py`）
       接着要用它渲染表单 —— 只给 hash 会逼调用方再查一次，
@@ -1320,12 +1565,23 @@ def transferable_to(site=SITE_CRABPT):
 
     ★ 排序：`updated_at` 升序（与 `get_published()` 同口径 —— 老的先转，
       不因为新行插队而永远轮不到）。
+
+    ★★★ 口径 = `TRANSFERABLE_WHERE`，**不是** `CROSS_SITE_DEDUP_WHERE`
+      （2026-09-28 修）。差别只有一条：`transfer_rule = 'ALLOW'`。
+      ★ 为什么这条差别**必须有**（实测，不是推理）：见 `TRANSFERABLE_WHERE`
+        上面那段 —— `15972`（`EXISTS` + `DENY`）原先会被选进队列、
+        被搬到蟹黄堡，而那是**不可逆**的。
+      ★ 为什么**不能**内联这条 WHERE（手写进本函数）：手抄必然与常量漂移，
+        那正是 `ERR-META-03` 的形状。⇒ 一律引用常量。
+      ★ 为什么**不能**并进 `CROSS_SITE_DEDUP_WHERE`：会把 `publish.py` 里
+        那条"应当恒为空"的差集断言变成**恒空**（检测器静默失效）。
+        见 `TRANSFERABLE_WHERE` 上面 ①②③ 逐条。
     """
     conn = connect()
     cur = conn.cursor()
     cur.execute(
         f"SELECT {TASK_FIELDS} FROM tasks "
-        f" WHERE {CROSS_SITE_DEDUP_WHERE} "
+        f" WHERE {TRANSFERABLE_WHERE} "
         f"   AND info_hash NOT IN "
         f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?) "
         f" ORDER BY updated_at",
@@ -1338,14 +1594,17 @@ def transferable_to(site=SITE_CRABPT):
 
 def count_transferable_to(site=SITE_CRABPT):
     """★ 转种队列的**计数**。★★ 必须与 `transferable_to()` 用**同一个**
-    `CROSS_SITE_DEDUP_WHERE` 字符串 —— 理由逐字同 `count_stale()` 那段：
+    `TRANSFERABLE_WHERE` 字符串 —— 理由逐字同 `count_stale()` 那段：
     一旦探针（计数）和实际筛选漂移，就会变成"探针说有活 → 一条都选不出来 →
     探针还说有活"的**静默空转**，不报任何错。
+    ★★★ 2026-09-28：这里原先写的是 `CROSS_SITE_DEDUP_WHERE` —— 那正是
+      "探针与实际筛选**口径不同**"的形态（探针数 28，实际该发 27）。
+      现在两处**同一个常量**，且该常量就是实际筛选用的那一个。
     """
     conn = connect()
     n = conn.execute(
         f"SELECT COUNT(*) FROM tasks "
-        f" WHERE {CROSS_SITE_DEDUP_WHERE} "
+        f" WHERE {TRANSFERABLE_WHERE} "
         f"   AND info_hash NOT IN "
         f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?)",
         (str(site),),

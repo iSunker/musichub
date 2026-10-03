@@ -14,6 +14,13 @@
 import os
 import sys
 
+# ★★ 全局网络出口：import 即给 urllib3 打上"只解析 IPv4"的补丁
+#   （绕开"个别 Cloudflare IPv6 边缘 IP 不可达"的黑洞，见 net.py 文件头）。
+#   ★ 放这里而不是每个网络模块各加一行：全项目 33 处 import config ⇒ 一处生效全覆盖。
+#   ★ 必须在 `requests` 发第一个请求**之前**生效 —— import 时执行正是为此。
+#   ★ net 不 import config、不读 env ⇒ 不影响下面 require_env / 各脚本的 --selftest。
+import net  # noqa: F401  (导入即产生副作用：给 urllib3 打 IPv4 补丁)
+
 
 def require_env(key: str) -> str:
     """读取必须存在的环境变量；缺失就直接终止程序。"""
@@ -59,6 +66,26 @@ CRABPT_MUSIC_CATEGORY = os.getenv("CRABPT_MUSIC_CATEGORY", "408")
 # ★ 蟹黄堡的 qB 分类：★ 与乌托邦**分开**，这样"哪一站的种子"在 qB 里一眼可辨，
 #   也便于按站统计（本项目已有 PUBLISH_CATEGORY=Musopia）。
 CRABPT_PUBLISH_CATEGORY = os.getenv("CRABPT_PUBLISH_CATEGORY", "CrabPT")
+
+# ---- ★ 延迟回加 qB（2026-10-03 加）---------------------------------------
+#
+# ★ 干什么：种子**发布成功后**，**不立即**加进 qB 做种，而是等 N 分钟再加。
+#   目的（用户 2026-10-03）：别人 RSS 到这条种子有时差，延迟一会儿让**尽量多
+#   的人同时开始下载**（=扩散更广）。★ 15 是用户暂定的值，**没有实测**哪种最合适。
+#
+# ★ 怎么实现：`publish.py` 发布成功后把「待回加」写进 `/data/readd_queue.json`
+#   （含 `.torrent` 字节），`daemon.py` 主循环每 `SCHED_TICK`(30s) 扫一次，
+#   到点才 `torrents_add` —— qB 收到后**自己**校验、自己做种（不需再调一次）。
+#   详见 `readd_queue.py` 的模块 docstring。
+#
+# ★★ 默认 **0 = 关闭**（= 维持 2026-10-03 之前的老行为：发布后立即回加）。
+#   为什么默认关：新行为改变"发布→做种"的时间关系，属于**行为变更**，
+#   要开必须**显式**在 `.env` 加一行（`ERR-ENV-02`：缺键时默认值必须中性）。
+#
+# ★★★ 已知干扰（用户 2026-10-03 明确「先忽略，记录一下」）：
+#   延迟窗口内，NAS 上别的容器（reseed/iyuu 辅种那套）若看到站点有新种、
+#   自动辅种，可能**抢先**把它加进 qB ⇒ 延迟失效。本项目**不拦不检测**。
+SEED_DELAY_MIN = int(os.getenv("SEED_DELAY_MIN", "0") or "0")
 
 # ==================== PicGo 图床 ====================
 PICGO_API_KEY = require_env("PICGO_API_KEY")

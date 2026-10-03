@@ -13,6 +13,7 @@ D:\Projects\musopia\zhuanzhong
 musopia-script:latest
 musopia_tools
 musopia_once
+musopia_qbtune
 network_mode
 host.docker.internal
 

@@ -74,6 +74,7 @@ from datetime import datetime
 import requests
 
 import config
+import net   # ★ 统一网络出口（强制 IPv4）——新 Session 一律走 net.new_session()
 import db
 import opencd_ingest
 import opencd_log as L
@@ -163,7 +164,7 @@ class Client:
             )
         self.gate = gate
         self.dry_run = dry_run
-        self.sess = requests.Session()
+        self.sess = net.new_session()
         self.sess.headers.update({
             "User-Agent": UA,
             "Accept-Language": "zh-CN,zh;q=0.9",

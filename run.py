@@ -27,6 +27,8 @@ def parse_args():
                     help="忽略缓存，重新处理所有种子（用于修补历史数据）")
     ap.add_argument("--no-upload-cover", action="store_true",
                     help="不上传封面到图床（仅本地解析，便于快速试跑）")
+    ap.add_argument("--selftest", action="store_true",
+                    help="跑离线自检（C' 三态判据；不连 qB、不连库、零请求）")
     return ap.parse_args()
 
 
@@ -61,7 +63,43 @@ def parse_title(raw_title, folder_path):
 
     title_parts = [p for p in (artist, album) if p]
     core = " - ".join(dict.fromkeys(title_parts)) if title_parts else raw_title
-    formatted_title = f"{core} {year} - {fmt} {track_type} - OpenCD"
+    # ★★ 2026-09-28：**尾部不再拼 ` - OpenCD`**（用户拍板）。
+    #
+    #   ★ 起因（实测，25 条已上站的标题逐条核对）：
+    #     · ` - OpenCD` 是**皇后自己写的** —— 它在 `mapped.title` 里就带着
+    #       （如 `Mary Black - Babes In The Wood … - FLAC Multi File - OpenCD`）。
+    #       原先这里再拼一次，等于**同一个标记写两遍**，而且拼出来的那份
+    #       与皇后原文**逐条不同**（库里只有 1/25 与 `mapped.title` 相同）。
+    #     · 这条支对皇后行**本该是死代码**：`opencd_ingest.build_row()` 已经把
+    #       `formatted_title` 写成 `mapped.title`（皇后原文）。但**早期入库**的行
+    #       （那时 `build_row` 还没这个字段）先由这里占了位 ⇒ 现在 24/25 是
+    #       **本函数的产物**，而不是皇后原文。
+    #
+    #   ★★ 为什么是"删尾缀"而不是"改成用皇后原文"：本函数**拿不到** `opencd_tid`
+    #      （它在 `main()` 里从 `known` 查出来，见下面 `oid`），而 `parse_title()` 是
+    #      纯函数。而真正对齐皇后的那条路**已经存在**（`opencd_ingest`）⇒
+    #      在这里改是**补一条重复的路**，正是本项目反复栽的形状（`ERR-META-03`）。
+    #
+    #   ★★★ 2026-09-28 **续改（C'）**：删尾缀**不够** —— 实测（16:19 / 16:50 两轮
+    #      scan 的日志）**新代码产出的标题照样畸形**：
+    #         `Vaundy & yama - 飛ぶ時 ／ 飛ぼうよ - FLAC 整轨`  ← **年份没了**
+    #         `9Lana - 螺旋 - FLAC 整轨`                       ← **年份没了**
+    #         `齐秦 - 我拿什么爱你 FLAC 1998 - FLAC 整轨`        ← 格式跑到年份前
+    #         `★lynchULTILDEf - FLAC 分轨`                      ← 歌手名 = 原始种子名
+    #      ⇒ **本函数（`parse_title` 的二次拆分）本身就是畸形的源头**，
+    #        删尾缀只治了症状。真正的修法在 `main()`：见下面 `mt_override` ——
+    #        皇后路**根本不把这里的产物写进库**。
+    #      ★ 但本函数的**返回值仍要留着**（`fmt`/`track_type` 是渲染侧要用的，
+    #        且抓轨路仍靠它出标题）⇒ 这里**不删代码**，只把"谁写库"改掉。
+    #
+    #   ★★ 连带后果（已核对，**不是** `ERR-DATA-06` 那种副作用）：
+    #     · 本行只影响**标题字符串**；`create_musopia_torrent()` 把内容目录做成
+    #       `.torrent`，**标题不进 info dict** ⇒ **不改 infohash**。
+    #     · `torrent_file` 的文件名由 `safe_name` 算（看下面）⇒ 库里那个路径会
+    #       在下一轮 `scan` 里被重算覆盖，`save_task` 会连 `updated_at` 一起刷新。
+    #       这与"入库后 status 被改成 NO_TORRENT_FILE 导致踢出队列"是**两件事**：
+    #       后者的根因已修（`topup_opencd_fields.py` 现在会带回库里已有路径）。
+    formatted_title = f"{core} {year} - {fmt} {track_type}"
     formatted_title = re.sub(r"\s+", " ", formatted_title).strip()
 
     # 副标题不在这里算：它依赖曲目/碟数，**还要按皇后/抓轨分流**，由 main() 拿到
@@ -72,6 +110,400 @@ def parse_title(raw_title, folder_path):
     #   ⇒ 别照着这行注释去"恢复"那个调用（`ERR-META-04`：改了行为要同时改文档）。
     #   ★ 渲染侧由 `build_form_fields()` 再按 `opencd_tid` 分流重算一次。
     return formatted_title, fmt, track_type
+
+
+def _json_title(mapped_json):
+    """从 `mapped_json` 快照里取皇后**原文标题**（`mapped.title`），取不到返回 `""`。
+
+    ★ 单独抽出来是为了**只做这一件事**：不兜底、不猜、不退回 `torrent_name`。
+      （`build_row` 写的 `formatted_title` = `m["title"]` ⇒ 这里取的是**同一个来源**，
+      所以"不传这一列"与"写 `build_row` 的值"是**等价的**，不是"放弃了这一列"。）
+
+    ★ 解析失败**不抛**：调用方要能区分"没快照"与"有快照但解析坏了"，
+      所以这里把异常也收敛成 `""`，由调用方按 `mj` 是否为真来分因报出。
+    """
+    if not mapped_json:
+        return ""
+    try:
+        m = json.loads(mapped_json)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(m, dict):
+        return ""
+    return str(m.get("title") or "").strip()
+
+
+def _title_write_plan(oid, mapped_json, parsed_title):
+    """★ C' 的核心判据（**纯函数 = 可脱库单测**）：决定这一行**写不写** `formatted_title`、写什么。
+
+    返回 `(cols, src, why_missing)`：
+      · `cols`        —— 要注入 `db.save_task(**cols)` 的字段（空 dict = **不写这一列**）
+      · `src`         —— 人类可读的"来源"（打印用；**不拿 `cols` 的真假当判据**）
+      · `why_missing` —— `None` = 正常；否则是"皇后路却拿不到原文"的**具体原因字符串**
+
+    ★★ 三态（**这是本函数存在的全部理由**，别把它并回调用点）：
+        抓轨路（无 oid）        → 写 `parsed_title`（`parse_title()` 的产物）
+        皇后路 + 拿到原文        → 写**皇后原文**（`mapped_json.title`）
+        皇后路 + 拿不到          → **不写**（保留库内原值），并回报原因
+
+    ★★ 为什么必须是**三个互斥分支**而不是"一个 `None` 兼任两义"：
+      2026-09-28 实测过第一版 —— 用 `mt_override = None` 表示"照旧写"，
+      于是 `oid` 为空时保持 `None` ⇒ `cols = {}` ⇒ **抓轨路的标题从此不再被写**，
+      而且**一声不响**（`ERR-META-14` 的形状）。三态显式化就是那一课的产物。
+    """
+    if not oid:
+        return ({"formatted_title": parsed_title}, "抓轨路(parse_title)", None)
+
+    title = _json_title(mapped_json)
+    if title:
+        return ({"formatted_title": title}, "皇后原文（本列不归 scan 管）", None)
+
+    # ★ 两条子因的**处置完全不同** ⇒ 不能合并成一句"没拿到"：
+    if not mapped_json:
+        why = ("皇后路但库内无 `mapped_json` 快照 ⇒ **未写** `formatted_title`"
+               "（不猜、不覆盖）。修法：跑 `crawl` 补快照，或 `opencd_ingest` 重导该行。")
+    else:
+        why = ("皇后路、有快照但 `mapped_json.title` 是空的 ⇒ **未写** `formatted_title`"
+               "（不猜）。修法：核对皇后的标题字段是否被改名。")
+    return ({}, "★ 未写（见下面的原因）", why)
+
+
+def selftest():
+    """C' 的**离线**自检（纯本地：不连 qB、不连库、不发请求）。返回 `(是否通过, 明细)`。
+
+    ★ 为什么它必须进仓库、而不是留在我跑过的一次性脚本里：
+      这条改动的判据（"三态各自写什么"）是**行为契约**，而行为契约活在聊天记录里
+      就等于不存在（`ERR-META-01` 一族的形状：判据在哪儿，没人知道）。
+
+    ★★ 阴性对照（**没有它，这个自检可能是"测了个寂寞"**）：
+      每一条"期望不写"的用例，都配一条"期望真的写"的用例（抓轨路 / 皇后路有快照）。
+      否则把 `_title_write_plan` 改成 `return ({}, "", None)` 也能全绿。
+    """
+    detail = []
+    ok = [True]
+
+    def chk(name, got, want):
+        if got != want:
+            ok[0] = False
+            detail.append(f"✗ {name}\n     got = {got!r}\n     want= {want!r}")
+        return got == want
+
+    MJ = json.dumps({"title": "皇后原文 2026 - FLAC 整轨 - OpenCD"}, ensure_ascii=False)
+    MJ_NOTITLE = json.dumps({"no_title_here": 1}, ensure_ascii=False)
+    PARSED = "原始种子名 - FLAC 整轨"
+
+    # ── ① 抓轨路：**必须写** `parse_title()` 的产物（返工前这里是 bug：写不进去）──
+    cols, src, why = _title_write_plan(None, None, PARSED)
+    chk("①抓轨路·cols", cols, {"formatted_title": PARSED})
+    chk("①抓轨路·无缺失原因", why, None)
+
+    # ── ② 皇后路 + 有快照：写**皇后原文**，不写自己拆的 ──
+    cols, src, why = _title_write_plan("12345", MJ, PARSED)
+    chk("②皇后路·有快照·cols", cols, {"formatted_title": "皇后原文 2026 - FLAC 整轨 - OpenCD"})
+    chk("②皇后路·有快照·不写自家产物", cols.get("formatted_title") == PARSED, False)
+    chk("②皇后路·有快照·无缺失原因", why, None)
+
+    # ── ③ 皇后路 + **无快照**：不写，且给出原因 ──
+    cols, src, why = _title_write_plan("12345", None, PARSED)
+    chk("③皇后路·无快照·不写", cols, {})
+    chk("③皇后路·无快照·有原因", why is not None and "无 `mapped_json`" in why, True)
+
+    # ── ④ 皇后路 + **有快照但给不出 title** ⇒ 与③**同判据、不同原因** ──
+    #   ★ 这里**只能**喂"解析得出、但里面没有 title"的快照。`""`/`None` 属于
+    #     **"无快照"**（③），不是"有快照" —— 第一版把这两个混进来，于是期望值
+    #     写错、自检报假红（`ERR-META-01` 的形状：判据错了，看着像代码错了）。
+    for bad in (MJ_NOTITLE, json.dumps({"title": ""}), json.dumps({"title": "   "})):
+        cols, src, why = _title_write_plan("12345", bad, PARSED)
+        chk(f"④皇后路·快照给不出原文({bad[:22]!r})·不写", cols, {})
+        chk(f"④皇后路·快照给不出原文({bad[:22]!r})·原因指向 title",
+            why is not None and "`mapped_json.title`" in why, True)
+    #   ★ 反向对照：`""`/`None` 必须落进**"无快照"**那条原因（否则③形同虚设）
+    for nosnap in ("", None):
+        cols, src, why = _title_write_plan("12345", nosnap, PARSED)
+        chk(f"④反向·{nosnap!r} 算'无快照'", why is not None and "无 `mapped_json`" in why, True)
+
+    # ── ⑤ 损坏的 JSON 不许抛异常，只许"拿不到" ──
+    for junk in ("{不是json", "[1,2,3]", '"就是个字符串"', "123"):
+        try:
+            cols, src, why = _title_write_plan("12345", junk, PARSED)
+        except Exception as e:                                  # noqa: BLE001
+            ok[0] = False
+            detail.append(f"✗ ⑤损坏快照 {junk!r} 抛了异常: {type(e).__name__}: {e}")
+            continue
+        chk(f"⑤损坏快照({junk!r})·不写且不抛", cols, {})
+        # ★ `[1,2,3]` / `"字符串"` / `123` 是**合法 JSON 但不是 dict** ⇒ 也不同原因
+        chk(f"⑤损坏快照({junk!r})·原因指向 title", why is not None and "`mapped_json.title`" in why, True)
+
+    # ── ⑥ 快照里 title 是"数字/非字符串"不许冒充真标题（`ERR-META-14`）──
+    cols, src, why = _title_write_plan("12345", json.dumps({"title": 0}), PARSED)
+    chk("⑥快照 title=0 不许当原文", cols, {})
+
+    # ── ⑦ ★ 结构性判据：两个 `save_task` 调用点都必须带 `**mt_col` ──
+    #   （否则"算出来了却没注入"—— 就是返工前 B 用例那个 bug 的**另一种写法**）
+    #
+    #   ★★★ 判据必须走 **AST**，**不许** `"**mt_col" in 源码文本` ——
+    #     第一版就是这么写的，实测**报假红**：真的注入只有 2 处在调里，
+    #     但注释里也提到了 4 次 ⇒ 数出 **6 处**。
+    #     这**正是** `assets.py:878` 那段注释警告过的同一个坑（子串搜索命中注释/
+    #     文档串 ⇒ 判据是假的），我第一版又踩了一遍 ⇒ 所以这里落成 AST 判据。
+    import ast as _ast
+    _tree = _ast.parse(open(__file__, encoding="utf-8").read())
+
+    def _starred_kwargs(fn_name):
+        """数 `fn_name(...)` 调用里 `**xxx` 这种展开的 kwarg（只数真调用）。"""
+        hits = []
+        for node in _ast.walk(_tree):
+            if (isinstance(node, _ast.Call)
+                    and getattr(node.func, "attr", None) == fn_name):
+                for k in node.keywords:
+                    if k.arg is None and getattr(k.value, "id", "") == "mt_col":
+                        hits.append(node.lineno)
+        return hits
+
+    _sites = _starred_kwargs("save_task")
+    if len(_sites) != 2:
+        ok[0] = False
+        detail.append(f"✗ ⑦`**mt_col` 注入点应为 2 处（短路跳过支 + 普通写支），"
+                      f"实测 {len(_sites)} 处（AST 判据，行号 {_sites}）")
+
+    # ★★★ ⑦b **数据流**判据 —— 上面那条只查"`**mt_col` 这个符号出现了"，
+    #   而符号出现 ≠ 值从 `_title_write_plan` 来。实测**两个变异漏网**：
+    #     · 变异 4：`mt_col, ... = {}, 'x', None`（注入点还是 2 处、纯函数也没坏）
+    #     · 变异 6：`mt_col, ... = {'formatted_title': formatted_title}, 'x', None`
+    #       （= C' 被绕过，皇后路又写自家产物）
+    #   ⇒ 必须断言**右值就是那个函数调用**，且**三个目标名/序都对**。
+    #
+    # ★★ 踩坑记录（本判据**第一版是恒红**的，别照抄那个写法）：
+    #   `mt_col, mt_src, mt_why = ...` 在 AST 里是**一条** `Assign`，其 `targets`
+    #   是**一个 `Tuple` 节点**（`Tuple.elts = [Name('mt_col'), …]`），
+    #   **不是三个 `Name`**。第一版写 `[getattr(t,"id","") for t in n.targets]`
+    #   ⇒ 拿到 `[""]` ⇒ `!= ["mt_col", …]` ⇒ **每次都 continue** ⇒ 找不到 ⇒ 恒红。
+    #   实测（基线也报红）立刻暴露 —— 所以下面**两种形态都展开**。
+    def _target_names(node):
+        out = []
+        for t in node.targets:
+            if isinstance(t, _ast.Tuple):
+                out += [getattr(e, "id", None) for e in t.elts]
+            else:
+                out.append(getattr(t, "id", None))
+        return out
+
+    _assign_ok = False
+    for n in _ast.walk(_tree):
+        if not isinstance(n, _ast.Assign):
+            continue
+        if _target_names(n) != ["mt_col", "mt_src", "mt_why"]:
+            continue
+        if isinstance(n.value, _ast.Call) and getattr(n.value.func, "id", "") == "_title_write_plan":
+            _assign_ok = True
+            break
+    if not _assign_ok:
+        ok[0] = False
+        detail.append(
+            "✗ ⑦b `mt_col, mt_src, mt_why` **不是** `_title_write_plan(...)` 的返回值"
+            "（AST：找不到 `mt_col, mt_src, mt_why = _title_write_plan(...)` 这条赋值）。\n"
+            "     ⇒ 这会让三态**算出但没接线**（变异 4/6 的形状）：注入点还在、纯函数也没坏，"
+            "但库收到的是别的东西。★ 符号出现 ≠ 值来自这里。")
+
+    # ★ 判"一变量两义"回归 —— 用 AST 查**赋值**，不看文本（注释里提到它不算数）
+    _bad_assign = [n.lineno for n in _ast.walk(_tree)
+                   if isinstance(n, _ast.Assign)
+                   and "mt_override" in _target_names(n)]
+    if _bad_assign:
+        ok[0] = False
+        detail.append(f"✗ ⑦第一版的 `mt_override`（一变量两义）又回来了（行 {_bad_assign}）"
+                      " —— 它会静默吞掉抓轨路的标题，见 `_title_write_plan` 的 docstring")
+
+    # ★ 判"抽出来了但没被调用"（定义了不算数）
+    _calls = [n.lineno for n in _ast.walk(_tree)
+              if isinstance(n, _ast.Call) and getattr(n.func, "id", "") == "_title_write_plan"]
+    if len(_calls) < 1:
+        ok[0] = False
+        detail.append("✗ ⑦`_title_write_plan()` 定义了但**没有任何调用点** ⇒ 三态没生效")
+
+    # ★★ ⑦c 判**两处 `save_task` 都在同一作用域**（防止"只改了短路支、忘了普通写支"）
+    #   上面只数"总数 = 2"，所以把两处都塞进**同一个** `save_task` 调用里也能骗过去
+    #   （`**mt_col, **mt_col` 会在运行时 TypeError，但那是运行期的事）。
+    _scoped = {n.lineno for n in _ast.walk(_tree)
+               if isinstance(n, _ast.Call) and getattr(n.func, "attr", None) == "save_task"}
+    _lines = sorted(set(_sites))
+    if len(_lines) != 2 or not all(any(abs(ln - sl) <= 12 for ln in _lines) for sl in _scoped):
+        # ★ 只是**软判据**：两处必须在**不同**的 save_task 调用里。用行号邻近度近似，
+        #   因为 `_ast` 不给"调用归属"，而这对本文件（间距 < 12 行）足够。
+        _near = {}
+        for ln in _lines:
+            near = [sl for sl in _scoped if abs(ln - sl) <= 12]
+            _near[ln] = near
+        if len({tuple(v) for v in _near.values()}) < 2:
+            ok[0] = False
+            detail.append(f"✗ ⑦c 两处 `**mt_col` 疑似落在**同一个** `save_task` 调用里"
+                          f"（近似归属 {_near}）⇒ 另一个调用点漏了注入")
+
+    # ★★★ ⑦d 判 `mt_col` **不许被裸下标取键** —— `mt_col["…"]` 在"不写这一列"
+    #   （= 空 dict）时抛 **KeyError** ⇒ **整个 scan 阶段崩掉**。
+    #   实测（变异 X2）：打印的**取值**读 `mt_col`、**判据**读 `mt_src`，
+    #   两者一旦不一致（如 `mt_src` 说"抓轨路"而 `mt_col` 是空的）⇒ 崩。
+    #   ★ 生产里那不是"测试红"，是"一轮 scan 什么都不写"。
+    #   ⇒ 只许 `.get('formatted_title', '(保留库内原值)')`。
+    _bad_sub = [n.lineno for n in _ast.walk(_tree)
+                if isinstance(n, _ast.Subscript)
+                and getattr(n.value, "id", "") == "mt_col"]
+    if _bad_sub:
+        ok[0] = False
+        detail.append(f"✗ ⑦d `mt_col` 被**裸下标**取键（行 {_bad_sub}）⇒ "
+                      "`mt_col` 为空（= 不写这一列）时会 KeyError 崩掉整个 scan。"
+                      "改用 `mt_col.get('formatted_title', '(保留库内原值)')`。")
+
+    # ★★★ ⑦e 判两个 WHERE 常量**不许漂移**（2026-09-28 加）。
+    #
+    #   `db.QUEEN_PUBLISHED_WHERE`（C' 的判据口径）与 `db.CROSS_SITE_DEDUP_WHERE`
+    #   （转种口径）**共用同一个前缀**（`site_status='EXISTS'` + id 非空），
+    #   `QUEEN_PUBLISHED_WHERE` 只多出 `opencd_tid` 那一条。
+    #   ⇒ 若哪天有人改了其中一个而没改另一个，两处就"各写一份、谁也不看着谁"
+    #      —— 那正是 `ERR-META-03` 的形状。
+    #
+    #   ★ 判据（机械可判，不靠人读）—— ★★ 但**不能**按 " AND " 切了数个数：
+    #     第一版就是这么写的，实测**当场红**，而`QUEEN`/`CROSS` 其实**没漂移**:
+    #         QUEEN[:-1] = [... 'site_torrent_id != \'\'', 'opencd_tid IS NOT NULL']
+    #         CROSS      = [... 'site_torrent_id != \'\'']
+    #     ⇒ 因为 `opencd_tid IS NOT NULL AND opencd_tid != ''` 是**两条** AND 条件，
+    #       "只多一条"这个说法是我**数的层级搞错了**（数的是"条件件数"，
+    #       心里想的却是"多一个 opencd_tid 判据"）。
+    #     ★ 判据改成**看字符串前缀**：`QUEEN` 必须以 `CROSS` **逐字开头**，
+    #       且**多出来的尾巴**必须只谈 `opencd_tid`。这样与"多几条 AND"无关。
+    #
+    # ★★★ 2026-09-28 加：`db.TRANSFERABLE_WHERE`（转种实际口径）也要钉。
+    #   ★ 为什么它是**独立一层**而不是把 `transfer_rule` 并进 `CROSS`：
+    #     见 `db.TRANSFERABLE_WHERE` 上面的长注释 —— 并进去会让 `publish.py`
+    #     那条"应当恒为空"的差集断言**恒空**（检测器静默失效）。
+    #   ⇒ 判据：它必须以 `CROSS` **逐字开头**，且尾巴**正是** `transfer_rule='ALLOW'`。
+    #
+    #   ★★ 判据一律走**同一段代码**（一张"子常量 → 尾巴必须谈什么"的表）——
+    #     不许为 `TRANSFERABLE` 复制一遍上面那三段 if：那就是"两处各写一份判据"，
+    #     正是本条自检自己**要防**的那个形状。⇒ 用循环。
+    _prefix_checks = [
+        # (子常量名, 父常量名, 尾巴必须谈的词, 尾巴**不许**重复的词)
+        ("QUEEN_PUBLISHED_WHERE", "CROSS_SITE_DEDUP_WHERE", "opencd_tid",
+         ("site_status", "site_torrent_id")),
+        ("TRANSFERABLE_WHERE", "CROSS_SITE_DEDUP_WHERE", "transfer_rule",
+         ("site_status", "site_torrent_id", "opencd_tid")),
+    ]
+    try:
+        import db as _db
+        for _kid, _dad, _must, _dup in _prefix_checks:
+            _kv = getattr(_db, _kid, None)
+            _dv = getattr(_db, _dad, None)
+            if not isinstance(_kv, str) or not isinstance(_dv, str):
+                ok[0] = False
+                detail.append(f"✗ ⑦e `db.{_kid}` / `db.{_dad}` 不是字符串"
+                              f"（拿到 {type(_kv).__name__} / {type(_dv).__name__}）"
+                              f"⇒ 前缀判据**没测到东西**（ERR-META-14）")
+                continue
+            _tail = _kv[len(_dv):] if _kv.startswith(_dv) else None
+            if _tail is None:
+                ok[0] = False
+                detail.append(f"✗ ⑦e `db.{_kid}` 不以 `db.{_dad}` **逐字开头**：\n"
+                              f"          {_kid} = {_kv!r}\n"
+                              f"          {_dad} = {_dv!r}\n"
+                              f"     ⇒ 两个口径漂移了（ERR-META-03）。")
+            elif _must not in _tail:
+                ok[0] = False
+                detail.append(f"✗ ⑦e `{_kid}` 比 `{_dad}` 多出来的尾巴不谈"
+                              f" `{_must}`：{_tail!r}（这一层必须正是 `{_must}` 那条判据）")
+            elif any(d in _tail for d in _dup):
+                ok[0] = False
+                detail.append(f"✗ ⑦e `{_kid}` 多出来的尾巴**重复**了前缀里已有的条件："
+                              f"{_tail!r}（同一条判据写两遍 ⇒ 改一处漏一处）")
+        # ★ ⑦e-2：`TRANSFERABLE_WHERE` 的尾巴必须**恰好**是闸门④ 那一条
+        #   —— 光查"提到 transfer_rule"不够：`transfer_rule != 'DENY'`
+        #   也会通过上面那条，而它与闸门④（只放行 `ALLOW`）**语义相反**
+        #   （空 / NEED_CONFIRM 在闸门④ 是**拦**，在 `!= 'DENY'` 下是**放**）。
+        #   ★ 这是本条自检最该防的形态：**判据提到了对的词，却问了个错的问题**。
+        _t = getattr(_db, "TRANSFERABLE_WHERE", None)
+        _c = getattr(_db, "CROSS_SITE_DEDUP_WHERE", None)
+        if isinstance(_t, str) and isinstance(_c, str) and _t.startswith(_c):
+            _tail2 = _t[len(_c):].strip()
+            if _tail2 != "AND transfer_rule = 'ALLOW'":
+                ok[0] = False
+                detail.append(
+                    f"✗ ⑦e-2 `db.TRANSFERABLE_WHERE` 的尾巴必须是**逐字**"
+                    f" `AND transfer_rule = 'ALLOW'`（闸门④ 只放行 ALLOW），"
+                    f"实测 = {_tail2!r}\n"
+                    f"     ★ 注意：`transfer_rule != 'DENY'` 之类**也会**含"
+                    f"`transfer_rule` 这个词而通过 ⑦e ⇒ 所以这一条必须**逐字**比。")
+
+        # ★★★ ⑦e-3（2026-09-28 加）：**把"AST 能不能抽到这些常量"变成判据。**
+        #
+        #   ★ 起因（实测，就发生在加 `TRANSFERABLE_WHERE` 的当天）：
+        #     本仓库有**三处**工具用「AST 抽取 `db.py` 里的常量字符串」这一招
+        #     （`tools/fix_onsite_titles_and_subtitles.py`、`tools/fix_no_torrent_file_status.py`、
+        #      `tools/_probe_a3_risk.py`、`tools/_probe_280_vs_16.py`），
+        #     理由一致：**`import db` 会连 `config` 一起拉**，而 `config` 在 import
+        #     期就 `require_env()`（`QB_PASS` 等）⇒ 没有 `.env` 的机器上连工具都起不来。
+        #   ★★ 而 `TRANSFERABLE_WHERE` 的定义是
+        #        `CROSS_SITE_DEDUP_WHERE + " AND transfer_rule = 'ALLOW'"`
+        #      ⇒ `ast.literal_eval` **不认 `Name` 节点**，实测直接
+        #        `ValueError: malformed node or string … Name(id='CROSS_SITE_DEDUP_WHERE')`。
+        #   ⇒ 于是出现一个**很坏的组合**：常量在**运行时**（`import db`）完全可用，
+        #     而在**静态抽取**时抽不到 ⇒ 坏掉的是**工具**，不是被改的功能。
+        #     而工具坏的方式是"跑到那一步才 `ValueError`"（或 `assert` 失败），
+        #     **不是构建期报错** —— 也就是说，它会在**半夜、在 NAS 上、在你要用它
+        #     查一个紧急问题时**才炸。
+        #   ★ 判据：**这几个常量的字面值必须能被 `ast.literal_eval` 直接解出来**
+        #     （即：不许写成对另一个常量的引用拼接）。
+        #     ⇒ 这样"谁能被静态抽"就有了一条**构建期的**判据，而不是靠每个工具的
+        #       作者自己去踩。
+        #   ★ 为什么**不是**"把所有工具改成能解引用"：那要改 4 个文件、且每个都会
+        #     再长一段 `eval` 逻辑（`_probe_280_vs_16.py` 里那段就是旁证：它已经
+        #     不得不自己实现一遍顺序求值）。**把复杂度摁在一个地方**（把字面值写全）
+        #     比让它扩散到 4 个工具里更安全。
+        #   ★★ 为什么**不**干脆用 `import db` 取常量：见上 —— `config` 的 import 期
+        #      检查会让工具在没有 `.env` 的机器上起不来。这条**不是**风格问题。
+        _literals = [
+            "PENDING_PUBLISH_WHERE", "CROSS_SITE_DEDUP_WHERE",
+            "QUEEN_PUBLISHED_WHERE", "TRANSFERABLE_WHERE",
+            "STALE_CONDITION", "EDIT_RULE_GUARD",
+        ]
+        import ast as _ast2
+        import pathlib as _pl
+        _db_src = _pl.Path(__file__).resolve().parent / "db.py"
+        if not _db_src.exists():
+            ok[0] = False
+            detail.append(f"✗ ⑦e-3 找不到 db.py（{_db_src}）⇒ 抽不到东西"
+                          f"（这条判据**没测**，不是通过 —— ERR-META-14）")
+        else:
+            _assigns = {}
+            for _n in _ast2.parse(_db_src.read_text(encoding="utf-8")).body:
+                if isinstance(_n, _ast2.Assign):
+                    for _tg in _n.targets:
+                        if isinstance(_tg, _ast2.Name):
+                            _assigns[_tg.id] = _n.value
+            _unextractable = []
+            for _nm in _literals:
+                _node = _assigns.get(_nm)
+                if _node is None:
+                    _unextractable.append((_nm, "db.py 里找不到这个赋值"))
+                    continue
+                try:
+                    _ast2.literal_eval(_node)
+                except Exception as _e:                          # noqa: BLE001
+                    _unextractable.append((_nm, f"{type(_e).__name__}: {str(_e)[:60]}"))
+            if _unextractable:
+                ok[0] = False
+                detail.append(
+                    "✗ ⑦e-3 这些常量**不能**被 `ast.literal_eval` 静态解出：\n"
+                    + "\n".join(f"        · {n}: {why}" for n, why in _unextractable)
+                    + "\n     ⇒ ★ 本仓库有 3~4 处**工具**正是靠 AST 抽 `db.py` 的常量"
+                      "（因为 `import db` 会触发 `config` 的 import 期环境变量检查）。"
+                      "常量一旦写成'对另一个常量的引用拼接'，那些工具就会在**运行时**"
+                      "（而不是构建期）才炸。\n"
+                      "     ★ 修法：**把字面值写全**（哪怕与前缀常量重复一段），"
+                      "并在旁边注释里说明'重复是刻意的、理由是 ⑦e-3'。")
+    except Exception as e:                                        # noqa: BLE001
+        ok[0] = False
+        detail.append(f"✗ ⑦e 读 `db` 的 WHERE 常量失败：{type(e).__name__}: {e}")
+
+    return ok[0], detail
 
 
 def create_musopia_torrent(content_path, save_path):
@@ -119,6 +551,10 @@ def main():
     conn.close()
 
     stats = {"skipped": 0, "no_log": 0, "ok": 0, "failed": 0, "skipped_no_log": 0}
+    # ★ C'（2026-09-28）：皇后路**没写** `formatted_title` 的条数（= 库内既不是皇后原文、
+    #   快照又给不出原文）。**必须是个显式数字**，不能只印在滚动日志里 ——
+    #   `ERR-META-14`：兜底/跳过不许静默。
+    _missing_title = 0
 
     for torrent in torrents:
         info_hash = torrent.hash
@@ -196,14 +632,56 @@ def main():
             tracklist, disc_count=len(logs), fallback=name,
             mapped_json=mj, is_opencd=bool(oid))
 
-        # ★ 把"来源"印出来（`ERR-META-14`：来源为空不许印成"映射成功"）——
+        # ★★ 把"来源"印出来（`ERR-META-14`：来源为空不许印成"映射成功"）——
         #   否则「全 N 曲」既是"本来就没有皇后副标题"、又是"没取到皇后信息"，
         #   两种相反的结论排出来一模一样。
         if oid:
             _src = "皇后路, 取 mapped_json" if mj else "皇后路, ★ 无 snapshot ⇒ 退回曲目数"
         else:
             _src = "抓轨路(曲目数)"
-        print(f"✔ 主标题: {formatted_title}")
+
+        # ══════════════════════════════════════════════════════════════════
+        # ★★★ C'（2026-09-28）：**皇后路不写 `formatted_title`**
+        # ══════════════════════════════════════════════════════════════════
+        # 病：`parse_title()` 对皇后原名做**二次拆分**（按 `-` 切 + 吞括号/方括号），
+        #     产出畸形标题（实测四例见 `parse_title` 的 docstring）。删尾缀治不了它。
+        #
+        # 药：**这一列的唯一权威是 `opencd_ingest.build_row()`**（= `mapped.title`，
+        #     皇后原文）。scan 是**重扫**，不该推翻上游写的这一列。
+        #
+        # ★ 为什么"不传"是安全的（**实测，不是读注释**）：`db.save_task()` 的
+        #   UPSERT 只 SET **显式传入的列**（`db.py:945`）。我照抄它的 SQL 在假库上
+        #   跑过，配三个阴性对照：
+        #     · 不传 ⇒ 库里原值**一字不动**（且 `updated_at` 也不刷）
+        #     · 传个真不同的值 ⇒ **真的改掉**（证明那条 SQL 真会写 ⇒ 上一条的
+        #       "没变"是真的"没覆盖"，不是"语句没生效"）
+        #     · 新行不传 ⇒ 该列 = NULL
+        #   ⇒ ★★ 所以"不传"的**前提**是 `build_row` 已经写过这一列。下面对
+        #     "库里也没有"的情况**不静默**（报出来），这是 `ERR-META-14` 的纪律：
+        #     兜底值不许冒充真结果。
+        #
+        # ★ 为什么不在 `parse_title()` 里删掉拼接：**抓轨路（无 `oid`）仍然要它**。
+        #   ⇒ 分流点是"谁写库"，不是"算术要不要做"。
+        #
+        # ★★★ 2026-09-28 **返工**：这里原先用一个 `mt_override = None` 表示"照旧写"，
+        #   再用 `if mt_override:` 决定打印 —— **一个变量担了两个意思**
+        #   （"Nothing" 与 "要不要写"）。实测（假库三例）立刻暴露：
+        #     · 抓轨路 `oid` 为空 ⇒ 不进 `if oid` ⇒ 保持 `None` ⇒ `mt_col = {}`
+        #       ⇒ **抓轨路的标题从此不再被写**（本该照写的），而且**一声不响**。
+        #   ⇒ 三态（写什么 / 不写）已抽到 `_title_write_plan()`（纯函数，可脱库单测），
+        #     打印读 `mt_src`（来源），**不再拿 `mt_col` 的真假当判据**。
+        mt_col, mt_src, mt_why = _title_write_plan(oid, mj, formatted_title)
+        if mt_why:
+            print(f"   ⚠️  {mt_why}")
+            _missing_title += 1
+
+        # ★★★ 打印的**取值**只能从 `mt_col`（那才是写进库的东西）来，
+        #   `mt_src` **只当标签**。两者**绝不许各读一个变量** ——
+        #   实测踩过（变异 X2）：`mt_src` 说"抓轨路"、`mt_col` 却是空的（不写这一列），
+        #   于是 `mt_col['formatted_title']` 抛 **KeyError** ⇒ **整个 `scan` 阶段崩掉**。
+        #   ★ 那不是"测试红"，在生产里是"一轮 scan 什么都不写"。
+        #   ⇒ 用 `.get(…, 默认)`：**"不写这一列"必须只能印成"(保留库内原值)"，不许崩**。
+        print(f"✔ 主标题: {mt_col.get('formatted_title', '(保留库内原值)')}   ← 来源: {mt_src}")
         print(f"✔ 副标题: {small_descr or '(空)'}   ← 来源: {_src}")
         print(f"📄 日志: {len(logs)} 个 [" + ", ".join(x['label'] for x in logs) + "]")
         print(f"🎵 曲目: {len(tracklist.splitlines())} 行")
@@ -251,6 +729,10 @@ def main():
         #
         # ★ 判据要**读库现况**，不能靠"这一轮 scan 里它是什么"（那是上一轮的结论）。
         # ★ `--recheck` 是**显式**要重做 ⇒ 它有权推翻；默认路径无权。
+        #
+        # ★★★ 同理（C'，2026-09-28）：`formatted_title` 对皇后路也**不是 scan 该写的列**
+        #   —— 它的权威是 `opencd_ingest`。⇒ 用 `**mt_col` 把"写不写标题、写什么"
+        #   收成**一个显式三态**注入点（见上面那段），而不是在 SQL 层做条件。
         if not args.recheck:
             prev = db.get_status(info_hash)
             if prev in db.PROTECTED_STATUSES:
@@ -258,7 +740,6 @@ def main():
                 db.save_task(
                     info_hash=info_hash,
                     torrent_name=name,
-                    formatted_title=formatted_title,
                     cover_url=cover_url,
                     torrent_file=torrent_file,
                     small_descr=small_descr,
@@ -267,6 +748,7 @@ def main():
                     log_filename=log_filename,
                     logs_json=json.dumps(logs, ensure_ascii=False),
                     content_path=content_path,
+                    **mt_col,
                 )
                 stats["ok"] += 1
                 continue
@@ -276,7 +758,6 @@ def main():
             torrent_name=name,
             status="SUCCESS",
             reason="",
-            formatted_title=formatted_title,
             cover_url=cover_url,
             torrent_file=torrent_file,
             small_descr=small_descr,
@@ -285,6 +766,7 @@ def main():
             log_filename=log_filename,
             logs_json=json.dumps(logs, ensure_ascii=False),
             content_path=content_path,
+            **mt_col,
         )
         stats["ok"] += 1
 
@@ -313,6 +795,16 @@ def main():
     print(f"🎯 扫描完成：新处理 {stats['ok']} 个 | 缓存跳过 {stats['skipped']} 个 | "
           f"无日志 {stats['no_log']} 个 | 已知无日志(短路) {stats['skipped_no_log']} 个 | "
           f"失败 {stats['failed']} 个")
+    # ★ C'：把"没写标题"显式报出来。★ 它**不是**失败（发布不会被它拦下，
+    #   因为 `publish.py` 渲染时也是从 `mapped_json` 取皇后原文），
+    #   但它是"快照缺失/字段改名"的**唯一可见信号** ⇒ 报 0 也要印。
+    if _missing_title:
+        print(f"⚠️  其中 **{_missing_title}** 条是皇后路、但**没写** `formatted_title`"
+              f"（快照缺失或 `mapped_json.title` 为空）。")
+        print("   ⇒ 这两条原因**处置不同**：无快照 ⇒ 跑 `crawl`；有快照但 title 空 ⇒ 查皇后字段名。")
+        print("   ⇒ ★ 它们**不会**被 scan 用一个畸形标题顶替 —— 宁可留空（`ERR-META-14`）。")
+    else:
+        print("✔ 皇后路标题零条缺失（本轮没有「该写却写不出」的行）")
     # ★★ 口径提醒（**别把两组数相减/相加**，它们是两个量纲）——
     #    2026-09-22 实测踩过，用假 qB + 假库跑 `run.main()` 复现：
     #      · 「无日志 N 个」  = **本轮**扫到几个没 .log 的 ⇒ 是**本轮增量**（qB 口径）
@@ -336,4 +828,39 @@ def main():
 
 
 if __name__ == "__main__":
+    import sys as _sys
+    if "--selftest" in _sys.argv[1:]:
+        # ★ 自检走**独立出口**（照 `cover_fetch.py` / `descr.py` 的成例，含 `--json`）：
+        #   它**不 import config**（那是要 QB_PASS 的）⇒ 本机/容器里都能跑。
+        _sys.stdout.reconfigure(encoding="utf-8")
+        _ok, _detail = selftest()
+        if "--json" in _sys.argv[1:]:
+            import json as _json
+            print(_json.dumps({"script": "run.py --selftest", "ok": _ok,
+                               "total": 0, "exit": 0 if _ok else 1},
+                              ensure_ascii=False))
+            _sys.exit(0 if _ok else 1)
+        print("=" * 74)
+        print("run.py 离线自检 —— C' 标题三态（纯本地，**不连 qB / 不连库 / 零请求**）")
+        print("=" * 74)
+        print("  ① 抓轨路           → 写 parse_title() 的产物")
+        print("  ② 皇后路 + 有快照   → 写 mapped_json.title（皇后原文）")
+        print("  ③ 皇后路 + 无快照   → **不写**，且回报原因")
+        print("  ④ 皇后路 + title 空 → 与③同判据、不同原因")
+        print("  ⑤ 损坏快照不抛异常  ⑥ title=0 不冒充原文  ⑦ 两个注入点都在")
+        print("  ⑦e 三个 WHERE 常量不许漂移（QUEEN / TRANSFERABLE 都必须以 "
+              "CROSS 逐字开头，")
+        print("      且 TRANSFERABLE 的尾巴**逐字**等于闸门④ 那条 ALLOW）")
+        print("  ⑦e-3 这些常量必须能被 ast.literal_eval 静态解出"
+              "（否则靠 AST 抽常量的那 4 个工具会在运行时才炸）")
+        print()
+        if _detail:
+            print("\n".join(_detail))
+            print()
+        print("=" * 74)
+        if _ok:
+            print("✅ 自检通过")
+        else:
+            print(f"❌ 自检失败：{len(_detail)} 项不符")
+        _sys.exit(0 if _ok else 1)
     main()

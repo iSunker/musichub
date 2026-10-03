@@ -32,6 +32,10 @@
 ★ 字段值的出处（都是**实测**，不是推断；详见 PLAN-crabpt.md 附录 C）
 ═══════════════════════════════════════════════════════════════════════════
   · 表单 action `takeupload.php` / 分组 `[4]` / `type=408`  —— 发布页原文
+    ★★ 2026-09-28 订正：**`takeupload.php` 是 POST 端点（提交），不是可读的页面**；
+       **空白表单页是 `GET /upload.php`**（站点导航「发布」指向它）。
+       ⇒ 读基线要用 `/upload.php`，提交才用 `takeupload.php`。见
+         `CrabptClient.fetch_upload_form()` 的 docstring（那里记着两个 bug）。
   · 六个 select 的全部选项                              —— 发布页 `<select>` 逐项读出
   · `tags[4][]` 37 项的「值 → 名字」                    —— BeautifulSoup 读 `<label>`
   · `source_sel` 的用法（音乐多为 Other，WEB 发行才用 WEB-DL）—— 四条真实详情页反推
@@ -48,6 +52,7 @@ import time
 import requests
 
 import config
+import net   # ★ 统一网络出口（强制 IPv4）——新 Session 一律走 net.new_session()
 import db
 import descr
 import opencd_map
@@ -571,7 +576,7 @@ class CrabptClient:
         self.interval = request_interval
         self._last_request = 0.0
 
-        self.sess = requests.Session()
+        self.sess = net.new_session()
         self.sess.headers.update({
             "User-Agent": UA,
             "Cookie": self.cookie,
@@ -599,6 +604,26 @@ class CrabptClient:
         self._throttle()
         kw.setdefault("timeout", 60)
         return self.sess.post(self._url(path), **kw)
+
+    def download_torrent(self, torrent_id):
+        """把**蟹黄堡服务端**的那个 `.torrent` 拉回来（回加做种用）。返回 bytes 或 None。
+
+        ★★ 为什么必须从**站点**下、不能拿本地那份：本地 `tasks.torrent_file` 是
+          `run.py` 用**乌托邦**的 announce 生成的；而蟹黄堡在收下后**会重写**它
+          （换成 `https://crabpt.vip/announce.php?passkey=<蟹黄堡passkey>`，
+           连 `name`/`piece length` 都可能变 ⇒ **infohash 也变**）。
+          2026-10-02 实测：同一条（皇后 `69c5ee1b…`）乌托邦种子 infohash
+          `edda64b7…`、蟹黄堡服务端种子 `03c17802…`，**两者不同**，
+          但 80 个文件与总大小**逐字节相同**。
+          ⇒ 要"做种给蟹黄堡"，回加的**必须**是这份带蟹黄堡 announce 的种子。
+          ★ 拿本地那份去回加 = 做种报到乌托邦 ⇒ 蟹黄堡仍记 hit-and-run（假成功）。
+        ★ 判据同 `musopia.MusopiaClient.download_torrent`：HTTP 200 且首字节 `d`
+          （bencode dict）—— 站点在没登录/无权限时回的是 HTML（首字节 `<`）。
+        """
+        r = self.get("/download.php", params={"id": torrent_id})
+        if r.status_code == 200 and r.content.startswith(b"d"):
+            return r.content
+        return None
 
     def have_cookie(self):
         return bool((self.cookie or "").strip())
@@ -643,26 +668,53 @@ class CrabptClient:
     # ---------- 发布页（★ 基线 + 可用性预报）----------
 
     def fetch_upload_form(self):
-        """GET `takeupload.php`，返回 `(form, actions, action, csrf)`。
+        """GET `upload.php`（**空白发布表单页**），返回 `(form, actions, action, csrf)`。
+
+        ★★★ 2026-09-28 修的两个 bug（**两个既有，且互为掩护** —— 详见下面）：
+          ① **`GET takeupload.php` 就是"提交"** —— `takeupload.php` 是 **POST 端点**，
+             站点导航里的「发布」指向的是 **`/upload.php`**（空白表单页）。
+             实测：GET `takeupload.php` → 站点回 **「上传失败！请填写必填项目」**，
+             **HTTP 200 + 正常导航**，页面上只剩一个搜索 <form>（`action='search.php'`）。
+             ⇒ 于是"四个核心字段全缺"这条报错**看起来像"页面版式变了 / 没权限"**，
+               而真相是**我们拿提交端点当读了页面** —— 这一点整条流水线从没验过，
+               直到 2026-09-28 第一次真发才暴露（`publish.py --site crabpt` 真发）。
+          ② **`bs.find("form")` 取到的是搜索框，不是发布表单。**
+             实测真实发布页有**两个** <form>：
+                 <form action="search.php" method="get" target="_blank">   ← 第 1 个
+                 <form id="compose" enctype="multipart/form-data"
+                       action="takeupload.php" method="post" name="upload"> ← 第 2 个 ★
+             ⇒ 必须 `bs.find("form", id="compose")`。
+             ★★ 这条 bug **即使 ① 修好了也照样存在**（拿到正常发布页，`find("form")`
+               仍然只看到搜索框的 2 个字段）⇒ **两处必须一起改**。
 
         ★★ 为什么发布前**必须**先读一次这张页面（两个理由，第二个才是关键）：
           ① 它是**基线**：`build_fields()` 产出的是 12 个字段，而站点那张表单
-             还有别的字段（如 `technical_info` 我们只能留空）。先读一次，
+             实际有 **101** 个字段（编辑器按钮、别的分类组等）。先读一次，
              才能把"我们没填的"与"站点没有的"分开。
           ② ★★★ **它是唯一能在提交前发现"账号不能发种"的判据。**
              `ERR-SITE-01`（乌托邦实测）：Cookie 有效 ≠ 有发种权限 ——
              权限被关后站点回的是 **HTTP 200 的普通页**，不是 302、不是报错。
              ⇒ 若不做这一步，我们会带着一个"看着成功"的 200 走完整个提交，
                把失败**留给不可逆的那一步**才发现。
-             本函数把三种情况**分开**报，不合并：
-               · 没有表单            ⇒ 抛（不是发布页：权限被关 / 页面版式变了）
-               · 有表单但缺必需字段  ⇒ 列出缺了哪些，仍抛
-               · 有表单且字段齐      ⇒ 返回基线，允许往下走
+
+        ★★★ 判据本身也改了（这是本次真正的教训）：
+          旧判据是"有 form 但缺 4 个字段 ⇒ 版式变了"。实测**它误导了人** ——
+          缺字段的真实原因是**选错了 form**（见 ②），而不是站点改了名字。
+          新判据 = **找不到 `#compose` 表单** ⇒ 这不是发布页。三种情况**分开报**：
+            · 页面退回登录页            ⇒ Cookie 失效
+            · 没有 `#compose` 表单      ⇒ 不是发布页（权限被关 / 版式变了 / 路径变了）
+            · 有 `#compose` 但缺 4 个字段 ⇒ 站点改名了（**保留这条**，但排最后）
+          ★ 纪律（`ERR-SITE-06` 同族）：一个报错若并列多种原因，就必须同时给出
+            **分辨它们的判据**；否则读的人只能猜，而猜错的代价已经实测过。
 
         ★ 返回的 `form.action` 是**站点自己写的** action（相对或绝对），
           提交要用它，不要用我们猜的路径。
         """
-        r = self.get("/takeupload.php")
+        # ★★ 读的是**空白表单页** `/upload.php`，**不是** `takeupload.php`（那是提交端点）。
+        #    ★ 别"顺手改回 takeupload.php" —— GET 它 = 提交一个空表单（见上面 ①）。
+        #    ★ `/upload.php?type=408` 实测与无参形态**同构**（63,860 vs 63,877 字节，
+        #      同样是 2 个 form、`#compose` 101 字段）⇒ 用无参的更少假设。
+        r = self.get("/upload.php")
         if r.status_code != 200:
             raise SiteError(f"取蟹黄堡发布页失败，HTTP {r.status_code}")
         body = r.text or ""
@@ -670,30 +722,46 @@ class CrabptClient:
             raise SiteError("蟹黄堡 Cookie 已失效（发布页退回登录页）")
 
         bs = __import__("bs4").BeautifulSoup(body, "html.parser")
-        form = bs.find("form")
+        # ★★ 按 **id** 选，不按"第几个"选：页面上第 1 个 form 是**搜索框**。
+        form = bs.find("form", id="compose")
         if form is None:
             # ★ 把"页面里究竟有什么"报出来 —— 这是 ERR-SITE-01 那个
             #   「HTTP 200 + 看不出原因」的**解药**：至少要能看出这不是发布页。
+            #   ★★ 顺带把"页面上一共有几个 form、各自是什么"打出来：
+            #     本次就是因为只报"缺字段"，才把"选错 form"读成了"版式变了"。
             looks_logged_in = "userdetails.php" in body
+            seen = []
+            for f in bs.find_all("form")[:4]:
+                seen.append(f"id={f.get('id')!r} action={f.get('action')!r}")
+            # ★ 若是提交端点被 GET 了，页面标题会是「上传失败！」—— 单独指出来，
+            #   因为这跟"权限/版式"是**完全不同**的修法（见本函数 docstring ①）。
+            is_submit_err = ("上传失败" in body) or ("请填写必填项目" in body)
             raise SiteError(
-                "蟹黄堡 takeupload.php 里**没有 <form>** ⇒ 这不是发布页。"
+                "蟹黄堡发布页里**没有 `#compose` 表单** ⇒ 这不是发布页。"
                 f"（HTTP 200、{len(body)} 字节、"
-                f"{'页面上有 userdetails 链接（登录态在）' if looks_logged_in else '页面上没有 userdetails 链接'}）"
-                "。★ 见 ERR-SITE-01：Cookie 有效 ≠ 有发种权限 —— "
-                "这类失败在 NexusPHP 上就是回一张 HTTP 200 的普通页。"
-                "⇒ 请确认该账号的**发种权限**（或页面版式是否已变）。")
+                f"{'页面上有 userdetails 链接（登录态在）' if looks_logged_in else '页面上没有 userdetails 链接'}、"
+                f"页面上的 form: {seen or '（一个都没有）'}）"
+                + ("。★★ 页面正文是「上传失败！请填写必填项目」⇒ **这是提交端点的响应**："
+                   "路径被改回了 `takeupload.php`（GET 它 = 提交空表单）。"
+                   "正确路径是 `/upload.php` —— 见本函数 docstring ①。"
+                   if is_submit_err else
+                   "。★ 见 ERR-SITE-01：Cookie 有效 ≠ 有发种权限 —— "
+                   "这类失败在 NexusPHP 上就是回一张 HTTP 200 的普通页。"
+                   "⇒ 请确认该账号的**发种权限**（或页面版式/路径是否已变）。"))
 
         actions = {i.get("name"): i for i in form.find_all(["input", "select", "textarea"])
                    if i.get("name")}
         # ★ 我们的关键文件字段叫什么 —— 不写死 `file`：NexusPHP 各站可能不同名，
         #   而写死一个错名字的后果是**上传的是空文件**（站点多半照收）。
         #   实测蟹黄堡是 `file`，但判据走"在不在 form 里"。
+        # ★★ 这条现在是**最后一道**（`#compose` 已经找到了才走到这里）——
+        #   它剩下的唯一含义是"站点把某个字段改名了"，而**不再是**"选错了页面"。
         required = [k for k in ("type", "name", "descr", "small_descr") if k not in actions]
         if required:
             raise SiteError(
-                f"蟹黄堡发布页缺了这些字段：{required} ⇒ 页面版式已变，"
-                f"本适配层的字段名可能已过期（见 PLAN-crabpt.md 附录 C），"
-                f"**先复核再发布**。")
+                f"蟹黄堡 `#compose` 表单（已找到，{len(actions)} 个字段）缺了这些字段："
+                f"{required} ⇒ 站点把这些字段**改名了**，本适配层的字段名过期"
+                f"（见 PLAN-crabpt.md 附录 C），**先复核再发布**。")
         csrf = {k: v for k, v in actions.items()
                 if k.lower() in ("csrf_token", "csrf", "_token")}
         return {

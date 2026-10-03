@@ -17,6 +17,7 @@ import requests
 from bs4 import BeautifulSoup
 
 import config
+import net   # ★ 统一网络出口（强制 IPv4）——新 Session 一律走 net.new_session()
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
@@ -40,7 +41,7 @@ class MusopiaClient:
         self.interval = request_interval
         self._last_request = 0.0
 
-        self.sess = requests.Session()
+        self.sess = net.new_session()
         self.sess.headers.update({
             "User-Agent": UA,
             "Cookie": self.cookie,

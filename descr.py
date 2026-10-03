@@ -768,10 +768,40 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         #      · 没有才 `detect_medium()` 从标题/文件名猜（qB 本地抓轨路）。
         #    ★ 注意 `"0"` 是**合法值**（= 请选择一项），所以判据是
         #      `is not None` 而不是真值判断 —— 否则 `"0"` 会被当成"没给"而退回猜。
+        #
+        #    ★★★ 2026-09-28 再收一刀（**皇后路不许猜媒介**）：
+        #
+        #      上面那条规则只解决了"快照有值 vs 猜"的优先级，**没解决"快照根本没这一格"**。
+        #      而 `detect_medium()` 的末句是**无条件** `return MEDIUM["CD"]`
+        #      —— 它从名字里找 SACD/DVD/VCD，**全找不到就回 CD**。对 qB 本地抓轨路
+        #      那是**对的**（那条流程本来就只做 CD 抓轨，见 `detect_medium` 的注释）；
+        #      但对**皇后路**是**错的**：皇后页面明写 `媒介：Web` 的种子会被判成 CD。
+        #
+        #      ★ 为什么"皇后路没有 `medium_sel` 键"= 不许猜：
+        #        `medium_sel` 这个键**只由** `opencd_map.map_all()` 产出
+        #        （`map_medium(info["medium"], info["format"])`，它才是"页面写明了什么"的正道）。
+        #        皇后行的 `task["medium_sel"]` 为空 ⇒ 只有两种可能：
+        #          ① 解析层这次没抓到「媒介」那一格，或
+        #          ② 那份快照是**早期**入库的（那时的 `map_all` 还没有这个键）。
+        #        两种都是**"不知道"** ⇒ 拿"不知道"去猜一个具体的 CD 就是
+        #        `ERR-META-14` 的形状（空来源不许印成"有结论"）。
+        #        ★ 而且这条**正好命中"网页下载"**：`Web`/`HI-RES` 恰恰是
+        #          `detect_medium()` **认不出**（→ CD）而 `map_medium()` **认得**（→ Other）的那类。
+        #
+        #      ★ 判据（阴性对照）：造一条 `opencd_tid` 有值、`medium_sel` 为 None、
+        #        标题里带 `Web` 的 task ⇒ 改前 `medium_sel[4] == "8"`（CD，错），
+        #        改后应为 `"0"`（请选择，= 如实说"不知道"）。
+        #      ★ 对 qB 本地抓轨路（`opencd_tid` 空）行为**完全不变** —— 那条支仍猜 CD。
         declared_medium = task.get("medium_sel")
         if declared_medium is not None:
             fields["medium_sel[4]"] = declared_medium
+        elif task.get("opencd_tid"):
+            # 皇后路 + 快照里没有这一格 ⇒ **留"请选择"，不猜**（见上）。
+            fields["medium_sel[4]"] = "0"
+            print("  ⚠️  皇后路快照里没有 `medium_sel` ⇒ 媒介留「请选择」"
+                  "（**不拿 CD 顶替**；那会把页面写明的 Web/HI-RES 说成 CD）")
         else:
+            # qB 本地抓轨路：本来就是 CD 抓轨 ⇒ 猜 CD 是对的（行为未变）。
             fields["medium_sel[4]"] = detect_medium(title, raw)
 
         # ★ 同理：`audiocodec_sel` 也**优先用页面已写明的**，猜是兜底。

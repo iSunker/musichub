@@ -199,7 +199,15 @@ def build_stages():
     #      校验第二把钥匙（`PUBLISH_I_AM_HERE`）。**不传 `--auto` ⇒ 那把钥匙
     #      根本不校验** ⇒ 无人值守路径上少一道保险（`ERR-META-12`）。
     if env_bool("ENABLE_PUBLISH_CRABPT", False):
-        cmd = ["python", "publish.py", "--site", "crabpt"] + apply_flag("--auto")
+        # ★★ `--yes` 与 `--auto` **都要**（2026-10-02 修）：
+        #   `--yes` 跳过交互确认；`--auto` 校验第二把钥匙。
+        #   ★ 原先这里只传了 `--auto`、**漏了 `--yes`** ⇒ 容器里没有 TTY，
+        #     `input()` 立刻 EOF ⇒ 蟹黄堡发布阶段**每次都以 EOFError 崩掉**、
+        #     一条都发不出去（而乌托邦那条（161 行）一直是 `--yes --auto` 两个都传）。
+        #   ⇒ 这正是 ERRATA 里"保险看起来在、其实没生效"那族（第二把钥匙在 `--auto`
+        #     为真时才校验，所以 `--auto` 必须在；而少了 `--yes` 则连门都进不去）。
+        cmd = (["python", "publish.py", "--site", "crabpt"]
+               + apply_flag("--yes", "--auto"))
         n = env_int("CRABPT_MAX_PER_CYCLE", 1)
         if n:
             cmd += ["--limit", str(n)]
@@ -678,6 +686,95 @@ def _pending(stage):
         return 0
 
 
+# ★★ 延迟回加队列的"排空"（2026-10-03 加）—— 延迟做种的执行者。
+#
+# 干什么：`publish.py` 发布成功后，若 `SEED_DELAY_MIN>0`，**不立即**把种子加进
+#   qB，而是写进 `/data/readd_queue.json`（含 `.torrent` 字节）。本函数在主循环
+#   里被调用，到点了才 `torrents_add` —— qB 收到后**自己**校验、自己做种。
+#
+# ★ 为什么塞进 `opencd2musopia` 的主循环（用户 2026-10-03 拍板）：
+#   不新开容器、不塞进 qbtune（那个是下载调度、可停）；复用本容器已有的 30s
+#   主循环节奏即可，天生满足"到点±30s 内回加"的精度要求。
+#
+# ★★ 为什么放在 `for stage in stages` **之外**、主循环末尾：
+#   它是**事件驱动**（到点必须做），不是按 interval 跑的阶段 ⇒ 塞进 stage 框架
+#   会被 interval/退避/pending 语义扭曲。主循环末尾一小步最干净。
+#
+# ★★★ 为什么失败要**留在队列里重试**、且**绝不 raise**：
+#   这是 daemon 主循环里的一步 —— 抛出去会打断**所有**阶段。qB 连不上是常态
+#   （它现在还在崩），必须降级：本轮跳过、下轮再来，且 attempts 有上限防死循环。
+#
+# ★ 幂等：`torrents_add` 对**已在 qB 里**的 infohash 是安全的（qB 会忽略重复）。
+#   即使"别的容器抢先加了"（已知干扰），这里再 add 一次也无害 ⇒ 不额外检测。
+#   见 `readd_queue.py` 模块 docstring 的"已知干扰"。
+READD_MAX_ATTEMPTS = 20          # 每轮最多处理几条（别让一次排空卡住主循环）
+READD_GIVE_UP = 96               # 一条试了这么多次还失败 ⇒ 放弃并报警（≈2 天）
+
+
+def _drain_pending_readds():
+    """到点的延迟回加条目 → `torrents_add`。**绝不 raise**（主循环的一步）。"""
+    try:
+        import readd_queue
+    except Exception as e:                                      # noqa: BLE001
+        log(f"⚠️  [readd] 无法 import readd_queue，跳过: {e}")
+        return
+    try:
+        due, rest = readd_queue.pop_due()
+    except Exception as e:                                      # noqa: BLE001
+        log(f"⚠️  [readd] 读队列出错，跳过本轮: {e}")
+        return
+    if not due:
+        return
+
+    # ★ 只在**真有到点条目**时才连 qB（没有待办就一条连接都不建）
+    try:
+        from qbittorrentapi import Client
+        qb = Client(host=config.QB_HOST, username=config.QB_USER,
+                    password=config.QB_PASS)
+        qb.auth_log_in()
+    except Exception as e:                                      # noqa: BLE001
+        # qB 连不上 ⇒ **不改队列**（due 条目原样留到 rest 里，下轮重试）。
+        # ★ 这里显式把 due 并回 rest 再写盘，否则 pop 出来的会因为"没 ack"
+        #   而在**盘上**依然是旧内容 —— 其实不必写，因为 pop_due 不落盘。
+        log(f"⚠️  [readd] qB 连不上，{len(due)} 条延迟回加顺延: {type(e).__name__}: {e}")
+        return
+
+    import base64
+    done, failed = [], []
+    for it in due[:READD_MAX_ATTEMPTS]:
+        note = it.get("note", "?")
+        try:
+            content = base64.b64decode(it["torrent_b64"])
+            qb.torrents_add(
+                torrent_files=content,
+                save_path=it.get("save_path") or "",
+                is_paused=False,
+                category=it.get("category") or "",
+            )
+            done.append(it)
+            log(f"✅ [readd] 延迟到点，已回加 qB（{note}）")
+        except Exception as e:                                  # noqa: BLE001
+            it["attempts"] = it.get("attempts", 0) + 1
+            if it["attempts"] >= READD_GIVE_UP:
+                log(f"❌ [readd] {note} 连续 {it['attempts']} 次回加失败，**放弃**"
+                    f"（种子已上站、不会做种，需人工介入）: {type(e).__name__}: {e}")
+                done.append(it)                                 # 从队列移除（放弃）
+            else:
+                failed.append(it)
+                log(f"⚠️  [readd] {note} 回加失败（第 {it['attempts']} 次），下轮重试: "
+                    f"{type(e).__name__}: {e}")
+
+    # 没在本轮处理的（超过 READD_MAX_ATTEMPTS 的）原样留下
+    leftover = due[READD_MAX_ATTEMPTS:]
+    try:
+        readd_queue.ack(
+            [it.get("infohash") for it in done],
+            rest + failed + leftover,
+        )
+    except Exception as e:                                      # noqa: BLE001
+        log(f"⚠️  [readd] 写回队列出错（成功的那几条可能下轮重复 add，无害）: {e}")
+
+
 def main():
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
@@ -844,6 +941,11 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
         #   这里再存一次是幂等的（内容相同），不会写坏。
         if skipped:
             save_state(state)
+
+        # ★ 延迟回加队列排空（2026-10-03）：到点的"延迟做种"在这里真正 add 进 qB。
+        #   放在 stage 循环**之外**（事件驱动，非 interval 阶段）；绝不 raise。
+        if not _shutdown:
+            _drain_pending_readds()
 
         if _shutdown:
             break

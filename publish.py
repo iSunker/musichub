@@ -77,6 +77,7 @@ import config
 import crabpt_site
 import db
 import descr
+import readd_queue
 import torf
 from musopia import LoginExpired, MusopiaClient, SiteError
 
@@ -100,7 +101,9 @@ def parse_args():
     #           点名它也**发不出去**，并会**逐条报出原因**（不静默跳过）。
     #   ★ 与 `--limit` 可叠加：先按 `--only` 收窄，再取前 `--limit` 条。
     ap.add_argument("--only", default="",
-                    help="只发布这些 info_hash（前缀即可，逗号分隔）。"
+                    help="只发布这些 **info_hash 前缀**（逗号分隔）。"
+                         "★ 只认 info_hash 前缀 —— **站点 id（site_torrent_id）不认**"
+                         "（传站点 id 会提示你该用哪个 info_hash，不会当成'库里没有'）。"
                          "★ 是与待发布队列取**交集**：点名但被闸门拦下的会被报出，"
                          "不会因此绕过闸门。默认空 = 不限制。")
     # ★ 2026-09-17：匿名改为**默认开启** —— 想具名发布要显式 --no-anonymous。
@@ -390,6 +393,19 @@ def readd_to_qb(qb, client, info_hash, torrent_id):
 
         # ★★ 参数**只有这三个**：save_path / is_paused / category。
         #   ★ 别加 layout（见 docstring）、别加 is_skip_checking（见 docstring）。
+        #
+        # ★★★ 延迟回加（2026-10-03）：`SEED_DELAY_MIN>0` 时**不立即** add，
+        #   而是把待回加记进 `/data/readd_queue.json`，由 `daemon.py` 主循环
+        #   15 分钟后代发（qB 收到后自己校验、自己做种）。理由与形态见
+        #   `readd_queue.py` 模块 docstring 与 `config.SEED_DELAY_MIN`。
+        #   ★ 默认 0 = 关闭 = 维持老行为（立即 add）。
+        if config.SEED_DELAY_MIN > 0:
+            readd_queue.enqueue(
+                content, save_path, config.PUBLISH_CATEGORY,
+                config.SEED_DELAY_MIN, note=f"乌托邦 {info_hash[:12]}…",
+            )
+            # ★ 延迟回加时**不做**下面的回加复核（种子还没进 qB，查必然为空）
+            return
         qb.torrents_add(
             torrent_files=content,
             save_path=save_path,
@@ -446,6 +462,132 @@ def readd_to_qb(qb, client, info_hash, torrent_id):
         except Exception as e:                              # noqa: BLE001
             print(f"    ⚠️  回加复核失败（不影响发布本身）: {type(e).__name__}: {e}")
     except Exception as e:
+        print(f"    ❌ 回加 qB 出错: {e}")
+
+
+def connect_qb():
+    """建一个已登录的 qBittorrent 连接；连不上返回 `None`（并**说清原因**）。
+
+    ★ 从 `main()` 里那段**原样**抽出来（乌托邦与蟹黄堡两条路共用同一份）。
+      ★ 不静默吞异常：连不上要打印，否则"没做回加"与"回加成功"在日志里
+        长得一样（`readd_to_qb` 的纪律）。
+    """
+    try:
+        from qbittorrentapi import Client
+        qb = Client(host=config.QB_HOST, username=config.QB_USER, password=config.QB_PASS)
+        qb.auth_log_in()
+        return qb
+    except Exception as e:                                  # noqa: BLE001
+        print(f"⚠️  连不上 qBittorrent ({e})，本次不做回加")
+        return None
+
+
+def readd_to_qb_crabpt(qb, client, info_hash, torrent_id):
+    """把蟹黄堡上的新种子**下载回来**加进 qB，做种路径**沿用乌托邦那条**的。
+
+    ★★★ 与 `readd_to_qb`（乌托邦）的**唯一实质区别**：**从蟹黄堡下种子**、
+      用**蟹黄堡那条**的 infohash 复核。其余纪律**逐条照搬**，理由见下 ——
+      别因为"看起来像"就把这段删掉复用 `readd_to_qb`：
+
+      ① **做种路径必须取乌托邦那条的 `save_path`**（不是按蟹黄堡的 id 找）。
+         ★ 为什么：蟹黄堡是**转种**（同一批文件先上乌托邦、再上蟹黄堡）。
+           qB 里**只有乌托邦那条**在跑（`tasks.info_hash` = 皇后原种，
+           与乌托邦种子对得上）；蟹黄堡种子是**新 infohash**（站点重写了
+           announce/piece length，2026-10-02 实测），**加它之前 qB 里没有它**
+           ⇒ 只能拿乌托邦那条的 `save_path` 当"文件在哪"的权威。
+         ★ 两条的文件**逐字节相同**（实测：同 name、同 80 文件、同总大小）
+           ⇒ 指同一个 `save_path` 是对的。
+      ② **种子字节来自蟹黄堡**（`client.download_torrent(torrent_id)`），
+         不是本地 `tasks.torrent_file`。
+         ★ 本地那份带的是**乌托邦** announce ⇒ 拿它回加 = 做种报到乌托邦、
+           蟹黄堡仍记 hit-and-run（**假成功**，比不做种更坏）。
+      ③ **不传 layout**（`is_root_folder`/`content_layout`）、
+         **不传 `is_skip_checking`** —— 逐字沿用 `readd_to_qb` 的教训
+         （传 layout ⇒ `NoSubfolder` ⇒ 文件错位 ⇒ 静默 `missingFiles`；
+          传 skip-checking ⇒ 关掉唯一能发现文件对不上的校验）。
+      ④ 复核按**蟹黄堡那份**的 infohash 查，且**分开说**"还没入库（正常）"
+         与"回加没发生（故障）"——`torrents_add` 是**异步**的。
+      ⑤ 失败**不算阶段失败**（不 `sys.exit`）：种子已上站（不可逆），
+         回加失败是本地问题，退避重试没意义（下一轮不会再发同一条）。
+      ⑥ **分类用 `CRABPT_PUBLISH_CATEGORY`**（不是乌托邦的 `PUBLISH_CATEGORY`）
+         —— 见下面 `torrents_add` 前的长注释，2026-10-03 接线。
+
+    ★ 依赖 `torf`（已在镜像里，`Dockerfile` 锁 `torf==4.2.7`）读 infohash。
+    """
+    if qb is None:
+        print("    ⚠️  回加跳过：本次没有可用的 qB 连接（启动时未连上，见上方警告）")
+        return
+    try:
+        # ① 做种路径：**乌托邦那条**（= 皇后原种 infohash）的 save_path
+        orig = qb.torrents_info(torrent_hashes=info_hash)
+        if not orig:
+            print("    ⚠️  qB 里找不到**乌托邦**那条原始种子，无法确定做种路径，跳过回加")
+            return
+        save_path = orig[0].save_path
+
+        # ② 种子字节：**蟹黄堡服务端**那份（带蟹黄堡 announce）
+        content = client.download_torrent(torrent_id)
+        if not content:
+            print("    ❌ 从蟹黄堡下载种子文件失败，跳过回加")
+            return
+
+        # ③ 参数只有这三个（见 docstring ①③）
+        #
+        # ★★★ `category` 用**蟹黄堡自己的**键（`CRABPT_PUBLISH_CATEGORY`），
+        #   不是乌托邦的 `PUBLISH_CATEGORY`（2026-10-03 修）。
+        #   原先这里和 `readd_to_qb`（乌托邦）**共用** `PUBLISH_CATEGORY` ⇒
+        #   **两站的种子混进同一个 qB 分类**，"哪条种子属于哪一站"在 qB 里
+        #   分辨不出、也没法按站统计。
+        #   ★ `config.CRABPT_PUBLISH_CATEGORY` 早在 2026-09-24 就已**定义**
+        #     （`config.py` 里注释白纸黑字写着"与乌托邦分开"），
+        #     但**没有任何代码引用它** —— 键定义了、意图写了、**接线漏了**
+        #     （`ERR-ENV-03` 形状：看着配好了，其实那条路根本没用它）。
+        #     这正是本行改动的唯一目的：把那条**已存在的意图**接上。
+        #   ★★ 只影响**此后新加**的种子；qB 里**已有**的蟹黄堡种子仍挂在
+        #     `PUBLISH_CATEGORY` 名下，**不会自动迁移**（要不要回迁是另一个决定）。
+        #   ★ 另外：qB **不会自动创建**该分类 ⇒ 需在 qB 里先建好
+        #     `CRABPT_PUBLISH_CATEGORY`（默认 `CrabPT`），或在 `.env` 里把它
+        #     指到一个**已存在**的分类；否则 qB 会把它当作不存在（种子仍入库，
+        #     但分类为空）—— 这一条**未在 5.0.4 实测**，启用前需验。
+        #
+        # ★★★ 延迟回加（2026-10-03）：同 `readd_to_qb` —— `SEED_DELAY_MIN>0`
+        #   时不立即 add，记进队列由 daemon 主循环代发。见 `readd_queue.py`。
+        if config.SEED_DELAY_MIN > 0:
+            readd_queue.enqueue(
+                content, save_path, config.CRABPT_PUBLISH_CATEGORY,
+                config.SEED_DELAY_MIN, note=f"蟹黄堡 {t.get('info_hash','')[:12]}…",
+            )
+            return
+        qb.torrents_add(
+            torrent_files=content,
+            save_path=save_path,
+            is_paused=False,
+            category=config.CRABPT_PUBLISH_CATEGORY,
+        )
+        print(f"    ✅ 已提交回加至 qB（做种路径: {save_path}）")
+        # ④ 复核（判据 = qB 真实 state，不是"没抛异常"）
+        try:
+            new_hash = torf.Torrent.read_stream(io.BytesIO(content)).infohash
+            got = qb.torrents_info(torrent_hashes=new_hash)
+            if not got:
+                print(f"    ⚠️  回加复核：此刻 qB 里查不到 {new_hash[:12]}…")
+                print("        ★ 本复核**同步**跑，而 qB 入库**异步**"
+                      "（阶段常只跑数秒）")
+                print("        ⇒ 查不到**无法区分**「还没入库」（正常）"
+                      "与「回加根本没发生」（故障）。")
+                print("        ⇒ 要定论请**延迟后**再查一次"
+                      f"（按 infohash {new_hash[:12]}… 查 state）")
+            else:
+                t = got[0]
+                ok = t.state != "missingFiles"
+                mark = "✅" if ok else "★★"
+                print(f"    {mark} 回加复核：state={t.state}  content_path={t.content_path!r}")
+                if not ok:
+                    print("        ★★ 文件没对上 ⇒ **这条蟹黄堡种子不会做种**"
+                          "（已上站，不可逆）。见 readd_to_qb_crabpt 的 docstring。")
+        except Exception as e:                              # noqa: BLE001
+            print(f"    ⚠️  回加复核失败（不影响发布本身）: {type(e).__name__}: {e}")
+    except Exception as e:                                  # noqa: BLE001
         print(f"    ❌ 回加 qB 出错: {e}")
 
 
@@ -519,6 +661,17 @@ def explain_not_transferable(prefix):
 
     ★ 返回**多行列表**而不是一个字符串：原因可能同时有多条
       （比如"源站没发过" **且** "蟹黄堡发过"），拼成一行会看不清哪条先触发。
+
+    ★★ 标识类型（2026-09-28 修，`ERR-SITE-06` 一族）：本函数只认 **info_hash
+      前缀**。而用户眼里一条种子**最显眼的标识是站点 id**（如 `15972`）——
+      于是很容易传错。★ 修前那句 `库里没有这个 hash（打错了？）` 是**误导**：
+      它把"**你传错了标识类型**"说成"这个 hash 不存在"，而**两者完全不同**
+      （一个是"你的输入形式不对"，一个是"库里没有这条"）。
+      ⇒ 现在**先探一下**前缀是否命中 `site_torrent_id`，命中就明说该用哪个。
+      ★ 更要紧的一层（实测踩过）：这会让「`--only` 零交集」这条判据
+        **因传错参数而"碰巧成立"** —— 我当时据此误判"它证明了闸门④ 挡住了
+        `15972`"，其实它只证明了"`15972` 不是一个 info_hash"。
+        ⇒ **判据通过 ≠ 判据测了它想测的东西**。
     """
     import sqlite3
     con = sqlite3.connect(config.DB_PATH, timeout=30)
@@ -528,6 +681,22 @@ def explain_not_transferable(prefix):
             "SELECT info_hash FROM tasks WHERE info_hash LIKE ?",
             (prefix + "%",)).fetchall()
         if not rows:
+            # ★★ 关键一支：先看它是不是**站点 id**（而不是 info_hash 前缀）。
+            #   查的是 `tasks.site_torrent_id`（乌托邦那一侧的旧镜像列）——
+            #   本函数**只做提示**，不改变任何判据（判据仍只认 info_hash）。
+            sid_rows = con.execute(
+                "SELECT info_hash, site_torrent_id FROM tasks "
+                " WHERE site_torrent_id LIKE ?", (prefix + "%",)).fetchall()
+            if sid_rows:
+                out = [f"★ `{prefix}` 看着像**站点 id**（`site_torrent_id`），"
+                       f"不是 info_hash ⇒ 本选项只认 **info_hash 前缀**。"]
+                for _h, _sid in sid_rows[:5]:
+                    out.append(f"     · site_torrent_id={_sid} ⇒ 该用 "
+                               f"`--only {_h[:12]}`（info_hash 前缀）")
+                if len(sid_rows) > 5:
+                    out.append(f"     …另有 {len(sid_rows) - 5} 条")
+                out.append('   ★ 改用它重跑；★ 这不是"库里没有这条"。')
+                return out
             return ["库里没有这个 hash（打错了？）"]
         if len(rows) > 1:
             return [f"前缀歧义，命中 {len(rows)} 行（给长一点的前缀）"]
@@ -883,6 +1052,140 @@ def selftest_crabpt_transfer_queue(verbose=True):
     return (not detail), detail
 
 
+def selftest_crabpt_explain_same_source(verbose=True):
+    """★★★ 断言「**队列口径**（`db.transferable_to`）与**解释口径**
+    （`db.is_transferable_to`）」**同源** —— 两条路对同一行必须给同一个答案。
+
+    ★★★ 为什么必须有（2026-09-28 实测事故，`ERR-META-32` 一族）：
+      同一个命令里两句话互相矛盾：
+
+        --site crabpt --dry-run --only 144f017a
+          ❌ 144f017a 不在转种队列里          ← 队列**实际筛选**（对）
+          ✅ 它**在**转种队列里（源站有…）    ← **解释文案**（错）
+
+      ★ 根因：`transferable_to()` 当时已改用 `TRANSFERABLE_WHERE`（含闸门④
+        `ALLOW`），而 `is_transferable_to()` **只判「源有 ∧ 目标没有」**
+        —— 少了闸门④ 那一层 ⇒ **两个判据对同一行给出相反答案**。
+      ★ 危害形状（`ERR-META-14`）：不是"多发一条"（数据风险），而是
+        **工具告诉人"它在队列里"、实际不会发** ⇒ **误导人做决定**。
+      ★ 一般化：**给人看的判据必须与实际判据同源**；否则读的人只能猜
+        哪句是真的。⇒ 所以这里**不靠注释承诺**，靠一条**可执行判据**。
+
+    ★★ 判据为什么必须走**行为**（拿内存 fixture 跑两个函数）而不是 AST：
+      AST 只能查"有没有闸门④ 这个词"—— 那正是 `ERR-META-30` 的坑
+      （**提到了对的词、却问了个错的问题**：`!= 'DENY'` 也含这个词，
+       却与闸门④ 语义相反）。⇒ 只有**真跑一遍**才测得到"答案相不相同"。
+
+    ★ fixture 是**内存** sqlite（`connect()` 走 `config.DB_PATH`，
+      本函数临时改写它并复原）—— **不碰生产库**、不联网、无副作用。
+    """
+    import tempfile
+    detail = []
+    # fixture：四条，覆盖闸门④ 的三档 + 一条正常的 ALLOW
+    #   hash 前 12 位都是 `aaaa…` / `dddd…` 便于人读
+    #
+    # ★★ `site_torrent_id` 必须**非空**（这里给站点 id 的字符串形态）——
+    #   因为 `CROSS_SITE_DEDUP_WHERE`（转种口径的前缀）里含
+    #   `site_torrent_id IS NOT NULL AND site_torrent_id != ''`：
+    #   它是"**乌托邦上有这条**"那个事实判据的一部分。
+    #   ★ 实测踩到过：第一版给空串 ⇒ **四条全部落不进队列**，
+    #     于是判据报"口径分叉（EXISTS ∧ ALLOW）" —— 而那是**我 fixture 的错**，
+    #     不是产的错。⇒ 判据设计上要能区分"分叉"与"根本没测到"：
+    #     下面除了比对两个口径，还**单独断言** ALLOW 那条**必须在队列里**
+    #     （`should_be=True`），否则 fixture 自己坏掉时它不会冒充"通过"。
+    H_ALLOW = "aaaa00000000" + "0" * 28     # EXISTS ∧ ALLOW ∧ crabpt 无 ⇒ **该转**
+    H_DENY = "dddd00000000" + "0" * 28      # EXISTS ∧ DENY  ⇒ **闸门④ 拦**
+    H_EMPTY = "eeee00000000" + "0" * 28     # EXISTS ∧ 规则空 ⇒ **闸门④ 拦**
+    H_CONF = "cccc00000000" + "0" * 28      # EXISTS ∧ NEED_CONFIRM ⇒ **闸门④ 拦**
+    rows = [
+        (H_ALLOW, "EXISTS", "10001", "ALLOW"),
+        (H_DENY, "EXISTS", "10002", "DENY"),
+        (H_EMPTY, "EXISTS", "10003", None),
+        (H_CONF, "EXISTS", "10004", "NEED_CONFIRM"),
+    ]
+    import sqlite3
+    fd, path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    orig_db_path = config.DB_PATH
+    try:
+        con = sqlite3.connect(path)
+        # ★★ fixture 的表必须与**生产表同形**（列**全**建出来，值留空）——
+        #   理由：`db.transferable_to()` 走 `SELECT {db.TASK_FIELDS}`，
+        #   若 fixture 少一列，它会 `OperationalError` ⇒ 本条自检会以
+        #   "**没能跑起来**"收尾（**不是通过** —— 见下面 except 支）。
+        #   ★ 实测踩到两次：第一版只建了 3 列（`no such column: torrent_name`）；
+        #     改用 `db.TASK_FIELDS` 后又少 `transfer_rule`
+        #     （它**故意不在** `TASK_FIELDS` 里 —— 那是渲染字段表，
+        #      `transfer_rule` 是"许不许发"的判据，见 `COLUMNS` 里的注释）。
+        #   ⇒ 正确取法：**从 schema 常量建表**（`db.COLUMNS` /
+        #     `db.SITE_PUBLISH_COLUMNS`），而不是从 `TASK_FIELDS` 或手抄清单
+        #     —— 手抄/取错源都会让本条自检在**别人加列的那天**静默失效
+        #     （与它要防的形状同族，`ERR-META-03`）。
+        def _mk(cols):
+            return ", ".join(f"{n} {t}" for n, t in cols)
+
+        con.execute(f"CREATE TABLE tasks ({_mk(db.COLUMNS)})")
+        con.execute(f"CREATE TABLE site_publish ({_mk(db.SITE_PUBLISH_COLUMNS)})")
+        for h, st, sid, rule in rows:
+            con.execute(
+                f"INSERT INTO tasks (info_hash, site_status, site_torrent_id,"
+                f" transfer_rule) VALUES (?,?,?,?)", (h, st, sid, rule))
+            # 源站（乌托邦）已上站 —— 让判据① 成立，把差别**只留**给闸门④
+            # ★ 列名**显式列出**（不靠位置）—— fixture 的表列比这里写的多
+            #   （`synced_at` 等），靠位置会在别人加列时静默错位。
+            con.execute("INSERT INTO site_publish"
+                        " (info_hash, site, torrent_id, status, cover_url)"
+                        " VALUES (?,?,?,?,?)",
+                        (h, db.SITE_MUSOPIA, "10000", "EXISTS", None))
+        con.commit()
+        con.close()
+
+        config.DB_PATH = path
+        # 队列口径（实际选行）
+        queued = {(t.get("info_hash") or "") for t in db.transferable_to(db.SITE_CRABPT)}
+        # 解释口径（给人看的 why）
+        for h, label, should_be in [
+            (H_ALLOW, "EXISTS ∧ ALLOW", True),
+            (H_DENY, "EXISTS ∧ DENY", False),
+            (H_EMPTY, "EXISTS ∧ 规则空", False),
+            (H_CONF, "EXISTS ∧ NEED_CONFIRM", False),
+        ]:
+            in_q = h in queued
+            ok, why = db.is_transferable_to(h, db.SITE_CRABPT)
+            if in_q != ok:
+                detail.append(
+                    f"✗ ★★ 口径分叉（{label}）：队列认为 in_queue={in_q}，"
+                    f"但 `is_transferable_to()` 说 ok={ok}（why={why!r}）\n"
+                    f"     ⇒ 这正是 `--only` 报文与实际筛选**互相矛盾**的形状"
+                    f"（ERR-META-32）。两个判据必须同源。")
+            if ok != should_be:
+                detail.append(
+                    f"✗ ★★ `is_transferable_to()` 对（{label}）答 ok={ok}，"
+                    f"应当为 {should_be}（why={why!r}）\n"
+                    f"     ⇒ 闸门④ 的语义是'**只有 `ALLOW` 放行**'："
+                    f"`DENY` / 空 / `NEED_CONFIRM` **一律拦**。")
+            # ★ 报文必须**说清是哪一档**（ERR-SITE-06：多种原因不许压成一句）
+            if not ok and ("闸门④" not in why and "源站" not in why
+                           and "目标站" not in why):
+                detail.append(f"✗ 报文没点明卡在哪一条判据：{why!r}")
+    except Exception as e:                                        # noqa: BLE001
+        detail.append(f"✗ ★ 本条自检**没能跑起来**（不是通过）：{type(e).__name__}: {e}")
+    finally:
+        config.DB_PATH = orig_db_path
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+    if verbose:
+        mark = "✅" if not detail else "❌"
+        print(f"{mark} 转种口径自检：队列（transferable_to）与解释"
+              f"（is_transferable_to）**对同一行说同一句话**")
+        for d in detail:
+            print(f"    {d}")
+    return (not detail), detail
+
+
 def run_crabpt(args):
     """蟹黄堡（crabpt.vip）发布路径。★ 与 `main()` 的乌托邦路径**并列**，不互相调用。
 
@@ -984,18 +1287,29 @@ def run_crabpt(args):
     #     `selftest_crabpt_transfer_queue()`：把筛选去掉，自检**必须**报红）。
     tasks = db.transferable_to(db.SITE_CRABPT)
     if not tasks:
-        print("💡 当前没有可转的种（源站有、蟹黄堡没有的）——"
-              f"判据 = `{db.CROSS_SITE_DEDUP_WHERE}` + 蟹黄堡无记录。")
+        print("💡 当前没有可转的种（源站有、蟹黄堡没有、**且过了闸门④ ALLOW**）——"
+              f"判据 = `db.TRANSFERABLE_WHERE` = `{db.CROSS_SITE_DEDUP_WHERE}` "
+              f"+ `transfer_rule = 'ALLOW'`，再加蟹黄堡无记录。")
         return
 
-    # ---- ★ 可执行断言：转种队列**必须**是乌托邦发布队列的**子集** ----------
+    # ---- ★ 可执行断言：转种队列**必须**是"已过闸门④"的子集 -----------------
     #
     # ★ 为什么需要它（这是**推理**，不是上面那条 SQL 自己保证的东西）：
-    #   本节开头论证过「能上乌托邦 ⇒ 已过闸门④ `transfer_rule='ALLOW'`」，
-    #   所以转种路**不必**再查一次 ALLOW。但那段是**推理** ——
-    #   一旦将来有人让某条种子绕过 `publish.py` 上站（比如手工 `set_site_id`），
-    #   `site_status='EXISTS'` 就**不再蕴含** ALLOW，而转种路会照转。
-    #   ⇒ 把那条推理**变成断言**：跑一次真实查询，把差集**报出来**。
+    #   本节开头论证过「能上乌托邦 ⇒ 已过闸门④ `transfer_rule='ALLOW'`」。
+    #   ★★★ 2026-09-28 **实测：那条推理不成立** —— `EXISTS` 的 28 行里
+    #   有 1 行是 `DENY`（`site_torrent_id=15972`）⇒ 若转种路只按"已上站"筛，
+    #   这一行会被搬到蟹黄堡（**不可逆**）。
+    #   ⇒ 修法**不在这里**，而在 `db.transferable_to()` 的口径：
+    #     它现在用 `db.TRANSFERABLE_WHERE`（= CROSS + `transfer_rule='ALLOW'`）。
+    #   ★★ 而本条断言**仍然用 `CROSS_SITE_DEDUP_WHERE`**（**不**跟着换成
+    #     `TRANSFERABLE_WHERE`）—— 这是**故意的**，不是漏改：
+    #       · 它问的问题是「**事实**（已上站）里有哪些**没过**闸门④」；
+    #       · 换成 `TRANSFERABLE_WHERE` 后这个差集**恒为空**（集合里已经没有
+    #         非 ALLOW 的行可找）⇒ 它就成了一段"永远显示通过"的废码
+    #         （`ERR-META-14` 里最贵的一种：**检测器静默失效**）。
+    #       · 留着它 = 留一条**回归探针**：将来若有人再让某行绕过闸门④ 上站
+    #         （手工 `set_site_id`、或新增一条不查闸门的路径），差集会**重新
+    #         变非空**，而它指着的正是那句话。**那天它是唯一会响的东西。**
     #
     # ★★ 为什么是断言（打印 + 非零退出）而不是 `sys.exit(0)` 静默通过：
     #   本项目的纪律是"判据要接到能让人看见的地方"。这里**不拦**执行
@@ -1020,9 +1334,10 @@ def run_crabpt(args):
         print(f"⚠️  子集断言**没能跑起来**（不是通过）：{e}")
     if _gaps:
         print("\n" + "!" * 60)
-        print(f"★★ 转种队列里有 {len(_gaps)} 条**没标 ALLOW**（应当恒为 0）——")
-        print("   它们能上乌托邦，说明闸门④当年被绕过了（或有人手工标了 site_status）。")
-        print("   ★ 本次**不拦**（拦住会把整批卡住），但请人工过一遍：")
+        print(f"★★ **已上站、却没标 ALLOW** 的有 {len(_gaps)} 条"
+              f"（应当恒为 0）——")
+        print("   它们能上乌托邦，说明闸门④当年被绕过了（或有人手工标了 site_status）；")
+        print("   ★ 它们**不会**进本次转种队列（队列口径 = ALLOW），但请人工过一遍：")
         for h, rule in _gaps[:10]:
             print(f"      {h[:12]}  transfer_rule={rule!r}")
         if len(_gaps) > 10:
@@ -1133,6 +1448,13 @@ def run_crabpt(args):
         sys.exit("❌ CRABPT_COOKIE 是空的 ⇒ 拒绝提交。\n"
                  "   ★ 必须在 **NAS 的 .env** 里加（`deploy.sh` 的白名单不含 `.env`，"
                  "见 ERR-ENV-02），然后 `sudo docker compose up -d --build`。")
+
+    # ★★ qB 连接（回加做种用）—— 2026-10-02 加。
+    #   ★ 与 `main()` 同形：`--no-readd` 时才不连；连不上**只说清原因、不中断**
+    #     （回加失败是本地问题，不该让"已经发上站"的这条看起来像失败）。
+    qb = None
+    if not args.no_readd:
+        qb = connect_qb()
 
     form_info = None
     if not args.dry_run:
@@ -1260,7 +1582,15 @@ def run_crabpt(args):
                  reason=f"crabpt_published_id:{tid}")
     db.mark_synced(t["info_hash"])
     print("    ℹ️  未做（已知缺口，见 PLAN-crabpt.md 附录 D.5）："
-          "technical_info 留空 · 日韩拆不出 · 不回加 qB（蟹黄堡尚未接线）")
+          "technical_info 留空 · 日韩拆不出")
+
+    # ★★ 回加做种（2026-10-02 接线）—— 用**蟹黄堡服务端**那份 .torrent，
+    #   做种路径沿用**乌托邦那条**。逐条理由见 `readd_to_qb_crabpt` 的 docstring。
+    #   ★ 放在 `_crabpt_readback` **之前**：先让做种这件事**有着落**，
+    #     再做字段回读（回读失败不影响发布，但做种失败要尽早可见）。
+    #   ★ 失败**不算阶段失败**（不 `sys.exit`）—— 见该函数 docstring ⑤。
+    if not args.no_readd:
+        readd_to_qb_crabpt(qb, client, t["info_hash"], tid)
 
     _crabpt_readback(client, tid, fields)
     print("\n★ 下一步（人工）：打开详情页逐字段复核，"
@@ -1282,12 +1612,15 @@ def main():
     if args.selftest:
         ok1, _ = selftest_crabpt_isolation()
         ok2, _ = selftest_crabpt_transfer_queue()
-        # ★ 两条判据**都要**跑（`and` 而不是 `or`）—— 它们是**独立**的失效模式：
+        ok3, _ = selftest_crabpt_explain_same_source()
+        # ★ 三条判据**都要**跑（`and` 而不是 `or`）—— 它们是**独立**的失效模式：
         #   ① 碰了乌托邦的列（"发一条污染四个判据"）
         #   ② 队列取错（"静默多发、不可撤销"）
+        #   ③ ★ 队列口径与**解释口径**分叉（"工具告诉你它在队列里、实际不发"
+        #      —— 2026-09-28 实测，`--only` 报文与实际筛选互相矛盾）
         #   ★ 用 `or` 的话，一条报红时另一条**根本没跑**，而"没跑"与"通过"
         #     在输出上应当长得不一样（`ERR-META-14`：兜底不许冒充真结果）。
-        ok = ok1 and ok2
+        ok = ok1 and ok2 and ok3
         # ★★ 必须 `sys.exit`，**不能 `return`** —— `main()` 是被
         #   `if __name__ == "__main__": main()` 调的，那个写法的返回值**会被丢掉**
         #   ⇒ 退出码恒为 0 ⇒ **自检报红也没人看得见**（阴性对照实测踩到这一条）。

@@ -59,7 +59,14 @@ def load_rows(db_path, only_sid=None, include_all=False):
     try:
         sql = ("SELECT info_hash, formatted_title, torrent_name, site_torrent_id, "
                "       site_status, small_descr, mapped_json, updated_at, "
-               "       site_synced_at, opencd_tid "
+               "       site_synced_at, opencd_tid, "
+               # ★★ 2026-09-28 加：`transfer_rule` —— 第 6 步的**真正闸门**。
+               #   `update_metadata.py` 的点名路带 `require_allow=True`
+               #   ⇒ 规则非 `'ALLOW'` 的行**推不动**（实测 `15972` 是 `None` 被拦）。
+               #   ★ 为什么在这里补印、而不另写查询：本工具**已经**逐条遍历这 28 条、
+               #     已经连着 `edit.php` —— 再写一个查询就是**第二份"已上站行"口径**，
+               #     两份迟早对不上（`ERR-META-03`）。⇒ 同一段代码里多印一格。
+               "       transfer_rule "
                "  FROM tasks ")
         params = []
         if only_sid:
@@ -124,6 +131,15 @@ def main(argv=None):
     n_diff = 0         # 站点 != mapped_json
     n_col_diff = 0     # 本地列 != mapped_json
     n_err = 0
+    # ★★★ 2026-09-28 加：**主标题** `name` 的对照计数（第 6 步）。
+    #   ★ 与 `small_descr` **分开计数、分开印** —— 两者量纲不同、结论也不同，
+    #     合并成一个数就是 `ERR-META-05`（那次把 6 报成 31 的形状）。
+    n_name_diff = 0
+    # ★★ 逐条留档：`name` 是否一致 + 该行的 `transfer_rule` —— 汇总段要按
+    #   **"标题不一致 ∧ rule=ALLOW"** 这一对判据分档，两个都是逐行的值，
+    #   汇总时不能再查一次库（那就成了第二次口径，`ERR-META-03`）。
+    _name_ok_by_sid = {}
+    _rule_by_sid = {}
     report = []
 
     for r in rows:
@@ -134,17 +150,28 @@ def main(argv=None):
         try:
             fields, _snap = client.fetch_edit_form(sid)
             site = fields.get("small_descr")
+            # ★★★ 2026-09-28 加：**同一个表单**里就有 `name`（主标题），
+            #   而本工具只印了 `small_descr` ⇒ 第 6 步（"站上 name 与库现值一致吗"）
+            #   本来要另写一个工具、再抓一遍 `edit.php`。
+            #   ★ 为什么不另写：那是**同一个 GET**，只是**少印了一格**——
+            #     多写一个工具就多一份"站点 vs 库"的口径，两份迟早对不上
+            #     （`ERR-META-03` 的形状）。⇒ 在这里补印，判据共用同一段代码。
+            #   ★ 对照物与 `small_descr` 同源：本地**列** `formatted_title`
+            #     （不是 `torrent_name` —— 那是**皇后原始串**，与站点上的值不是一回事；
+            #      见 `fix_onsite_titles_and_subtitles.py` 头部的实测）。
+            site_name = fields.get("name")
             err = None
         except LoginExpired as e:
             sys.exit(f"❌ Cookie 失效：{e}")
         except SiteError as e:
-            site, err = None, str(e)[:70]
+            site, site_name, err = None, None, str(e)[:70]
         except Exception as e:                                   # noqa: BLE001
-            site, err = None, f"{type(e).__name__}: {e}"
+            site, site_name, err = None, None, f"{type(e).__name__}: {e}"
 
         if err:
             n_err += 1
             tag = "打不开"
+            name_tag, name_ok = "打不开", False
         else:
             s = "" if site is None else str(site).strip()
             m = "" if mval is None else str(mval).strip()
@@ -156,6 +183,13 @@ def main(argv=None):
             if c != m:
                 n_col_diff += 1
             tag = "★站点空" if s == "" else ("≠快照" if s != m else "一致")
+            # ── 主标题（第 6 步的判据）──
+            sn = "" if site_name is None else str(site_name).strip()
+            lt = "" if r["formatted_title"] is None else str(r["formatted_title"]).strip()
+            name_ok = (sn == lt)
+            if sn != lt:
+                n_name_diff += 1
+            name_tag = "一致" if name_ok else ("★站点空" if sn == "" else "≠库值")
 
         report.append((sid, title, col, mval, site, err, tag, mwhy))
         print(f"── sid={sid}  {title}")
@@ -164,6 +198,24 @@ def main(argv=None):
         print(f"   ★站点 edit.php = "
               + (f"❌ {err}" if err else f"{site!r}")
               + f"   ⇒ {tag}")
+        # ★ 主标题行（第 6 步）：库值 vs 站点值。**只印，不判"该不该推"**
+        #   —— 推不推由人拍板（`update_metadata.py` 是写动作）。
+        print(f"   ── 主标题 `name`（第 6 步）──")
+        print(f"      本地列 formatted_title = {r['formatted_title']!r}")
+        print(f"      ★站点 name            = "
+              + (f"❌ {err}" if err else f"{site_name!r}")
+              + f"   ⇒ {name_tag}")
+        # ★ `transfer_rule` —— **能不能推**由它决定（点名路带 `require_allow=True`）。
+        #   ★ 与"标题一致不一致"**分开印**：两者是不同的判据（一个是值、一个是权限），
+        #     合并就会让"标题对了"看起来像"可以推"（`ERR-META-05` 的形状）。
+        _rule = r["transfer_rule"]
+        _name_ok_by_sid[sid] = name_ok
+        _rule_by_sid[sid] = _rule
+        _pushable = (str(_rule).strip() == "ALLOW") and (not name_ok)
+        print(f"      transfer_rule = {_rule!r}   ⇒ "
+              + ("**可推**（rule=ALLOW 且标题不一致）" if _pushable else
+                 ("标题已一致 ⇒ 无需推" if name_ok else
+                  "★ **推不动**：规则不是 'ALLOW'（点名路会被闸门④ 拦）")))
         print()
 
     print("=" * 78)
@@ -174,6 +226,37 @@ def main(argv=None):
     print(f"  站点 ≠ mapped   = **{n_diff}**")
     print(f"  本地列 ≠ mapped = **{n_col_diff}**")
     print(f"  edit.php 打不开 = {n_err}")
+    print()
+    # ★★★ 第 6 步的判据（2026-09-28 加）——**单独一段**，不与上面混。
+    print("─" * 78)
+    print("★ 主标题 `name`（**第 6 步**：站上 name 与库现值一致吗）")
+    print("─" * 78)
+    if n_err:
+        print(f"  ⚠️  有 {n_err} 条 `edit.php` 打不开 ⇒ 这批**没测到**"
+              f"（不许当'一致' —— ERR-META-14）")
+    print(f"  站点 `name` ≠ 库 `formatted_title` = **{n_name_diff}** / {len(rows)}")
+    # ★★ 第 6 步的**可推性**分档（2026-09-28 加）——
+    #   标题不一致 **不等于** 能推：点名路带 `require_allow=True`，
+    #   规则非 ALLOW 的行**推不动**。两者必须分开报，否则"1 条不一致"
+    #   会被读成"推 1 条就行"（实测 `15972` 正是被规则拦下的那一条）。
+    _n_push = sum(1 for sid, _t, _c, _m, _s, _e, _tag, _w in report
+                  if _e is None and not _name_ok_by_sid.get(sid, True)
+                  and str(_rule_by_sid.get(sid)).strip() == "ALLOW")
+    _n_blocked = sum(1 for sid in _name_ok_by_sid
+                     if not _name_ok_by_sid[sid]
+                     and str(_rule_by_sid.get(sid)).strip() != "ALLOW")
+    print(f"  ├ 其中「rule=ALLOW 且标题不一致」⇒ **可推** = **{_n_push}**")
+    print(f"  └ 其中「标题不一致但 rule 非 ALLOW」⇒ **推不动** = **{_n_blocked}**"
+          f"   ★ 要推得先**显式**标 ALLOW（一次有记录的写库动作），别绕过闸门④")
+    for sid in _name_ok_by_sid:
+        if not _name_ok_by_sid[sid] and str(_rule_by_sid.get(sid)).strip() != "ALLOW":
+            print(f"       拦住的: sid={sid}  rule={_rule_by_sid.get(sid)!r}")
+    if n_name_diff == 0 and not n_err:
+        print("  ✅ **全部一致** ⇒ 第 6 步（推 `name`）**不用做**：站上已是库里的值。")
+    elif _n_push:
+        print(f"  ⇒ 有 {_n_push} 条**可推**（站是旧值 + rule=ALLOW）⇒ 用：")
+        print(f"     `update_metadata.py <sid> --fields 'name' --apply --verify`"
+              f"（★ `torrent_id` 是**位置参数**；★ 必带 name）")
     print()
     print("★ 怎么读这张表")
     print("  · 「站点空」> 0 ⇒ **写空真发生过**，且有现场名单（这是改渲染层的前提）")
