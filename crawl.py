@@ -374,6 +374,14 @@ def main():
     log(f"   ✅ 跨轮持久已启用：当日已用 {gate.used_day}/{gate.max_per_day}（账本 "
         f"data.db:{db.LEDGER_TABLE} day_key={day_key}）⇒ 这是**真的**每日上限。")
     log(f"   ⚠️  量纲仍是**请求**（不是种子）—— 见 opencd_rate.py 模块头「已知缺口」①。")
+    # ★ 种子量纲的账（2026-10-04 加）：与"请求"分开报，来源是 `opencd_ingest.ingest()`
+    #   在"真的新入库一条"时记的 `kind='seed'`（**只读展示，不改闸门**）。
+    try:
+        _seeds = db.ledger_get(day_key, kind=db.LEDGER_KIND_SEED)
+        log(f"   📦 今日**种子**入库：{_seeds} 条"
+            f"（kind='seed'，与上面的请求账**分开**；ERR-META-05）")
+    except Exception as e:                                      # noqa: BLE001
+        log(f"   📦 今日种子入库：读账本失败（{type(e).__name__}）")
 
     client = Client(gate=gate, dry_run=args.dry_run)
     if not client.cookie:

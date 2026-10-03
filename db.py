@@ -156,7 +156,13 @@ COLUMNS = [
 # ★ 表再小也要独立：将来若要记「按 kind 分账」（如 `seed` 与 `request` 各一份），
 #   加一个 kind 值即可，不动任何已有列。
 LEDGER_TABLE = "opencd_quota"
-LEDGER_KIND_REQUEST = "request"          # 目前只有这一种；种子量纲的账将来加 kind
+LEDGER_KIND_REQUEST = "request"          # 出网请求量纲（crawl 的 RateGate 用；站点保护）
+LEDGER_KIND_SEED = "seed"                # 种子量纲（入库成功记 1；运维口径，见 opencd_ingest）
+#   ★★ 两个 kind 是**两本独立的账**（同表、同 day_key、不同 kind ⇒ 独立行，见 LEDGER_PK）。
+#      · request = "今天向皇后发了几次请求"（站点保护，硬刹车）
+#      · seed    = "今天有几条皇后种子入库成功"（人看的产能口径）
+#      ★ 为什么要分开而不是共用一个计数：**量纲不同**（一条种子 = 1 个请求，但"跳过已抓过的"
+#        与"入库失败"会让两者偏离）。混成一个数就没法回答"今天到底补了几条"（ERR-META-10 同族）。
 LEDGER_COLUMNS = [
     # ★★ `day_key` 是**本地日期字符串**（'YYYY-MM-DD'），**故意不是 UTC**。
     #   用户的心里模型是"本地日历日"（跨零点就该重置），所以本地日才是对的口径。

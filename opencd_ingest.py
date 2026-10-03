@@ -333,7 +333,31 @@ def ingest(info, *, raw_tid, info_hash, torrent_file=None,
     if not ih:
         # ★ 没有主键**根本不调 save_task**（它的第一件事就是校验 info_hash）
         return status, reason
+
+    # ★★ 种子量纲的账（与本函数入库动作同源，**不新增出网请求**）：
+    #   只在"这条 info_hash **此前不在库**（= 真的新入库一条）"时 +1。
+    #   · 为什么不能"每次 ingest 都 +1"：`save_task` 是 **UPSERT**，重跑/补字段会再次
+    #     调到这里 ⇒ 会把同一条种子**重复计入**（重跑一次产能就多报一条）。
+    #   · 为什么判据用 `get_status(ih) is None`：那是"这一行**存在性**"的权威读法
+    #     （只读、行不存在回 None）。`None` = 新行 = 记 1。
+    #   · day_key 用**本地日期**字符串，与 `crawl.py` / `opencd_rate` 账本**同口径**
+    #     （`db.LEDGER_COLUMNS` 注释有理由，**别改成 UTC**）。
+    #   ★ 顺序：**先读存在性、再写库**（写完再读就永远不为 None 了）。
+    is_new = db.get_status(ih) is None
+
+    # 入库本身：异常**必须抛**给调用方（既有契约：入库失败不能静默吞）。
     db.save_task(info_hash=ih, **row)
+
+    # 记账：**独立 try** —— 台账是运维口径，记账失败**绝不许反噬入库**
+    #   （入库已成功，若因记账异常而 raise，会让调用方误以为"入库失败"）。
+    if is_new:
+        try:
+            import time as _time
+            db.ledger_add(_time.strftime("%Y-%m-%d"), delta=1,
+                          kind=db.LEDGER_KIND_SEED)
+        except Exception as e:                                  # noqa: BLE001
+            print(f"⚠️  种子量纲记账失败（不影响入库）: {type(e).__name__}: {e}",
+                  flush=True)
     return status, reason
 
 
@@ -805,6 +829,35 @@ def _check():
             f"{f.get('custom_fields[4][1]')!r}")
         chk("custom_fields[4][3] 非空（必填的抓轨日志）",
             bool((f.get("custom_fields[4][3]") or "").strip()))
+
+    # ── ⑭ ★★ 2026-10-04 新判据：种子量纲的账（kind='seed'）────────────────
+    #   要钉住两条性质：
+    #     ① **新入库一条** ⇒ 该 kind 当天账 +1；
+    #     ② **重复 ingest 同一条**（UPSERT）⇒ **不**再 +1（否则重跑虚报产能）。
+    #   ★ 日期口径必须与 `ingest()` **内部一致**：它记的是"**今天**"（`time.strftime`），
+    #     所以这里也读"今天"—— 用一个**独一无二的 info_hash** 来隔离本条用例
+    #     （别的用例不会碰它），而不是换日期（换日期就与 ingest 写的那天对不上了）。
+    print("\n⑭ ★★ 种子量纲账本（kind='seed'）：新入库计 1、重复不入账")
+    import time as _t
+    import hashlib as _h
+    _day = _t.strftime("%Y-%m-%d")
+    # ★ 独一无二的 info_hash（用时间戳+随机），保证"不在库"前提成立
+    #   —— 前面一堆用例已经 ingest 过别的 hash、也把"今天"的 seed 账推上去了，
+    #   所以这里**不假设从 0 起**，只比"前后差"。
+    _seed_ih = _h.md5(f"seed-ledger-test-{_t.time()}".encode()).hexdigest()
+    _before = db.ledger_get(_day, kind=db.LEDGER_KIND_SEED)
+    chk("前置：该 info_hash 此前不在库", db.get_status(_seed_ih) is None)
+    # 第一次 ingest（新行，且经 UPSERT 落库）
+    _info = dict(ALLOW)                       # 复用一份合法解析结果
+    ingest(_info, raw_tid="999001", info_hash=_seed_ih, torrent_file=tf, now=NOW)
+    _after1 = db.ledger_get(_day, kind=db.LEDGER_KIND_SEED)
+    chk("★ 新入库一条 ⇒ seed 账 +1", _after1 == _before + 1,
+        f"前 {_before} 后 {_after1}")
+    # 第二次 ingest 同一条（UPSERT；info_hash 相同 ⇒ 是"已存在行"）
+    ingest(_info, raw_tid="999001", info_hash=_seed_ih, torrent_file=tf, now=NOW)
+    _after2 = db.ledger_get(_day, kind=db.LEDGER_KIND_SEED)
+    chk("★★ 重复 ingest 同一条 ⇒ **不再** +1（UPSERT 不虚报）",
+        _after2 == _after1, f"前 {_after1} 后 {_after2}")
 
     return ok, fails
 

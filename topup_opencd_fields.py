@@ -558,6 +558,15 @@ def main():
     print(f"  └ 抓取失败    : {stats['failed']}")
     print(f"  今日请求已用  : {gate.used_day}/{gate.max_per_day}"
           f"（本轮开始前 {used_before}）")
+    # ★ 种子量纲：与"请求"分开报（ERR-META-05：两种口径不许混着减）。
+    #   来源：`opencd_ingest.ingest()` 在"真的新入库一条"时 +1（kind='seed'）。
+    try:
+        _today = time.strftime("%Y-%m-%d")
+        _seeds_before = db.ledger_get(_today, kind=db.LEDGER_KIND_SEED) - stats.get("stored", 0)
+        print(f"  今日种子入库  : {db.ledger_get(_today, kind=db.LEDGER_KIND_SEED)} 条"
+              f"（本轮开始前 {max(0, _seeds_before)}；★ 种子量纲，非请求量纲）")
+    except Exception as e:                                      # noqa: BLE001
+        print(f"  今日种子入库  : （读账本失败：{type(e).__name__}）")
     if quota_hit:
         print("  ★★ 本轮**被每日配额截断**（不是「没活了」）—— 明天再跑，"
               "台账会让你接着往下走")

@@ -9,6 +9,146 @@
 
 ---
 
+## 2026-10-04（凌晨·续）—— ★★ 废弃自研 qbtune，改用外部 `qbit_manage`
+
+### 0. 决定（用户拍板）
+
+- **整体废弃 `tools/qbtune.py`**（自研 qB 下载调度器：有源优先/死种轮转 + 公平轮转/带宽加权）。
+- 下载管理改由**外部项目 `qbit_manage`** 承担。
+- 关联：`#7`（排查 qbtune 为何停写心跳）**作废**；`#11` 里"qbtune budget"一并随本项作废。
+
+### 1. 为什么整体废弃（本项范围）
+
+- qbtune 是一个**独立 sidecar 容器**（`musopia_qbtune`），默认 `QBTUNE_ENABLE=false`。
+- **它已停**：进程内部早死、容器 unhealthy、心跳停 >180s（见 `#4`）。
+- 用户用 `qbit_manage` 替代后，本仓**不再需要**这套调度器 ⇒ 彻底移除，不留半截接线。
+
+### 2. 本仓已删（代码/配置）
+
+| 项 | 动作 |
+|---|---|
+| `tools/qbtune.py` | **删除**（调度器主体，~870 行） |
+| `tools/qbtune_probe.py` | **删除**（只读 API 探针） |
+| `tools/test_qbtune.py` | **删除**（单测，硬 import `qbtune`） |
+| `tools/__pycache__/qbtune*.pyc` 等 | **删除**（3 个） |
+| `docker-compose.yml` 的 `qbtune:` 服务 | **删除**（含 `musopia_qbtune` 容器名、两条 `tools/qbtune.py` 调用） |
+| `.env.example` 的 `QBTUNE_*` 段 | **删除**（`QBTUNE_ENABLE`/`INTERVAL`/`ACTIVE_CAP`/`STALL_ENTER`/`LIVE_EXIT`/`WRITE_COOLDOWN_TICKS`/`BW_MODE` 等） |
+| `tools/doc-audit/terms.txt` | 删 `musopia_qbtune` 关键字（防 doc-audit 假 drift 信号） |
+| `daemon.py` 里一处提到 qbtune 的过时注释 | 改写（去掉 qbtune 指代） |
+
+### 3. 保留（★ 刻意不删）
+
+- **`ERRATA.md::ERR-QBTUNE-01` 保留教训**，只在条目末尾加一句「来源 qbtune 已废弃；教训仍通用」。
+  它讲的是 **qB 参数语义 / 优先级机制 / 跨进程控制必须当场回读** —— 与 qbtune 存废无关，换 `qbit_manage` 同样成立。
+- **`ERR-QB-05` 里提到 qbtune 是历史归因事实**（"先拉时间线再定罪"），保留。
+- **延迟回加做种（`readd_queue.py` + daemon 独立线程）与 qbtune 无关 —— 完全不动。**
+
+### 4. NAS 侧（仓库外，已用 SMB 完成部分）
+
+> ⚠️ **`deploy.sh` 无"NAS 侧删除"路径** —— 本地删文件**不会**删 NAS 旧副本，必须手动清。
+
+- ✅ **已删 NAS 旧文件**（走 SMB `//iSunker-DS423/docker_ssd/musopia_script2/tools/`）：
+  `qbtune.py` / `qbtune_probe.py` / `test_qbtune.py`。
+- ✅ **已清 NAS `.env`** 的 `QBTUNE_*` 8 行（注释+7 键），备份 `.env.bak-before-qbtune-removal-*`；
+  确认 `SEED_DELAY_MIN=15` / `CRABPT_PUBLISH_CATEGORY=CrabPT` 未受影响。
+- ✅ **已退役** `/data` 下 `qbtune_heartbeat` / `qbtune_state.json`（改名 `.bak-*`）
+  —— ★ 关键：否则告警系统会对着一个**永不更新的心跳**永远报「qbtune 死」（见告警总纲）。
+- ✅ `deploy.sh --apply` 已把 `docker-compose.yml`(删 qbtune 服务) / `.env.example` 推上 NAS；
+  本地 `yaml.safe_load` 校验 services = `musopia/tools/once`。
+- ✅ **NAS 收尾已完成**（SSH `iSunker@192.168.0.7:36688`，key `id_ed25519` —— ★ 用户名是 **`iSunker`** 不是 `艾森克`，docker 在 `/usr/local/bin/docker`）：
+  1. `docker rm -f musopia_qbtune`（原为 `Exited(0)` 残留容器）。
+  2. `docker compose up -d --build musopia`（只 musopia；`compose config --services` 已只剩 `musopia`）。
+  3. 验证：**NAS 无任何 qbtune 容器**；镜像 `/app/tools` count=**45** = 宿主 45（`ERR-DOCKER-09` 判据通过）、**qbtune files: NONE**；
+     `opencd2musopia` = **healthy**；日志 `LoginFailed/连不上 qBittorrent/回加跳过` 命中 **0**；
+     **`🧵 [readd] 延迟回加线程启动`** 在跑（延迟做种未受影响）。
+- ★ 用户替代者 **`qbit_manage_opencd` 容器已在运行**（Up，2h）—— 下载管理已交接给 `qbit_manage`。
+
+### 4b. 教训（SSH 用户名）
+
+- ⚠️ 我前几轮一直用 `艾森克@192.168.0.7`（⇒ `Permission denied`），据此判定"NAS 只认密码、无法自动化"，
+  实际**用户名是 `iSunker`**、key 一直有效 —— 正是 `ERRATA.md::ERR-META-39` 那条"照抄旧结论、不当场试一次"的复发。
+  **判据：连不上时先试候选用户名，别把"permission denied"直接读成"只能密码"。**
+
+### 5. 未解 / 待验
+
+- `qbit_manage` 侧的**配置与接线**不在本仓 —— 由用户/独立项目负责，本仓只负责"不再生产 qbtune"。
+- `counts.json` / `tools/doc-audit/out/*.tsv` 是**生成物**，需重跑 `tools/gen_counts.py` 与 doc-audit 再生（不手改）。
+- ⚠️ **顺带发现一个与 qbtune 无关的既有时间炸弹（已修）**：`tools/opencd-crawl-selftest.py`
+  把 `D1="2026-09-22"` **写死**，而判据⑬调 `ledger_prune(7)`（按 `date('now','-6 days')` 切）。
+  今天（2026-10-04）该日期已 **12 天前** ⇒ 被 prune 掉 ⇒ 判据⑬ `当天的值没被误删` 失败
+  （`gen_counts` 自检从 8/8 掉到 7/8）。**已修**：改成 `D1=今天 / D2=昨天`（相对 `date.today()`），
+  **永远**在保留窗内 ⇒ 自检恢复 **8/8**。教训记入 `ERRATA.md::ERR-META-47`。任务 `#14` 已完成。
+
+---
+
+## 2026-10-04（凌晨·续 3）—— #11 长尾：opencd_rate「请求 vs 种子」量纲缺口（部分闭合）
+
+### 1. 关系/背景
+
+`opencd_rate.py` 的 `RateGate` 三个旋钮（每日上限/每轮预算/最小间隔）**全是「请求」量纲**，
+但用户的心里模型是「**种子**」。模块头「已知缺口①」记着这点、`db.py` 留了 `LEDGER_KIND_REQUEST`
+"旁边将来加 kind" 的位置 —— 本轮把这半步做掉。
+
+### 2. 做法（★ 只新增，不动闸门）
+
+- **`db.py`**：加 `LEDGER_KIND_SEED = "seed"`（与 `request` 两本独立账，同表不同 kind）。
+- **`opencd_ingest.ingest()`**：入库时**只在新行**记 `kind='seed'` +1。
+  - 判据 = `db.get_status(ih) is None`（该 info_hash **此前不在库**）。
+  - **为什么不能"每次 ingest 都 +1"**：`save_task` 是 **UPSERT**，重跑/补字段会再次走到这
+    ⇒ 会把同一条种子**重复计入**。
+  - **顺序**：先读存在性、再 `save_task`（写完再读就永远不为 None）。
+  - **记账独立 try**：记账失败**绝不许反噬入库**（入库已成功，不能因记账异常让调用方以为入库失败）。
+- **`crawl.py` / `topup_opencd_fields.py`**：摘要里**与请求账分开报**「今日入库 N 条种子」。
+- **`opencd_rate.py`**：模块头「已知缺口①」标注**部分闭合**（明确：闸门仍按请求=站点保护；
+  种子账=产能口径；**两件事故意分开**，没把闸门改成按种子卡 —— 那会与站点保护错位，`ERR-META-05`）。
+
+### 3. 实测（本机）
+
+- `opencd_ingest.py --selftest`：新增判据⑭（新入库 +1、重复 == 不变、前置不在库）⇒ **60/60 全对**。
+- `tools/opencd-crawl-selftest.py`：**30/30**（未受影响）。
+- `gen_counts`：自检 **8/8**、ERR 106 条。
+- 语法检查：`db.py/crawl.py/opencd_ingest.py/opencd_rate.py/topup_opencd_fields.py` 全 OK。
+
+### 4. 边界（★ 别读成"全闭合"）
+
+- **闸门（硬刹车）仍按请求**，未按种子 —— 这是**刻意的**（站点保护不可与产能口径混）。
+- 真要"按种子卡闸门"仍要在**闸门层**引入种子概念，**还没做**，有风险，暂不做。
+- 未部署到 NAS（本轮只改代码 + 本机自检；部署由用户决定）。
+
+---
+
+## 2026-10-04（凌晨·续 2）—— 订正 `ERR-QB-06`：「3060 稳」不成立 + s6 守护真相
+
+### 1. 起因（任务 `#10`）
+
+`ERR-QB-06` 记的是 3020 qB 虚拟内存泄漏（`VmSize` 单调涨、`VmRSS` 平 ⇒ `std::bad_alloc`）。
+本轮实测要**订正两处**：① 「3060 稳」的假设；② 「容器在跑」被当成「进程没崩」的误读。
+
+### 2. 实测（NAS，2026-10-04，一手数据）
+
+- **两个 qB 实例**（都是 `linuxserver/qbittorrent:5.2.4`，都 `Up`）：
+  - `qbittorrent-opencd`（**:3020**，本项目用）：`VmSize` **5.90→5.95→6.00 GB**（40s +100MB ≈ **+2.5MB/s，仍在漏**），`VmRSS` 平 ~437MB。
+  - `qbittorrent-reseed`（**:3060**，reseed 工具用）：`VmSize` ≈ **89.9 GB 但三次采样平**（89.944→89.942→89.944），`VmRSS` ~145MB。
+  ⇒ **同版本一个涨一个平** ⇒ 「3060 稳」**不能**推出「泄漏被升级修掉了」。
+
+- **s6 守护**：两容器 **PID 1 = `s6-svscan`**（`/etc/s6-overlay` 存在；qB 由 `/run/service/svc-qbittorrent` 经 `s6-supervise` 拉起）。
+  ⇒ qB 进程崩了会被 **s6 静默拉起**，而 **Docker `RestartCount` 不 +1、容器仍 `Up`、`StartedAt` 不变**。
+  实测：两容器 `RestartCount=0`，但**这不能证明进程没崩过**（本窗口内 qB 进程启动时刻 = 容器启动时刻，故**本窗口确实没崩**，但也说明不了别的窗口）。
+
+### 3. 订正内容（已写入 `ERRATA.md::ERR-QB-06` 下方的 `>` 注）
+
+1. **「3060 稳」不成立**：泄漏与实例运行状态相关，须**每实例各自采样看趋势**。
+2. **s6 守护真相**：判「进程有没有崩过」**不能读 Docker 元数据**（`RestartCount`/`Up`），
+   要读**进程自身启动时刻**（`ps -o lstart= -p <qB pid>`）与容器 `StartedAt` 比 —— 不一致即被守护重启过。
+   一般化：**「容器在跑」≠「里面进程从头跑到尾」**。
+
+### 4. 未做 / 边界
+
+- 本轮**只订正认知**，**不修** qB 泄漏（用户此前明确「崩溃先放着」）。
+- 用户替代者 `qbit_manage_opencd` 已在跑；qB 管理职责交接中。
+
+---
+
 ## 2026-10-04（凌晨）—— ★★★ 蟹黄堡"最近两个种子没做种"根因：qB 升级改登录响应（`ERR-QB-07`）
 
 ### 0. 起因（用户报障）
@@ -74,10 +214,10 @@
   （先 `docker update --restart=no` 再 `stop`；恢复重启策略：`--restart=unless-stopped`）
 - ✅ **#5** 鲍正芳那条分类补成 `CrabPT` —— **已做**（`CrabPT` 分类现 4 条全在做种）
 - ⛔ **#6** rotate qB API Key —— **用户明确不管**（已取消）
-- ⏳ **#7** 排查 qbtune 进程为何停止写心跳
+- ⛔ **#7** 排查 qbtune 进程为何停止写心跳 —— **作废**（qbtune 已整体废弃，见第 7 节）
 - ⛔ **#8** 3020 qB 崩溃（`bad_alloc`/VmSize 泄漏）—— **用户明确不修**（已取消）
 - ✅ **#9** 补记录延迟做种部署 + 实测 —— **见下"第 6 节"，实测已通、并修了一个真缺陷**
-- ⏳ **#10** 订正 `ERR-QB-06` 的"3060 稳"假设 + 记 s6 守护真相
+- ✅ **#10** 订正 `ERR-QB-06` 的"3060 稳"假设 + 记 s6 守护真相 —— **已做**（见上「凌晨·续 2」）
 - ✅ **#11** 长尾里的"邮件告警"—— 转由独立项目接手，本仓出「告警总纲」（见下）
 
 ### 6. ★★★ 延迟做种端到端实测（用户点名"实测能不能生效"）—— 实测抓到一个真缺陷并已修

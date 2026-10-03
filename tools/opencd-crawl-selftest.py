@@ -47,6 +47,7 @@ import socketserver
 import sys
 import tempfile
 import threading
+from datetime import date, timedelta
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -314,7 +315,14 @@ def main(json_mode=False):
     # ★ 这几条**不需要 mock**（纯本地），但仍放在这里：`db.py` 刻意没有自己的
     #   `--selftest`（那要改所有模块都依赖的 import 顺序），而本文件已经有
     #   temp `DATA_DIR` 夹具（见文件头），正好承接。
-    D1, D2 = "2026-09-22", "2026-09-21"
+    # ★★ 日期必须**相对今天算**，不能写死（ERR-META 的"文档/测试里写死的值会过期"一族）：
+    #   判据⑬ 调 `ledger_prune(7)`，它按 `date('now','-6 days')` 切（保留今天+近 6 天）。
+    #   早先这里写死 `D1="2026-09-22"`/`D2="2026-09-21"` —— 一开始在窗口内**能过**，
+    #   但**过了 7 天就必然失败**：那两个 key 变成"旧行"，被 prune 删掉，
+    #   于是判据⑬「当天的值没被误删」得 0（实测 2026-10-04 复现：gen_counts 自检 8/8→7/8）。
+    #   ⇒ 改成 `today` / `yesterday`：**永远**在 `prune(7)` 的保留窗内，且两者不同。
+    _today = date.today()
+    D1, D2 = _today.isoformat(), (_today - timedelta(days=1)).isoformat()
 
     print("\n【判据⑨】账本：处女库 = 0（不是 None）→ add 后 = 1")
     db.init_db()                          # 建表（幂等）
