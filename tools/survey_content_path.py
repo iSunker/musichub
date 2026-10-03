@@ -77,7 +77,7 @@ sys.path.insert(0, os.environ.get("MUSOPIA_APP_DIR", "/app"))
 
 import config  # noqa: E402
 
-# ★ 做种中的 state（与 `readd_qb.py` / `qb_state_probe.py` 同口径，别各写一套）
+# ★ 做种中的 state（与 `tools/readd.py` / `qb_state_probe.py` 同口径，别各写一套）
 SEEDING_STATES = ("stalledUP", "uploading", "forcedUP")
 
 # ★★ 17304 的两个 hash（**已知**那一对）—— 用来把"抽样基线"和"已知样本"并排看
@@ -154,7 +154,7 @@ def measure(t):
 
 
 def one_line(r, width=58):
-    """把一条结果打成人话一行。★ 名优先保 @Musopia（照抄 readd_qb 的教训）。"""
+    """把一条结果打成人话一行。★ 名优先保 @Musopia（照抄 tools/readd.py qb 段的教训）。"""
     nm = (r["name"] or "")[:width]
     mark = {"cp在": "✅", "cp不存在": "★★", "cp不是目录": "⚠️ ",
             "读不到": "❔", "cp空": "❔"}.get(r["verdict"], "?")
@@ -226,14 +226,14 @@ def main(argv=None):
     print()
 
     try:
-        from qbittorrentapi import Client
+        import qb_client
     except ImportError as e:                                   # noqa: BLE001
+        # ★ 缺库 ⇒ `qb_client.build()` 首行抛的也是 ImportError（同"没装 qbittorrentapi"）。
         print(f"  ✗ 没装 qbittorrentapi（{e}）")
         return 1
     try:
-        qb = Client(host=config.QB_HOST, username=config.QB_USER,
-                    password=config.QB_PASS)
-        qb.auth_log_in()
+        # ★★ 唯一构造点 `qb_client.build`（`ERR-QB-08`）：优先 API Key，回退账号密码。
+        qb = qb_client.build(config)
     except Exception as e:                                     # noqa: BLE001
         print(f"  ✗ 连不上 qB（{config.QB_HOST}）：{type(e).__name__}: {e}")
         print("    ★ QB_HOST=127.0.0.1 ⇒ 只有**在容器内 / NAS 本机**连得上。")

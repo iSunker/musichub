@@ -93,8 +93,9 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     try:
-        from qbittorrentapi import Client
+        import qb_client
     except ImportError as e:
+        # ★ 缺库 ⇒ `qb_client.build()` 首行抛的也是 ImportError（同"没装 qbittorrentapi"）。
         print(f"✗ 没装 qbittorrentapi（{e}）", file=sys.stderr)
         return 1
 
@@ -109,9 +110,8 @@ def main(argv=None):
     print()
 
     try:
-        qb = Client(host=config.QB_HOST, username=config.QB_USER,
-                    password=config.QB_PASS)
-        qb.auth_log_in()
+        # ★★ 唯一构造点 `qb_client.build`（`ERR-QB-08`）：优先 API Key，回退账号密码。
+        qb = qb_client.build(config)
     except Exception as e:                                   # noqa: BLE001
         print(f"✗ 连不上 qB（{config.QB_HOST}）：{type(e).__name__}: {e}",
               file=sys.stderr)

@@ -4,7 +4,7 @@
 它要解开的那个矛盾（SESSION-NOTES 里 `tid=198601 status=NO_TORRENT_FILE` 却"四道预检全过"）
 ═══════════════════════════════════════════════════════════════════════════
 ★ 不引「编号节」这种指法：那套编号标题已随文档体制迁移退役（编号只 README/ERRATA
-  还在用），引它会被 `tools/doc-audit/02_refs.py` 报成 LEGACY —— 而它的"目标不存在"
+  还在用），引它会被 `tools/doc-audit/audit.py`（原 `02_refs.py`）报成 LEGACY —— 而它的"目标不存在"
   会让**真正悬空的引用埋进这种噪声里**。⇒ 用**标题文本**指路，
   标题改名时 grep 得到、也不受编号体制影响。
   ★ 同理：★**别在这个文件里把那个退役编号原样写出来**（连"反例"也不行）——
@@ -111,13 +111,15 @@ def qb_index():
       "qB 里一条都没有"，那是一个**看着像真的**错结论（`ERR-META-01`）。
     """
     try:
-        from qbittorrentapi import Client
+        import qb_client
     except ImportError as e:
+        # ★ 等价于"没装 qbittorrentapi"：`qb_client.build()` 的首行就是
+        #   `from qbittorrentapi import Client` ⇒ 缺库时它抛的正是 ImportError。
+        #   ⇒ 两段式判据（"没装库" vs "连不上"）原样保留，字样逐字不变。
         return None, f"没装 qbittorrentapi（{e}）"
     try:
-        qb = Client(host=config.QB_HOST, username=config.QB_USER,
-                    password=config.QB_PASS)
-        qb.auth_log_in()
+        # ★★ 唯一构造点 `qb_client.build`（`ERR-QB-08`）：优先 API Key，回退账号密码。
+        qb = qb_client.build(config)
         out = {}
         for t in qb.torrents_info():
             out[(t.hash or "").lower()] = {

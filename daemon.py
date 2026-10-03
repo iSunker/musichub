@@ -738,10 +738,10 @@ def _drain_pending_readds():
 
     # ★ 只在**真有到点条目**时才连 qB（没有待办就一条连接都不建）
     try:
-        from qbittorrentapi import Client
-        qb = Client(host=config.QB_HOST, username=config.QB_USER,
-                    password=config.QB_PASS)
-        qb.auth_log_in()
+        # ★★ 唯一构造点 `qb_client.build`（`ERR-QB-08`）：优先 API Key，回退账号密码。
+        #   ★ 失败契约不变：`build()` 连不上会抛 ⇒ 仍由本 except 收（日志 + 顺延 + return）。
+        import qb_client
+        qb = qb_client.build(config)
     except Exception as e:                                      # noqa: BLE001
         # qB 连不上 ⇒ **不改队列**（due 条目原样留到 rest 里，下轮重试）。
         # ★ 这里显式把 due 并回 rest 再写盘，否则 pop 出来的会因为"没 ack"

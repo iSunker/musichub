@@ -26,7 +26,7 @@ except Exception:
     pass
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-DST_DEFAULT = pathlib.Path("//iSunker-DS423/docker_ssd/musopia_script2")
+DST_DEFAULT = pathlib.Path("//iSunker-DS423/docker_ssd/opencd2others")
 
 
 def resolve_dst():
@@ -90,7 +90,8 @@ def main():
     ap.add_argument("--dst", default=None, help="NAS 部署目录（默认自动定位）")
     args = ap.parse_args()
     dst = pathlib.Path(args.dst) if args.dst else resolve_dst()
-    dbf = dst / "data.db"
+    # ★ 2026-10-05：库已移进生产端的 `data/` 子目录（compose `${STATE_DIR:-./data}:/data`）。
+    dbf = dst / "data" / "data.db"
 
     where = read_pending_where()
 

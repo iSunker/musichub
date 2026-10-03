@@ -31,9 +31,9 @@ def resolve_paths(tasks):
         return
 
     try:
-        from qbittorrentapi import Client
-        qb = Client(host=config.QB_HOST, username=config.QB_USER, password=config.QB_PASS)
-        qb.auth_log_in()
+        # ★★ 唯一构造点 `qb_client.build`（`ERR-QB-08`）：优先 API Key，回退账号密码。
+        import qb_client
+        qb = qb_client.build(config)
     except Exception as e:
         print(f"⚠️  连不上 qBittorrent ({e})，只能依赖库里已有的 content_path")
         return

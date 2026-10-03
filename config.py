@@ -42,6 +42,19 @@ QB_HOST = os.getenv("QB_HOST", "http://127.0.0.1:3020")
 QB_USER = os.getenv("QB_USER", "admin")
 QB_PASS = require_env("QB_PASS")
 
+# ★★ qB API Key（2026-10-04 加，见 `qb_client.py` 与 `ERR-QB-08`）。
+#   ★ 为什么：qB 5.x 对**登录接口**做失败计数 ⇒ 用户名/密码错几次就**封 IP**
+#     （「身份认证失败次数过多」，HTTP 403）。而本项目原先有 13 处各自
+#     `auth_log_in()` ⇒ **重试本身就是把 IP 推向封禁的力量**。
+#     API Key 走 `Authorization: Bearer`，**不碰登录接口** ⇒ 不再会被自己的重试封掉。
+#   ★★ 用 `os.getenv`（**可选**）而**不是** `require_env`：
+#     与 `CRABPT_COOKIE` 同款 —— 可选键缺失**不许**让整个 `import config` 挂掉
+#     （那会把"缺一个可选键"升级成"全站不可用"）。留空 ⇒ `qb_client.build` 回退到
+#     用户名/密码（老行为，一字不改）。
+#   ★★★ 这是**凭据**：绝不打印、绝不进 daemon 的 env 快照
+#     （`daemon.ENV_SNAPSHOT_KEYS` 是**白名单**制 ⇒ 本键默认不外溢，同 `LSKY_TOKEN` 的纪律）。
+QB_API_KEY = os.getenv("QB_API_KEY", "")
+
 OPENCD_CATEGORY = os.getenv("OPENCD_CATEGORY", "opencd")
 PUBLISH_CATEGORY = os.getenv("PUBLISH_CATEGORY", "Musopia")
 
@@ -170,5 +183,9 @@ def print_runtime_info():
     print(f"🗂️  DB_PATH            = {os.path.abspath(DB_PATH)}")
     print(f"🗂️  OUTPUT_TORRENT_DIR = {os.path.abspath(OUTPUT_TORRENT_DIR)}")
     print(f"🌐 QB_HOST             = {QB_HOST}")
+    # ★ 只报"配没配"，**绝不打印 key 本身**（凭据纪律）。★ 这不是装饰：
+    #   "现在到底走 key 还是走账号密码"直接决定"会不会被登录失败计数封 IP"，
+    #   是启动自检最该看清的一格（`ERR-QB-08`）。
+    print(f"🔑 QB_API_KEY          = {'已配置（走 API Key）' if QB_API_KEY else '未配置（回退账号密码）'}")
     print(f"🌐 MUSOPIA_URL         = {MUSOPIA_URL}")
     print("=" * 50)

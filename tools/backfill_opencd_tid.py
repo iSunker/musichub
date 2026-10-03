@@ -62,7 +62,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 # ★ 两个库都在 NAS 上，走 SMB **只读**直连。
 #   ★★ 不 cp —— 见 ERRATA.md 的 ERR-SQL-01（cp 会丢 WAL 里未 checkpoint 的数据）。
 VERTEX_DB = r"//iSunker-DS423/docker_ssd/vertex2/vertex/db/sql.db"
-LOCAL_DB = r"//iSunker-DS423/docker_ssd/musopia_script2/data.db"
+LOCAL_DB = r"//iSunker-DS423/docker_ssd/opencd2others/data/data.db"
 
 # 只认皇后这一家的记录（vertex 库里还有 ourbits / hdhome 等别的站）
 QUEEN_TRACKER = "tracker.open.cd"

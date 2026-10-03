@@ -473,9 +473,10 @@ def connect_qb():
         长得一样（`readd_to_qb` 的纪律）。
     """
     try:
-        from qbittorrentapi import Client
-        qb = Client(host=config.QB_HOST, username=config.QB_USER, password=config.QB_PASS)
-        qb.auth_log_in()
+        # ★★ 唯一构造点 `qb_client.build`（`ERR-QB-08`）：优先 API Key，回退账号密码。
+        #   ★ 失败契约不变：`build()` 连不上会抛 ⇒ 仍由本 try 收、打印、返回 None。
+        import qb_client
+        qb = qb_client.build(config)
         return qb
     except Exception as e:                                  # noqa: BLE001
         print(f"⚠️  连不上 qBittorrent ({e})，本次不做回加")
@@ -555,7 +556,7 @@ def readd_to_qb_crabpt(qb, client, info_hash, torrent_id):
         if config.SEED_DELAY_MIN > 0:
             readd_queue.enqueue(
                 content, save_path, config.CRABPT_PUBLISH_CATEGORY,
-                config.SEED_DELAY_MIN, note=f"蟹黄堡 {t.get('info_hash','')[:12]}…",
+                config.SEED_DELAY_MIN, note=f"蟹黄堡 {info_hash[:12]}…",
             )
             return
         qb.torrents_add(
@@ -1186,6 +1187,132 @@ def selftest_crabpt_explain_same_source(verbose=True):
     return (not detail), detail
 
 
+def selftest_readd_names_defined(verbose=True):
+    """★★★ 断言两条**回加**路（`readd_to_qb` / `readd_to_qb_crabpt`）里，
+    **函数局部**变量不会在"首次赋值之前"被求值（= `UnboundLocalError` 的形状）。
+
+    ★★★ 为什么必须有（2026-10-04 坐实的 `ERR-PUBLISH-02`）：
+      `readd_to_qb_crabpt` 的延迟回加分支写了
+        `note=f"蟹黄堡 {t.get('info_hash','')[:12]}…"`
+      而 **`t` 在该函数里"赋值"发生在更靠后**（`t = got[0]`，在 `enqueue` 之后的
+      复核块里）⇒ `SEED_DELAY_MIN>0` 时**每条蟹黄堡发布都 `UnboundLocalError`**，
+      `enqueue` 从未执行 ⇒ 19 条发布成功却 **0 条做种**（站点记 hit-and-run）。
+      ⇒ 这类 bug **抄自"看起来像"的另一条路**（乌托邦版写的是参数 `info_hash`），
+        只差一个名字 ⇒ **靠人眼对读抓不住**，正需要一条机器判据。
+
+    ★★ 判据怎么定（这是本函数两次返工的结论，别退回第一版）：
+      · 第一版按"逐 stmt 维护已绑定集合"扫 ⇒ **假阳性一片**：`orig`/`got`/`t`
+        都是**合法**的（它们的赋值在 `if`/`try`/`with` 块里，而使用在**更靠后**的
+        顶层语句里）。逐 stmt 的顺序模型**不懂嵌套块**，把合法的报成违规。
+        ⇒ 而**假阳性比假阴性更坏**（`_code_only` 的 docstring 已写明：
+          它让人把一条有效判据删掉）。
+      · 终版改为**用 Python 自己的作用域分析**（`symtable`）定"谁是这个函数的局部变量"
+        （`is_local() ∧ is_assigned() ∧ ¬is_parameter()`）—— 这一点由编译器保证，不靠我推。
+        然后只查一件事：**该名字有没有在"行号小于它首次赋值行"的地方被读**
+        （AST 里 `Name(Load)` 的 lineno < 首次 `Name(Store)` 的 lineno）。
+        ★ 这是**行号顺序**这个简单判据，但它对"局部变量"这个**已由 symtable 锁定**的
+          小集合是够用的：这些名字要么是参数（已绑）、要么是本函数内赋值（顺序可比）。
+        ★ 已知局限（如实写下）：若某名字"只在**循环体内**晚赋值、循环体外早读"，
+          行号顺序仍会对（早读的 lineno 更小）—— 与本条要防的形状一致，不误伤。
+          真正难判的是"同一行、条件分支"的边角（如 `a = a or x`），
+          那属于自引用而非"未绑定"，且本项目无此写法 ⇒ 不在本条范围。
+
+    ★ 阴性对照（必须做）：把原 bug 的形状（把正确片段里的 `info_hash[:12]`
+      换成 `t.get('info_hash','')[:12]`）塞回**源码字符串**，判据**必须**报红；
+      否则这条自检等于没验过（`selftest_crabpt_isolation` 的 docstring 立的规矩）。
+
+    ★ 只读：只读**本文件源码**，不碰站点、不碰库。
+    """
+    # ★ 控制台编码守卫：本函数会打 ✅/❌（非 GBK 字符），Windows 控制台默认 GBK
+    #   ⇒ 不加这行会在**第一行输出**就 UnicodeEncodeError（同 `opencd_rate` 自检）。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:                                   # noqa: BLE001
+        pass
+
+    import symtable
+
+    src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    tree = _ast.parse(src)
+    targets = ("readd_to_qb", "readd_to_qb_crabpt")
+
+    def _find_fn(t, name):
+        """在 symtable 树里按名找函数作用域（含嵌套）。"""
+        for c in t.get_children():
+            if c.get_name() == name:
+                return c
+            r = _find_fn(c, name)
+            if r is not None:
+                return r
+        return None
+
+    def _scan(parsed_src, parsed_tree, label):
+        """返回该份源码里"局部变量被在首赋值前读"的明细（空 = 通过）。"""
+        try:
+            st = symtable.symtable(parsed_src, "<publish.py>", "exec")
+        except SyntaxError as e:
+            return [f"✗ {label}: 源码语法错误，无法分析：{e}"]
+        out = []
+        for nm in targets:
+            f = _find_fn(st, nm)
+            fnode = next((n for n in _ast.walk(parsed_tree)
+                          if isinstance(n, _ast.FunctionDef) and n.name == nm), None)
+            if f is None or fnode is None:
+                out.append(f"✗ ★ 找不到 `{nm}`（改名了？）本条自检失效")
+                continue
+            # ★ 只取"函数自己的局部"：symtable 保证这一点，不靠我推。
+            locals_assigned = {
+                s.get_name() for s in f.get_symbols()
+                if s.is_local() and s.is_assigned() and not s.is_parameter()
+            }
+            # 首 STORE 行 + 所有 LOAD 行
+            first_store, loads = {}, {}
+            for n in _ast.walk(fnode):
+                if isinstance(n, _ast.Name):
+                    if isinstance(n.ctx, _ast.Store):
+                        first_store[n.id] = min(first_store.get(n.id, n.lineno), n.lineno)
+                    elif isinstance(n.ctx, _ast.Load):
+                        loads.setdefault(n.id, []).append(n.lineno)
+            for name in sorted(locals_assigned):
+                fs = first_store.get(name)
+                if fs is None:
+                    continue
+                early = sorted({l for l in loads.get(name, []) if l < fs})
+                if early:
+                    out.append(
+                        f"✗ ★★ {label}: `{name}` 在**首次赋值之前**被读"
+                        f"（读于行 {early}，首次赋值在行 {fs}）"
+                        f" ⇒ 运行时 `UnboundLocalError`"
+                        f"（正是 `ERR-PUBLISH-02` 的形状）")
+        return out
+
+    detail = _scan(src, tree, "publish.py")
+
+    # ---------- 阴性对照：把原 bug 形状塞回源码，判据必须报红 ----------
+    # ★ 正确片段 = `{info_hash[:12]}`；坏片段 = `{t.get('info_hash','')[:12]}`
+    #   ★ 用**拼接**构造 bad 片段，免得嵌套引号把源码字面量搞脏。
+    _good_frag = "{" + "info_hash" + "[:12]}"
+    _bad_frag = "{" + "t.get(" + repr("info_hash") + ", " + repr("") + ")[:12]}"
+    bad_src = src.replace(_good_frag, _bad_frag)
+    if bad_src == src:
+        detail.append("✗ 阴性对照的**锚点**没找到（那行已被改动？）⇒ "
+                      "本条自检失效（锚点漂了 = 没测）")
+    else:
+        try:
+            neg = _scan(bad_src, _ast.parse(bad_src), "NEG")
+        except SyntaxError as e:
+            neg = [f"✗ 阴性对照源码语法错误：{e}"]
+        if not any("`t`" in d for d in neg):
+            detail.append("✗ ★ 阴性对照失败：把原 bug（`t.get(...)`）塞回源码后，"
+                          "判据**没**报到 `t` ⇒ 本条自检是空的")
+
+    if verbose:
+        mark = "✅" if not detail else "❌"
+        print(f"{mark} 回加路名字绑定自检：`readd_to_qb` / `readd_to_qb_crabpt` "
+              f"里没有「首赋值前读」的局部变量（含阴性对照）")
+        for d in detail:
+            print(f"    {d}")
+    return (not detail), detail
 def run_crabpt(args):
     """蟹黄堡（crabpt.vip）发布路径。★ 与 `main()` 的乌托邦路径**并列**，不互相调用。
 
@@ -1613,14 +1740,19 @@ def main():
         ok1, _ = selftest_crabpt_isolation()
         ok2, _ = selftest_crabpt_transfer_queue()
         ok3, _ = selftest_crabpt_explain_same_source()
-        # ★ 三条判据**都要**跑（`and` 而不是 `or`）—— 它们是**独立**的失效模式：
+        # ★★ 第 4 条（2026-10-04 加）：两条回加路里"绑定前求值"的名字。
+        #   ★ 独立失效模式：前三条查的是"站点/口径"，这条查的是"**Python 作用域**"
+        #     —— `ERR-PUBLISH-02` 就是它（`t` 未定义 ⇒ 19 条发布成功却 0 条做种）。
+        ok4, _ = selftest_readd_names_defined()
+        # ★ 四条判据**都要**跑（`and` 而不是 `or`）—— 它们是**独立**的失效模式：
         #   ① 碰了乌托邦的列（"发一条污染四个判据"）
         #   ② 队列取错（"静默多发、不可撤销"）
         #   ③ ★ 队列口径与**解释口径**分叉（"工具告诉你它在队列里、实际不发"
         #      —— 2026-09-28 实测，`--only` 报文与实际筛选互相矛盾）
+        #   ④ ★ 回加路里名字用在了绑定之前（"发布成功却永不做种"，`ERR-PUBLISH-02`）
         #   ★ 用 `or` 的话，一条报红时另一条**根本没跑**，而"没跑"与"通过"
         #     在输出上应当长得不一样（`ERR-META-14`：兜底不许冒充真结果）。
-        ok = ok1 and ok2 and ok3
+        ok = ok1 and ok2 and ok3 and ok4
         # ★★ 必须 `sys.exit`，**不能 `return`** —— `main()` 是被
         #   `if __name__ == "__main__": main()` 调的，那个写法的返回值**会被丢掉**
         #   ⇒ 退出码恒为 0 ⇒ **自检报红也没人看得见**（阴性对照实测踩到这一条）。
@@ -1818,9 +1950,9 @@ def main():
     qb = None
     if not args.no_readd:
         try:
-            from qbittorrentapi import Client
-            qb = Client(host=config.QB_HOST, username=config.QB_USER, password=config.QB_PASS)
-            qb.auth_log_in()
+            # ★★ 唯一构造点 `qb_client.build`（`ERR-QB-08`）：优先 API Key，回退账号密码。
+            import qb_client
+            qb = qb_client.build(config)
         except Exception as e:
             print(f"⚠️  连不上 qBittorrent ({e})，本次不做回加")
 

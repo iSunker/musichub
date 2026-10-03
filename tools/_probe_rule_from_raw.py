@@ -24,7 +24,7 @@
    本脚本的任务就是把这个数**算出来**，而不是把 248 当成一个已经成立的结论。
 
 用法（本机；只读）:
-    set DATA_DIR=//iSunker-DS423/docker_ssd/musopia_script2
+    set DATA_DIR=//iSunker-DS423/docker_ssd/opencd2others/data
     python tools/_probe_rule_from_raw.py                    # 汇总（默认）
     python tools/_probe_rule_from_raw.py --json out.json    # 连逐条结果一起存
 """
@@ -44,7 +44,7 @@ os.environ.setdefault("MUSOPIA_COOKIE", "c_secure_pass=x")
 os.environ.setdefault("MUSOPIA_PASSKEY", "x")
 os.environ.setdefault("PICGO_API_KEY", "x")
 
-LOCAL_DB = r"//iSunker-DS423/docker_ssd/musopia_script2/data.db"
+LOCAL_DB = r"//iSunker-DS423/docker_ssd/opencd2others/data/data.db"
 # ★ 落盘目录的真值来自 `crawl.RAW_DIR`（= `OPENCD_RAW_DIR` 或 `${DATA_DIR}/raw_html`）。
 #   配置：本机跑时把 `OPENCD_RAW_DIR` 指到 NAS 上的那一个。
 LOCAL_RAW = os.path.join(os.environ.get("DATA_DIR", ""), "raw_html")
@@ -92,7 +92,7 @@ def main():
     print(f"  目标行数  : {len(rows)}（口径 status='SUCCESS' + tid 非空 + mapped 空）")
 
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    import opencd_parse as P
+    import opencd as P
 
 
     if not os.path.isdir(args.raw):

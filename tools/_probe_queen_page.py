@@ -23,7 +23,7 @@
   与 `crawl.py` 的 `save_raw` 同目录、同命名，方便后续 crawl 复用它省请求）。
 
 在 NAS 上运行（**一行**）:
-    cd /volume2/docker_ssd/musopia_script2
+    cd /volume2/docker_ssd/opencd2others
     sudo docker compose --profile tools run --rm tools python /data/_probe_queen_page.py
 
 换 id: 加 -e PROBE_TID=200983
@@ -36,9 +36,9 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.environ.get("MUSOPIA_APP_DIR", "/app"))
 
 import crawl
-import opencd_rate          # noqa: F401  （crawl 通过它暴露；显式 import 便于无 crawl 时诊断）
-import opencd_map
-import opencd_parse
+import opencd as opencd_rate          # noqa: F401
+opencd_map = opencd_rate  # noqa: F401
+opencd_parse = opencd_rate  # noqa: F401
 
 TID = os.getenv("PROBE_TID", "200982")
 SAVE = os.environ.get("PROBE_SAVE", "") == "1"

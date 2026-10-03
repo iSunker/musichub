@@ -47,9 +47,9 @@ def _qb_paths(tasks):
     if not need:
         return 0
     try:
-        from qbittorrentapi import Client
-        qb = Client(host=config.QB_HOST, username=config.QB_USER, password=config.QB_PASS)
-        qb.auth_log_in()
+        # ★★ 唯一构造点 `qb_client.build`（`ERR-QB-08`）：优先 API Key，回退账号密码。
+        import qb_client
+        qb = qb_client.build(config)
         by_hash = {}
         for t in qb.torrents_info():
             by_hash[t.hash.lower()] = t.content_path
@@ -93,7 +93,7 @@ def main():
         _qb_paths(tasks)
 
     # ── ② 预览：先报告每条会走哪条路（★ 不发任何请求）──
-    import opencd_parse as P
+    import opencd as P
     from crawl import load_raw          # 只用来读已落盘的详情页（**零请求**）
 
     print("\n" + "=" * 62)
@@ -154,7 +154,7 @@ def main():
     client = None
     if needs_station:
         import crawl
-        import opencd_rate
+        import opencd as opencd_rate  # 原 `import opencd_rate`；已并入 opencd
         gate = opencd_rate.RateGate(
             max_per_round=int(os.getenv("OPENCD_MAX_PER_ROUND", "20")),
             min_interval=float(os.getenv("OPENCD_MIN_INTERVAL", "120")),

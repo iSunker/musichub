@@ -6,7 +6,7 @@
 用户问：「皇后在 100% 做种，为什么乌托邦校验到 35% 就暂停了？有没有加种后
 自动校验的功能？」
 
-★ 定性（`readd_qb.py:18-19`）：
+★ 定性（`tools/readd.py` 的 qb 段模块头）：
       `緑黄色社会 - あたまご   site_id=17304  本地文件**已丢失**`
       `⇒ qB 里在，但 stalledDL 35.5%（下载卡住，与回加无关）`
 
@@ -17,7 +17,7 @@
    1. **qB 里这条现在是什么 state** —— `stalledDL`？还是已经变了？
       ★ 这决定走哪条路（见 `qb_state_probe.STATE_MEANING`）。
    2. **它在 qB 里的两个 hash 各是什么** —— 库里的 `info_hash`（皇后原种）
-      与站点产物的 hash **不是一回事**（`readd_qb.py` 模块头 ③）。
+      与站点产物的 hash **不是一回事**（`tools/readd.py` 的 qb 段模块头 ③）。
       ⇒ 两个都要查：前者是"本地在跑的老种"，后者才是"现在这条"。
    3. **`content_path` / `save_path` 指着哪** —— 补文件就是往那里补。
    4. **那个目录在不在、里面有几项、占多大** ——
@@ -65,13 +65,13 @@ import config  # noqa: E402
 # ★★ sid=17304 的**两个可能 hash** 都要能查：
 #   · 库里的 `info_hash` = **皇后原种**（本地在跑的老种，若有）
 #   · 站点产物的 hash  = `run.py` 用新 announce 重生成的
-#     ★ 后者**只能**从站点种子字节里读出来（`readd_qb.py` 模块头 ③），
+#     ★ 后者**只能**从站点种子字节里读出来（`tools/readd.py` 的 qb 段模块头 ③），
 #       所以本脚本**不猜**它 —— 要么 `--with-site` 去读，要么从
 #       `qB 里名字匹配的任务` 兜（后者会**明确标成"兜到的，不是铁证"**）。
 
 
 def load_row(db_path, sid):
-    """★ 只读。按 `site_torrent_id` 取那一行（就是 `readd_qb.py` 的 SELECT_SQL 口径）。"""
+    """★ 只读。按 `site_torrent_id` 取那一行（就是 `tools/readd.py` 的 qb 段 SELECT_SQL 口径）。"""
     con = sqlite3.connect(db_path, timeout=30)
     con.execute("PRAGMA query_only=1")
     con.row_factory = sqlite3.Row
@@ -206,14 +206,14 @@ def main(argv=None):
     print("【② qB 里这条的现状】（只 `torrents_info` / `torrents_files`）")
     print("─" * 74)
     try:
-        from qbittorrentapi import Client
+        import qb_client
     except ImportError as e:                                   # noqa: BLE001
+        # ★ 缺库 ⇒ `qb_client.build()` 首行抛的也是 ImportError（同"没装 qbittorrentapi"）。
         print(f"  ✗ 没装 qbittorrentapi（{e}）")
         return 2
     try:
-        qb = Client(host=config.QB_HOST, username=config.QB_USER,
-                    password=config.QB_PASS)
-        qb.auth_log_in()
+        # ★★ 唯一构造点 `qb_client.build`（`ERR-QB-08`）：优先 API Key，回退账号密码。
+        qb = qb_client.build(config)
     except Exception as e:                                     # noqa: BLE001
         print(f"  ✗ 连不上 qB（{config.QB_HOST}）：{type(e).__name__}: {e}")
         print("    ★ QB_HOST=127.0.0.1 ⇒ 只有**在容器内 / NAS 本机**连得上。")
@@ -236,7 +236,7 @@ def main(argv=None):
     needle = (row["formatted_title"] or "")[:10] or ""
     keys = [x for x in (needle, "あたまご", "緑黄色") if x]
     hits = [t for t in all_t if any(k.lower() in (t.name or "").lower() for k in keys)]
-    print(f"  ★ 名字兜（关键词 {keys}）—— **兜到的不算铁证**（`readd_qb.py` 教训乙）：")
+    print(f"  ★ 名字兜（关键词 {keys}）—— **兜到的不算铁证**（`tools/readd.py` 的 qb 段教训乙）：")
     if not hits:
         print("      一条都没兜到 ⇒ ★ 可能在 qB 里**根本不叫这个名字**（站点产物的")
         print("      name 与库里 formatted_title 不一定同前缀）⇒ 别据此下'没有'的结论")
@@ -332,14 +332,23 @@ def main(argv=None):
         print("─" * 74)
         try:
             sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            import readd_qb                                     # noqa: E402
+            # ★ 2026-10-05：原先是 `import readd_qb` + `readd_qb.make_gate_and_client()`
+            #   —— 那是**两个叠加的错**（`ERRATA` 已记）：
+            #     ① `make_gate_and_client` 从来不在 `readd_qb` 里（它在 `probe_subtitles.py`），
+            #        而且它返回的是**皇后站**的 `crawl.Client`（只有 `.get()`），
+            #        下不了乌托邦的种子；
+            #     ② 权威实现是"下**乌托邦**种子" → 只能用 `MusopiaClient`
+            #        （`readd_qb.py` 的 `client = MusopiaClient()` 那处）。
+            #   ⇒ 三个回加脚本合并成 `tools/readd.py` 后，改用它的 `site_client("musopia")`
+            #     （正是"乌托邦站 client"的唯一权威）与 `_torrent_infohash_qb`。
+            import readd                                        # noqa: E402
             import torf                                         # noqa: F401,E402
-            _g, client = readd_qb.make_gate_and_client()
+            client, _cat = readd.site_client("musopia")
             content = client.download_torrent(row["site_torrent_id"])
             if not content:
                 print("  ✗ 从站点下载种子失败")
             else:
-                nh, why = readd_qb.torrent_infohash(content)
+                nh, why = readd._torrent_infohash_qb(content)
                 if nh:
                     print(f"  ✅ 站点产物真 infohash = {nh}")
                     print(f"  ★ 与库里的（{db_hash[:16]}…）**不同**"
