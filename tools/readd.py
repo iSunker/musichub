@@ -1,3 +1,84 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""把「站上有、qB 里没在做种」的种子补进 qB（只写 qB；不碰站点、不碰库写口）。
+
+═══════════════════════════════════════════════════════════════════════════
+★ 本文件是三个回加脚本的合并体（读法：先看子命令，再看对应的段）
+═══════════════════════════════════════════════════════════════════════════
+原先它们是三个独立脚本，各自的模块头写满了来之不易的实战教训。合并后**逐字保留**
+在各自的段里（不改写、不删减），只是入口收敛成一个：
+
+    python tools/readd.py qb      [args…]   # 乌托邦（Musopia）侧回加 + 分类体检
+    python tools/readd.py crabpt  [args…]   # 蟹黄堡（CrabPT）侧回加
+    python tools/readd.py site    [args…]   # ★ 按**站点 id** 补「已上站但没做种」
+
+★ 三个子命令各自 `--help` 就是原来的用法说明。
+★ 合并时**只做了三件事**（其余一字未动）：
+    ① 三个 `main()` → `_main_qb()` / `_main_crabpt()` / `_main_site()`（分发用）；
+    ② 同名冲突改名：`torrent_infohash` → `_torrent_infohash_qb` /
+       `_torrent_infohash_crabpt`（**两份消息不同，不许合**）；
+       `load_rows` → `_load_rows_qb` / `_load_rows_crabpt` / `_load_rows_site`
+       （**三个签名与 SQL 都不同**）；`_ih_of` → `_ih_of`（无冲突，保留）。
+    ③ `qb_client()` 与 `SEEDING_STATES` 三处**逐字相同** ⇒ 只留一份。
+
+═══════════════════════════════════════════════════════════════════════════
+★★★ 共通的判据（三个段都照这个来，出自 `publish.py` 的 docstring）
+═══════════════════════════════════════════════════════════════════════════
+ ① **不传 `contentLayout` / `is_root_folder`** —— 传 `is_root_folder=False`
+    会被库改写成 `contentLayout=NoSubfolder` ⇒ qB 去 `/downloads/01.flac` 找，
+    而文件在 `/downloads/<专辑名>/01.flac` ⇒ `missingFiles` ⇒ **从不做种**。
+ ② **不传 `is_skip_checking`** —— 它是**唯一**能发现"文件对不上"的机制。
+ ③ **站点那条种子 != 库里的 `info_hash`** —— 站点种子是 `run.py` 用**新 announce**
+    **重新生成**的，infohash ≠ 库里 `info_hash`（皇后的原种）。
+    ⇒ 复核必须用 `torf` 从**刚下载的字节**里读真 hash。
+ ④ **`torrents_add()` 返回 qB 的原话**（`"Ok."`/`"Fails."`），**不是**抛异常
+    ⇒ 只 print("✅ 已提交") 是**把没抛异常当成加成功了**（本项目血债）。
+"""
+import argparse
+import io
+import os
+import sqlite3
+import sys
+import time
+
+sys.stdout.reconfigure(encoding="utf-8")
+
+# sys.path：容器里代码在 `/app`（compose 的 WORKDIR），本机跑则在仓库根。
+# ★ 原来只写 `/app` ⇒ **本机跑不了**（`import config` → ModuleNotFoundError）。
+#   ★★ 但"本机跑不了"本身就是一条**判据失效**：本机连不上 qB/站点，可**它至少
+#      该能 import 到 config** 才对得起"本文件在 --help 阶段就能自查语法"的期待
+#      （`ERR-META-01`：跑不起来的东西等于没有检测）。⇒ 与 `nas_health.py` 同款，
+#      把**仓库根**（`tools/../`）也塞进去，容器与本机都能 import。
+sys.path.insert(0, os.environ.get("MUSOPIA_APP_DIR", "/app"))
+sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
+
+import config      # noqa: E402
+from musopia import MusopiaClient, SiteError, LoginExpired  # noqa: E402
+
+
+# =====================================================================
+# 共用：连 qB（构造点唯一 = qb_client.build）
+# =====================================================================
+
+def qb_client():
+    """连 qB。★ 连不上就**报错退出**，不降级（ERR-SQL-05 同族：读不到 != 没有）。
+
+    ★★ 构造委托给全项目唯一构造点 `qb_client.build`（`ERR-QB-08`）：
+      优先 `QB_API_KEY`、回退账号密码。★ 函数名保持 `qb_client`（调用方依赖它），
+      故用 `import qb_client as qbc` 避开与模块同名。
+    """
+    import qb_client as qbc
+    return qbc.build(config)
+
+
+# ★ 做种中的 state（照抄 qB 自己的状态名）—— 三段共用一份（三处逐字相同）
+SEEDING_STATES = ("stalledUP", "uploading", "forcedUP")
+
+
+# =====================================================================
+# ============ 段 A：python tools/readd.py qb =========================
+# ============ 乌托邦侧回加 + 分类体检（原 tools/readd_qb.py）==========
+# =====================================================================
 """把「站点上有、qB 里没有」的种子补进 qB 做种（**只加 qB，不重发、不碰站点写口**）。
 
 ═══════════════════════════════════════════════════════════════════════════
@@ -102,55 +183,33 @@
 ═══════════════════════════════════════════════════════════════════════════
 用法（NAS 上，compose 目录）:
     # ① ★ 先看 qB 里有没有这些原种（只读、零出网）
-    sudo docker compose run --rm tools python tools/readd_qb.py --probe
+    sudo docker compose run --rm tools python tools/readd.py qb --probe
 
     # ② ★★ 按站点种子 infohash 查 qB（只读；判"投递到底成没成"）
-    sudo docker compose run --rm tools python tools/readd_qb.py \
+    sudo docker compose run --rm tools python tools/readd.py qb \\
         --verify-hashes 7aec0411...,865c0bff...
 
     # ③ 预览：准备加哪几条、save_path 是哪、文件在不在（只读）
-    sudo docker compose run --rm tools python tools/readd_qb.py --tids 17288
+    sudo docker compose run --rm tools python tools/readd.py qb --tids 17288
 
     # ④ 真加（★ 会写 qB，但不碰站点、不碰本地库）
-    sudo docker compose run --rm tools python tools/readd_qb.py --tids 17288 --apply --recheck
+    sudo docker compose run --rm tools python tools/readd.py qb --tids 17288 --apply --recheck
 
     # ⑤ ★★ 只对**已在 qB 里**的任务触发校验（**不 add**）—— 默认只读预览
     #    ★ 用在「文件其实在盘上、qB 却以为没下完」（如 17304：incomplete/ 里
     #      80 文件 / 22.61 GiB，却报 stalledDL 35.46%）
-    sudo docker compose run --rm tools python tools/readd_qb.py \
+    sudo docker compose run --rm tools python tools/readd.py qb \\
         --recheck-only 02afb7878cd831377da482a686835ae58ebaaeef
     #    ⇒ 预览无误后，再加 --apply 真写（会读一遍盘、会改 qB 的 progress）
 
 ★ 依赖 `torf`：用来从**站点种子的字节**里读出真 infohash（模块头 ③）。
   容器里若没有它，`--apply` 与 `--verify-hashes` 都会**响亮地报缺**，不静默降级。
 """
-import argparse
-import io
-import os
-import sqlite3
-import sys
-import time
-
-sys.stdout.reconfigure(encoding="utf-8")
-
-sys.path.insert(0, os.environ.get("MUSOPIA_APP_DIR", "/app"))
-
-import config      # noqa: E402
-from musopia import MusopiaClient, SiteError, LoginExpired  # noqa: E402
 
 
-def qb_client():
-    """连 qB。★ 连不上就**报错退出**，不降级（ERR-SQL-05 同族：读不到 != 没有）。"""
-    from qbittorrentapi import Client
-    c = Client(host=config.QB_HOST, username=config.QB_USER,
-               password=config.QB_PASS)
-    c.auth_log_in()
-    return c
+# ==================== ★ 站点种子 → 真 infohash（段 A 的版本）====================
 
-
-# ==================== ★ 站点种子 → 真 infohash（模块头 ③）====================
-
-def torrent_infohash(content):
+def _torrent_infohash_qb(content):
     """从**站点下载来的字节**里读出真 infohash。
 
     ★ 必须这样做（`readd_to_qb` docstring ③）：站点那个种子是 `run.py` 用
@@ -166,12 +225,6 @@ def torrent_infohash(content):
         return torf.Torrent.read_stream(io.BytesIO(content)).infohash, ""
     except Exception as e:                                  # noqa: BLE001
         return None, f"{type(e).__name__}: {e}"
-
-
-# ==================== ★★ qB 的"这算不算投递成功"判据（只一处口径）============
-
-# ★ 做种中的 state（照抄 qB 自己的状态名）
-SEEDING_STATES = ("stalledUP", "uploading", "forcedUP")
 
 
 def classify_task(t):
@@ -698,7 +751,7 @@ def _show_name(name, width=70):
       原先一律 `name[:50]` / `name[:70]` 截断，而
         `Michael Jackson - Bad (Special Edition) 1987 FLAC 分轨 - ZHENGLIFAN@Musopia`
       的 `@Musopia` 正好落在**第 50 字符之后** ⇒ 在"要不要点这个头"的那一步，
-      屏幕上显示的名字**看不到判据本身** —— 打印出来的东西不足以支撑它宣称的结论。
+      屏幕上显示的名字**看不到判据本身**（等于打印出来的东西不足以支撑它宣称的结论）。
     ⇒ 修法不是"把截断加长"（那只是把边界推远，换个更长的名字还会撞上），
       而是**让截断点为铁证让路**：铁证不在窗口内时，砍掉中段、把它接出来。
     """
@@ -834,7 +887,7 @@ SELECT_SQL = ("SELECT info_hash, formatted_title, torrent_name, status, "
               "   AND site_torrent_id IS NOT NULL AND site_torrent_id != ''")
 
 
-def load_rows(db_path, tids):
+def _load_rows_qb(db_path, tids):
     conn = sqlite3.connect(db_path, timeout=30)
     conn.execute("PRAGMA query_only=1")          # ★ 本脚本对库只读，永远
     conn.row_factory = sqlite3.Row
@@ -852,7 +905,7 @@ def load_rows(db_path, tids):
         conn.close()
 
 
-def main(argv=None):
+def _main_qb(argv=None):
     ap = argparse.ArgumentParser(
         description="把「站点上有、qB 里没有」的种子补进 qB（只加 qB，不重发）")
     ap.add_argument("--probe", action="store_true",
@@ -942,7 +995,7 @@ def main(argv=None):
             return fix_category(qb, None)
         return check_category(qb, None)
 
-    rows = load_rows(args.db, tids)
+    rows = _load_rows_qb(args.db, tids)
     if not rows:
         print("  （没有匹配的行）")
         return 0
@@ -991,7 +1044,7 @@ def main(argv=None):
     if not args.apply:
         print()
         print("💡 预览模式，未写 qB。确认后：")
-        print("     sudo docker compose run --rm tools python tools/readd_qb.py "
+        print("     sudo docker compose run --rm tools python tools/readd.py qb "
               f"--tids {','.join(r['site_torrent_id'] for r, _ in todo) or '<tids>'} "
               "--apply --recheck")
         print()
@@ -1023,7 +1076,7 @@ def main(argv=None):
         if not content:
             print("      ❌ 从站点下载种子文件失败，跳过")
             continue
-        new_hash, why = torrent_infohash(content)
+        new_hash, why = _torrent_infohash_qb(content)
         if not new_hash:
             print(f"      ⚠️  读不出站点种子的 infohash（{why}）")
             print("          ⇒ ★ 加进去也**无法复核**（复核只能按 hash 查）")
@@ -1105,6 +1158,458 @@ def main(argv=None):
     print()
     print("★ 本脚本没有修改本地库（只读）与站点；qB 只做了 add + recheck。")
     return 0
+
+
+# =====================================================================
+# ============ 段 B：python tools/readd.py crabpt =====================
+# ============ 蟹黄堡（CrabPT）侧回加（原 tools/readd_crabpt.py）======
+# =====================================================================
+"""把「蟹黄堡上有、qB 里没在做种」的种子补进 qB（只写 qB；不碰站点、不碰库）。
+
+═══════════════════════════════════════════════════════════════════════════
+它填补的缺口（2026-10-04，起因是 `ERR-PUBLISH-02`）
+═══════════════════════════════════════════════════════════════════════════
+`publish.py::readd_to_qb_crabpt` 只在【蟹黄堡发布成功后】被调用，
+而它在 2026-10-03 接上 `SEED_DELAY_MIN` 延迟回加分支时**写错了一个名字**
+（`note=f"蟹黄堡 {t.get('info_hash','')[:12]}…"`，而 `t` 在该处从未定义）
+⇒ `UnboundLocalError` ⇒ `enqueue` 从未成功 ⇒ **19 条发布成功却 0 条自动做种**。
+
+那条 bug 已在 `publish.py` 修好（`info_hash[:12]`，见 `ERR-PUBLISH-02`），
+但**已经发布出去的那批**（种子在蟹黄堡上、qB 里却没有带蟹黄堡 announce 的任务）
+**不会被自动补** —— 它们不满足任何"待发布"条件，`readd_to_qb_crabpt` 也
+只在"刚发布成功"那一刻跑。⇒ 需要本脚本**按需补一次**。
+
+用户 2026-10-04 已手动补了其中 17 条；**剩 2 条**（本次目标）：
+    · Mia Wray - hi, it's nice to meet me   crabpt id=215726
+    · [260902] 音田雅則 - back shot          crabpt id=215730
+
+═══════════════════════════════════════════════════════════════════════════
+★★★ 判据一律从 `publish.py::readd_to_qb_crabpt` 抠，不许手抄（ERR-META-03）
+═══════════════════════════════════════════════════════════════════════════
+该函数的 docstring ⑥ 条承重结论，本脚本**逐条照做**：
+
+ ① **种子字节来自蟹黄堡**（`CrabptClient.download_torrent(id)`），
+    不是本地 `tasks.torrent_file`（那是**乌托邦** announce ⇒ 拿它回加 =
+    做种报到乌托邦、蟹黄堡仍记 hit-and-run = **假成功**，比不做种更坏）。
+ ② **不传 layout / contentLayout / is_root_folder**（传了会 NoSubfolder ⇒
+    文件错位 ⇒ 静默 missingFiles）。
+ ③ **不传 is_skip_checking**（关掉唯一能发现文件错位的校验）。
+ ④ **分类用 `config.CRABPT_PUBLISH_CATEGORY`**（不是乌托邦的 `PUBLISH_CATEGORY`）——
+    两站种子不许混进同一个 qB 分类。★ 若该分类在 qB 里不存在，需先建。
+ ⑤ **save_path = 乌托邦那条原始种子的 save_path**（照抄：`qb.torrents_info(info_hash)`）
+    —— ★ 这条**必须**用库里的 `info_hash`（皇后原种）去查，因为做种路径
+      是按"原种下载在哪"定的。
+ ⑥ **复核按蟹黄堡那份的真 infohash 查**（用 `torf` 从下载的字节读），
+    且**分开说**"还没入库（正常，异步）"与"回加没发生（故障）"。
+
+★ 与 `readd_to_qb_crabpt` 的**唯一**差别：本脚本**跳过 `SEED_DELAY_MIN` 分支**
+  （直接当场 `torrents_add`），因为它是"补做"、不是发布路径。
+  ★ 且**额外加 `--recheck`**：文件早在盘上（save_path 下），必须让 qB 扫一遍
+    否则它当成新任务从头下（同 readd_qb 的教训）。
+
+═══════════════════════════════════════════════════════════════════════════
+纪律
+═══════════════════════════════════════════════════════════════════════════
+1. **默认只读**（`--tids` 预览：列 crabpt id / 乌托邦原种 save_path / 文件在不在）；
+   真写要 `--apply`，且**必须 `--tids` 点名**（不可逆动作显式授权，`ERR-META-12`）。
+2. **本地库只读**（`PRAGMA query_only=1`）—— 只读 `info_hash`（定 save_path）。
+3. **qB 只做两件写**：`torrents_add` + （`--recheck` 时）`torrents_recheck`。
+   **不 delete / 不 pause / 不改 save_path / 不动已有任务。**
+4. **`torrents_add` 的返回值必须检查**（readd_qb 血债：它返回 `"Ok."`/`"Fails."`，
+   不是抛异常）—— 只有 `"Ok."` 才算收下。
+
+用法（容器内）:
+    python tools/readd.py crabpt --tids 215726,215730            # 只读预览
+    python tools/readd.py crabpt --tids 215726,215730 --apply --recheck
+    python tools/readd.py crabpt --verify <hash,hash>            # 只读：按真 hash 查 qB
+"""
+
+import crabpt_site                # noqa: E402
+
+
+def _torrent_infohash_crabpt(content):
+    """从**蟹黄堡下载来的字节**读出真 infohash（判据 ⑥）。读不出返回 (None, 原因)。"""
+    try:
+        import torf
+    except ImportError as e:                                # noqa: BLE001
+        return None, f"缺 torf（{e}）"
+    try:
+        return torf.Torrent.read_stream(io.BytesIO(content)).infohash, ""
+    except Exception as e:                                  # noqa: BLE001
+        return None, f"{type(e).__name__}: {e}"
+
+
+def _load_rows_crabpt(db_path, tids):
+    """★ 只读：从**库**取这些 crabpt id 对应的 info_hash（定 save_path 用）。
+
+    ★ 判据 = `site_publish(site='crabpt').torrent_id IN tids`。
+      ★ 必须 JOIN `tasks` 拿 `info_hash`（那是**乌托邦原种**的 hash —— 判据 ⑤）。
+    ★ `PRAGMA query_only=1`：本脚本永远不改库。
+    """
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.execute("PRAGMA query_only=1")
+    conn.row_factory = sqlite3.Row
+    ph = ",".join("?" * len(tids))
+    sql = (f"SELECT sp.info_hash, sp.torrent_id AS crabpt_id, "
+           f"       t.torrent_name, t.formatted_title "
+           f"  FROM site_publish sp JOIN tasks t ON sp.info_hash = t.info_hash "
+           f" WHERE sp.site = 'crabpt' AND sp.torrent_id IN ({ph})")
+    try:
+        return list(conn.execute(sql, tuple(tids)))
+    finally:
+        conn.close()
+
+
+def _main_crabpt(argv=None):
+    ap = argparse.ArgumentParser(
+        description="把「蟹黄堡上有、qB 里没在做种」的种子补进 qB")
+    ap.add_argument("--tids", default="", help="★ 蟹黄堡 site torrent_id（逗号分隔）")
+    ap.add_argument("--apply", action="store_true", help="真写 qB（默认只读）")
+    ap.add_argument("--recheck", action="store_true",
+                    help="★ add 后触发 recheck（让 qB 认到本地已有文件）")
+    ap.add_argument("--verify", default="",
+                    help="★★ 只读：按真 infohash（逗号分隔）查 qB")
+    ap.add_argument("--delay", type=int, default=20, help="复核前等几秒（默认 20）")
+    ap.add_argument("--db", default=config.DB_PATH)
+    args = ap.parse_args(argv)
+
+    tids = [s.strip() for s in args.tids.split(",") if s.strip()]
+    verify = [s.strip() for s in args.verify.split(",") if s.strip()]
+
+    print("=" * 74)
+    print("★ 蟹黄堡回加：把「站上有、qB 没做种」的补进 qB")
+    print("=" * 74)
+    print(f"  qB     = {config.QB_HOST}")
+    print(f"  分类   = {config.CRABPT_PUBLISH_CATEGORY!r}（★ 蟹黄堡自己的键）")
+    print(f"  模式   = {'★★ 真写 qB' if args.apply else '💡 只读预览（不写任何东西）'}")
+    print()
+
+    try:
+        qb = qb_client()
+    except Exception as e:                                  # noqa: BLE001
+        print(f"  ✗ 连不上 qB：{type(e).__name__}: {e}")
+        return 2
+
+    # ---------- --verify：只读按真 hash 查 qB ----------
+    if verify:
+        print("【--verify】按真 infohash 查 qB（只读）")
+        for h in verify:
+            got = qb.torrents_info(torrent_hashes=h)
+            if not got:
+                print(f"  ❌ {h[:12]}…  qB 里没有 ⇒ 投递没成功")
+                continue
+            t = got[0]
+            print(f"  {'✅' if t.state in SEEDING_STATES else '★'} {h[:12]}…  "
+                  f"state={t.state} progress={t.progress*100:.1f}% "
+                  f"cat={t.category!r} tr={(t.tracker or '')[:36]!r}")
+        return 0
+
+    if not tids:
+        print("  （未点名 --tids；本脚本不自动全补。列出 crabpt 侧候选需另行查询）")
+        return 0
+
+    rows = _load_rows_crabpt(args.db, tids)
+    if not rows:
+        print(f"  ❌ 库里 site_publish(crabpt) 查不到这些 id：{tids}")
+        return 3
+
+    client = crabpt_site.CrabptClient(request_interval=0.5)
+    if not client.have_cookie():
+        print("  ✗ 没有 CRABPT_COOKIE（.env 没配）⇒ 下不了站点种子")
+        return 2
+
+    todo = []
+    for r in rows:
+        crabpt_id = r["crabpt_id"]
+        title = (r["formatted_title"] or r["torrent_name"] or "")[:44]
+        print(f"  ▶ crabpt_id={crabpt_id}  {title}")
+        # 判据 ⑤：save_path = 乌托邦原种的 save_path
+        orig = qb.torrents_info(torrent_hashes=r["info_hash"])
+        if not orig:
+            print(f"      ★ qB 里找不到**乌托邦原种**（{r['info_hash'][:12]}…）"
+                  f"⇒ 无法定 save_path，跳过")
+            continue
+        save_path = orig[0].save_path
+        print(f"      save_path = {save_path!r}（乌托邦原种，state={orig[0].state}）")
+        # 判据 ①：从蟹黄堡下种子字节
+        content = client.download_torrent(crabpt_id)
+        if not content:
+            print("      ❌ 从蟹黄堡下载种子失败，跳过")
+            continue
+        new_hash, why = _torrent_infohash_crabpt(content)
+        print(f"      蟹黄堡种子字节 = {len(content)} B  "
+              f"真 infohash = {new_hash or '（读不出：'+why+'）'}")
+        # 已经在做种就不必再加
+        if new_hash:
+            got = qb.torrents_info(torrent_hashes=new_hash)
+            if got and got[0].state in SEEDING_STATES:
+                print(f"      ✅ 已在 qB 做种（state={got[0].state}）⇒ 无需回加")
+                continue
+        todo.append((r, save_path, content, new_hash, title))
+
+    print()
+    print("─" * 74)
+    print(f"  【待回加】{len(todo)} 条")
+    print("─" * 74)
+    if not args.apply:
+        print("\n💡 预览模式，未写 qB。确认后加 `--apply --recheck`。")
+        return 0
+
+    # ---------- 真写 ----------
+    added, rejects, pending = 0, [], []
+    for r, save_path, content, new_hash, title in todo:
+        crabpt_id = r["crabpt_id"]
+        try:
+            ret = qb.torrents_add(torrent_files=content, save_path=save_path,
+                                  is_paused=False,
+                                  category=config.CRABPT_PUBLISH_CATEGORY)
+        except Exception as e:                              # noqa: BLE001
+            print(f"  ★★ crabpt_id={crabpt_id} 提交抛异常：{type(e).__name__}: {e}")
+            rejects.append((crabpt_id, title, f"抛异常 {type(e).__name__}"))
+            continue
+        ret_s = str(ret).strip()
+        if ret_s != "Ok.":
+            print(f"  ★★★ crabpt_id={crabpt_id} qB **拒绝**（返回 {ret_s!r}）")
+            rejects.append((crabpt_id, title, f"返回 {ret_s!r}"))
+            continue
+        added += 1
+        print(f"  ✅ crabpt_id={crabpt_id}  qB 收下（{ret_s!r}）"
+              f"  save_path={save_path!r} cat={config.CRABPT_PUBLISH_CATEGORY!r}")
+        if new_hash:
+            pending.append((crabpt_id, new_hash, title))
+            if args.recheck:
+                try:
+                    qb.torrents_recheck(torrent_hashes=new_hash)
+                    print("      ★ 已触发 recheck")
+                except Exception as e:                      # noqa: BLE001
+                    print(f"      ⚠️ recheck 失败：{type(e).__name__}: {e}")
+
+    print()
+    print("─" * 74)
+    print(f"  qB 收下: {added}  拒绝: {len(rejects)}")
+    for cid, t, why in rejects:
+        print(f"      ★★ crabpt_id={cid} {why}  {t[:40]}")
+    print("─" * 74)
+
+    # ---------- 复核（异步；按真 hash 查）----------
+    if pending and args.delay > 0:
+        print(f"\n⏳ 等 {args.delay}s 后复核（add/recheck 都异步）…")
+        time.sleep(args.delay)
+        for crabpt_id, h, title in pending:
+            got = qb.torrents_info(torrent_hashes=h)
+            if not got:
+                print(f"  ❔ crabpt_id={crabpt_id} 此刻查不到（异步；稍后用 --verify 再查）")
+                continue
+            t = got[0]
+            print(f"  {'✅' if t.state in SEEDING_STATES else '★'} crabpt_id={crabpt_id}  "
+                  f"state={t.state} progress={t.progress*100:.1f}% "
+                  f"cat={t.category!r} tr={(t.tracker or '')[:36]!r}")
+    print("\n★ 本脚本没碰站点、没改本地库；qB 只 add + recheck。")
+    return 0
+
+
+# =====================================================================
+# ============ 段 C：python tools/readd.py site =======================
+# ============ 按**站点 id** 补「已上站但没做种」（原 tools/readd_site_missing.py）
+# =====================================================================
+"""★ 补加「已上站但没做种」的种子 —— 按**站点 id**下种子字节，加进 qB。
+
+═══════════════════════════════════════════════════════════════════════════
+它补的缺口（2026-10-04，实测）
+═══════════════════════════════════════════════════════════════════════════
+实测发现：`site_publish.status='EXISTS'` 只表示"**发布那一刻**写库成功"，
+**不表示**"站点那条种子真在做种"。发布期间的 qB IP 封禁（`ERR-QB-08`）会让
+`readd_to_qb` 走到 `⚠️ 连不上 qBittorrent…本次不做回加` —— **种子上了站、
+但从没加进 qB** ⇒ 站点显示"下载者 0 / 没做种"。
+
+★ 判据（唯一靠谱的）：把**站点那条种子**下载下来，读出它的**真 infohash**，
+再去 qB 里查有没有。凡"站点 hash 不在 qB"的 = 真没做种。
+（不能拿 `tasks.info_hash` 查 —— 那是**皇后原种**的 hash，不是站点那条的；
+ 发布时 `run.py` 用带站点 passkey 的新 announce 重生成过 ⇒ hash 变了。）
+
+═══════════════════════════════════════════════════════════════════════════
+做种路径（save_path）从哪来 —— 与 `readd_to_qb_crabpt` 逐字同款
+═══════════════════════════════════════════════════════════════════════════
+从 **qB 里那条「皇后原种」（= 库里的 `info_hash`）的 `save_path`** 取。
+理由：文件就在那个目录，站点新种与皇后原种**共享同一份文件** ⇒ save_path 相同。
+
+═══════════════════════════════════════════════════════════════════════════
+只读/写入边界
+═══════════════════════════════════════════════════════════════════════════
+  qB：默认**只查询**。`--apply` 才 `torrents_add()`。
+  库：**只读**（不 import db 的写路径；直接 sqlite3 只读查询）。
+  站点：**会下载种子字节**（每条花 1 次；musopia/crabpt 各自节流）。
+  ★ 默认 dry-run：只报告"哪条站点 hash 不在 qB、save_path 取哪"，**不动 qB**。
+
+用法（NAS 上，在容器里跑）:
+    # ① dry-run（默认）：只诊断，列出要补的
+    docker exec -w /app opencd2musopia python tools/readd.py site --scan
+    # ② 只看点名几条（不扫全量）
+    docker exec -w /app opencd2musopia python tools/readd.py site --site crabpt --tids 215726 215730 215731
+    # ③ 真补加
+    docker exec -w /app opencd2musopia python tools/readd.py site --site crabpt --tids 215726 215730 215731 --apply
+"""
+
+
+def _ih_of(data):
+    import torf
+    return torf.Torrent.read_stream(io.BytesIO(data)).infohash.lower()
+
+
+def _load_rows_site(site=None, tids=()):
+    """只读：从 site_publish 取 EXISTS 的行 + tasks 的 info_hash（皇后原种）。"""
+    con = sqlite3.connect(config.DB_PATH, timeout=30)
+    con.row_factory = sqlite3.Row
+    sql = ("SELECT sp.site, sp.torrent_id, sp.info_hash, sp.status, "
+           "       t.formatted_title, t.torrent_name "
+           "  FROM site_publish sp "
+           "  LEFT JOIN tasks t ON t.info_hash = sp.info_hash "
+           " WHERE sp.status='EXISTS'")
+    params = []
+    if site:
+        sql += " AND sp.site=?"
+        params.append(site)
+    if tids:
+        sql += f" AND sp.torrent_id IN ({','.join('?' * len(tids))})"
+        params += [str(t) for t in tids]
+    sql += " ORDER BY sp.site, CAST(sp.torrent_id AS INTEGER) DESC"
+    rows = [dict(r) for r in con.execute(sql, params)]
+    con.close()
+    return rows
+
+
+def site_client(site):
+    if site == "musopia":
+        import musopia
+        return musopia.MusopiaClient(), config.PUBLISH_CATEGORY
+    if site == "crabpt":
+        import crabpt_site
+        return crabpt_site.CrabptClient(), config.CRABPT_PUBLISH_CATEGORY
+    raise SystemExit(f"未知站点: {site}")
+
+
+def _main_site(argv=None):
+    ap = argparse.ArgumentParser(description="补加「已上站但没做种」的种子")
+    ap.add_argument("--site", choices=["musopia", "crabpt"], default=None,
+                    help="只处理某站（默认两站都扫）")
+    ap.add_argument("--tids", nargs="*", default=[],
+                    help="只处理这几个站点 torrent_id")
+    ap.add_argument("--scan", action="store_true",
+                    help="扫全部 EXISTS（默认行为也是扫；此开关仅表意）")
+    ap.add_argument("--apply", action="store_true",
+                    help="★ 真加进 qB（默认只诊断）")
+    ap.add_argument("--sleep", type=float, default=0.4,
+                    help="每次站点下载之间的间隔（默认 0.4s）")
+    args = ap.parse_args(argv)
+
+    print("=" * 74)
+    print(f"★ {'APPLY 真加' if args.apply else 'DRY-RUN 只诊断'} —— 补加「已上站但没做种」")
+    print("=" * 74)
+
+    qb = qb_client()
+    qb_index = {t.hash.lower(): t for t in qb.torrents_info()}
+    print(f"  qB 里共 {len(qb_index)} 条种子")
+
+    rows = _load_rows_site(args.site, args.tids)
+    sites = sorted({r["site"] for r in rows})
+    print(f"  待查 EXISTS 行: {len(rows)}（站点 {sites}）\n")
+
+    clients = {}
+    miss = []
+    for i, r in enumerate(rows, 1):
+        site, tid = r["site"], str(r["torrent_id"])
+        dbh = (r["info_hash"] or "").lower()
+        if site not in clients:
+            clients[site] = site_client(site)
+        client, cat = clients[site]
+        try:
+            data = client.download_torrent(tid)
+        except Exception as e:                                # noqa: BLE001
+            print(f"  [{i}] {site} {tid} 下载异常 {type(e).__name__}: {e}")
+            continue
+        if not data:
+            print(f"  [{i}] {site} {tid} 站点下载失败/已删（详见 --scan 的 404 诊断）")
+            time.sleep(args.sleep)
+            continue
+        try:
+            sh = _ih_of(data)
+        except Exception as e:                                # noqa: BLE001
+            print(f"  [{i}] {site} {tid} 读 hash 失败 {e}")
+            time.sleep(args.sleep)
+            continue
+        if sh in qb_index:
+            time.sleep(args.sleep)
+            continue
+        # ★ 真没做种：找皇后原种的 save_path
+        orig = qb.torrents_info(torrent_hashes=dbh) if dbh else []
+        save_path = orig[0].save_path if orig else None
+        miss.append({"site": site, "tid": tid, "site_hash": sh, "db_hash": dbh,
+                     "save_path": save_path, "cat": cat, "data": data,
+                     "title": (r["formatted_title"] or r["torrent_name"] or "")[:44]})
+        print(f"  ★★ [{i}] {site} {tid} **没做种**  {miss[-1]['title']}")
+        print(f"        站点hash={sh}  save_path={save_path!r}  cat={cat}")
+        if not save_path:
+            print(f"        ⚠️ 找不到皇后原种（DB hash {dbh[:12]}…）⇒ 无 save_path，**跳过**")
+        time.sleep(args.sleep)
+
+    print(f"\n{'=' * 74}\n★ 需补加: {len(miss)} 条")
+    if not miss:
+        print("  （无）⇒ 全部站点种子都在 qB 里")
+        return 0
+
+    if not args.apply:
+        print("\n  ★ 这是 DRY-RUN。加 --apply 才真加。")
+        for m in miss:
+            print(f"    {m['site']:<8} {m['tid']:<8} cat={m['cat']:<8} save_path={m['save_path']!r}")
+        return 0
+
+    print("\n  ▶ 开始加进 qB …")
+    ok = 0
+    for m in miss:
+        if not m["save_path"]:
+            print(f"    ⏭  {m['site']} {m['tid']} 无 save_path，跳过")
+            continue
+        try:
+            qb.torrents_add(torrent_files=m["data"], save_path=m["save_path"],
+                            is_paused=False, category=m["cat"])
+            print(f"    ✅ {m['site']} {m['tid']} 已提交 add（cat={m['cat']}）")
+            ok += 1
+        except Exception as e:                                # noqa: BLE001
+            print(f"    ❌ {m['site']} {m['tid']} add 失败: {type(e).__name__}: {e}")
+    print(f"\n  ✅ 提交 {ok} 条。★ async：qB 后台校验，稍后按站点 hash 复查 state。")
+    print("     （可稍等几分钟后重跑本工具不带 --tids，看这几条是否已不在 miss 清单）")
+    return 0
+
+
+# =====================================================================
+# 分发器
+# =====================================================================
+
+_PARTS = {
+    "qb": _main_qb,
+    "crabpt": _main_crabpt,
+    "site": _main_site,
+}
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or argv[0] in ("-h", "--help"):
+        print("用法: python tools/readd.py <子命令> [参数…]\n")
+        print("子命令：")
+        print("  qb       乌托邦（Musopia）侧回加 + 分类体检"
+              "（原 tools/readd_qb.py）")
+        print("  crabpt   蟹黄堡（CrabPT）侧回加（原 tools/readd_crabpt.py）")
+        print("  site     ★ 按站点 id 补「已上站但没做种」（原 tools/readd_site_missing.py）")
+        print("\n各子命令的完整参数： python tools/readd.py <子命令> --help")
+        return 0 if argv and argv[0] in ("-h", "--help") else 2
+    part = argv[0]
+    fn = _PARTS.get(part)
+    if fn is None:
+        print(f"❌ 未知子命令：{part!r}", file=sys.stderr)
+        print(f"   可用: {', '.join(_PARTS)}", file=sys.stderr)
+        return 2
+    return fn(argv[1:])
 
 
 if __name__ == "__main__":

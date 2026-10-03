@@ -503,6 +503,178 @@ def selftest():
         ok[0] = False
         detail.append(f"✗ ⑦e 读 `db` 的 WHERE 常量失败：{type(e).__name__}: {e}")
 
+    # ★★★ ⑧（2026-10-04 加）：**qB 构造点必须唯一** —— `qb_client.py` 之外
+    #   零 `Client(` 构造、零 `auth_log_in()`。判据走 **AST**（不看文本，见 ⑦ 的坑）。
+    #
+    #   ★ 起因（现场，`ERR-QB-08`）：qB 5.x 对**登录接口**做**失败计数**，
+    #     而本项目原本有 **13 处**各自 `Client(host=…) … auth_log_in()` ——
+    #     每起一个进程 / 每次 daemon 扫到待回加，都在**再登录一次**。
+    #     于是"凭据一错"这个单点，被**重试**放大成"IP 被封"（`身份认证失败次数过多`，
+    #     登录接口 HTTP 403）。⇒ **重试本身可以是故障的成因**。
+    #   ⇒ 把构造收敛成**一个**工厂 `qb_client.build(config)`（key 优先 / 回退账号密码），
+    #     本判据就是**不让"第 14 处"从复制粘贴里长回来**（那正是 13 处的病根）。
+    #
+    #   ★ 为什么是 AST 而不是 `"Client(" in 源码`：注释 / 文档串里提到它
+    #     就会**假红**（行 245-248 记着第一版正是这么栽的）。符号出现 ≠ 真调用。
+    #   ★★ 阴性对照（本判据**必须**能报红，否则是"测了个寂寞"）：
+    #     临时在第 14 个文件里塞回一行裸 `Client(...)` 或 `auth_log_in()`，
+    #     本自检**必须**红 —— 加判据那天手工验过一次（塞 → 红 → 撤）。
+    #
+    #   ★ 判据**扫全仓库**（不维护一张手写文件名列表）：列表会**漏掉**新加的文件，
+    #     那正是"第 14 处"藏身的地方（`ERR-META-21` 的形状：在被筛过的集合上算）。
+    #   ★ 但**跳过非源码目录**（`.git` / 数据 / 备份 / scratch / 缓存）——
+    #     那些是**另一份**代码（可能是老版本），扫它们会报**假红**，
+    #     而假红会逼着人把判据关掉（比没有判据更坏）。
+    #
+    #   ★★★ 判据必须**精确到"真的在构造一个 qB 客户端"**，否则会**大面积假红**。
+    #     实测（加判据那天）第一版只查 `X.Client(...)` ⇒ 报了 **11 处**，
+    #     其中**10 处是皇后站点的客户端**（`crawl.Client`，见 `crawl.py:145`，
+    #     它**根本不用 qbittorrentapi**），只有那 1 处 `repos\Pt-Autoseed\…` 是
+    #     另一个项目（Transmission）—— **一个真目标都没有**。
+    #     ⇒ 假红的代价不是"多看几眼"，而是**判据会被关掉**（`ERR-META` 一族的形状）。
+    #   ⇒ 收紧成**两条都必须成立**（AST 层面，不看文本）：
+    #       ① 该文件**真的 import 了 `qbittorrentapi`**（`import qbittorrentapi` /
+    #          `from qbittorrentapi import …`）；否则它的 `.Client(` 与 qB 无关。
+    #       ② 命中的调用其**被调用者名**是那个 `qbittorrentapi` 模块别名下的 `Client`
+    #          （如 `qbittorrentapi.Client(...)`，或 `from qbittorrentapi import Client`
+    #           之后的裸 `Client(...)`）。 `crawl.Client` / `transmissionrpc.Client` 名字对不上。
+    #     ★ `auth_log_in` 同理：只在该文件确实用 `qbittorrentapi` 时才算数。
+    import pathlib as _pl2
+    _ROOT = _pl2.Path(__file__).resolve().parent
+    # ★ 要跳过的目录名（出现在路径的**任意层级**即跳过该文件）。
+    #   ★★ 故意写得**宽**（宁可跳过也不误报）：判据的价值在"挡住新写的构造点"，
+    #     不在"审第三方的 .venv / 别的项目源码"。
+    _SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules",
+                  ".scratch", ".deploy-backup", ".claude", ".mypy_cache",
+                  ".pytest_cache", ".idea", ".vscode", "repos"}
+    # ★ 根下这些**代际/备份**后缀的目录也跳过（DNA 是另一份快照，非本次改名范围）。
+    _SKIP_DIR_SUFFIX = ("_bak", "_backup", "_old", "-bak", "-backup")
+    _FACTORY = _ROOT / "qb_client.py"
+    # ★ 命中一个就记 (相对路径, 行号, 类别)。类别分开报，便于一眼看出是哪种回归。
+    _qbhits = []
+
+    def _qb_import_info(tree):
+        """返回 (是否有 `import qbittorrentapi`, 该模块的**本地别名**集合)。"""
+        has = False
+        mods = set()
+        for n in _ast.walk(tree):
+            if isinstance(n, _ast.Import):
+                for a in n.names:
+                    if a.name == "qbittorrentapi":
+                        has = True
+                        mods.add(a.asname or "qbittorrentapi")
+            elif isinstance(n, _ast.ImportFrom) and n.module == "qbittorrentapi":
+                has = True
+        return has, mods
+
+    def _qb_client_bare_names(tree):
+        """`from qbittorrentapi import Client` ⇒ 裸 `Client(...)` 也是真构造。"""
+        names = set()
+        for n in _ast.walk(tree):
+            if isinstance(n, _ast.ImportFrom) and n.module == "qbittorrentapi":
+                for a in n.names:
+                    names.add(a.asname or a.name)
+        return names
+
+    if not _FACTORY.exists():
+        ok[0] = False
+        detail.append(
+            f"✗ ⑧ 找不到工厂 {_FACTORY.name} ⇒ 本判据**没测到东西**（ERR-META-14），"
+            f"不是通过。⇒ 先建 `qb_client.py` 再指望这条护栏。")
+    else:
+        for _p in sorted(_ROOT.rglob("*.py")):
+            if _p.resolve() == _FACTORY.resolve():
+                continue                      # ★ 工厂自己**应当**有 `Client(` / `auth_log_in`
+            _parts = set(_p.relative_to(_ROOT).parts)
+            if _parts & _SKIP_DIRS:
+                continue
+            if any(part.endswith(_SKIP_DIR_SUFFIX) for part in _parts):
+                continue
+            try:
+                _src = _p.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue                      # 读不到 = 判据失效，**不并进"没有"**（ERR-SQL-05）
+            try:
+                _t2 = _ast.parse(_src)
+            except SyntaxError:
+                continue                      # 语法坏的文件由 py_compile 管，这里不重复报
+            # ★★ 只有**真的用 qbittorrentapi** 的文件才算数（否则 `crawl.Client` 假红）
+            _has_qbapi, _qbmods = _qb_import_info(_t2)
+            if not _has_qbapi:
+                continue
+            _bare = _qb_client_bare_names(_t2)
+            for _n in _ast.walk(_t2):
+                if not isinstance(_n, _ast.Call):
+                    continue
+                _f = _n.func
+                # (a) `qbittorrentapi.Client(...)` 形式的**真构造调用**
+                if (getattr(_f, "attr", None) == "Client"
+                        and getattr(getattr(_f, "value", None), "id", "") in _qbmods):
+                    _qbhits.append((str(_p.relative_to(_ROOT)), _n.lineno, "qbittorrentapi.Client(...)"))
+                # (a') `from qbittorrentapi import Client` 之后的**裸** `Client(...)`
+                elif (getattr(_f, "id", None) == "Client" and "Client" in _bare):
+                    _qbhits.append((str(_p.relative_to(_ROOT)), _n.lineno, "Client(...)  # 裸名（from qbittorrentapi）"))
+                # (b) 任何 `.auth_log_in(...)` 调用（该文件确用 qbittorrentapi ⇒ 必是 qB 的）
+                elif getattr(_f, "attr", None) == "auth_log_in":
+                    _qbhits.append((str(_p.relative_to(_ROOT)), _n.lineno, "auth_log_in()"))
+        if _qbhits:
+            ok[0] = False
+            _show = "\n".join(f"        · {f}:{ln}  {kind}" for f, ln, kind in _qbhits[:12])
+            _more = f"\n        … 另有 {len(_qbhits) - 12} 处" if len(_qbhits) > 12 else ""
+            detail.append(
+                "✗ ⑧ qB 构造点**不唯一**：`qb_client.py` 之外还有 "
+                f"**{len(_qbhits)} 处**直接构造 / 登录：\n{_show}{_more}\n"
+                "     ⇒ ★ 这正是 `ERR-QB-08` 的病根：****每一处都自己登录一次****"
+                "，凭据一错就被**重试**放大成 `IP 已被封禁`（qB 5.x 登录失败计数）。\n"
+                "     ★ 修法：换成 `import qb_client` + `qb = qb_client.build(config)`"
+                "（key 优先 / 回退账号密码），把构造收敛回那个**唯一**工厂。")
+
+    # ★★★ ⑧b（2026-10-04 加）：**六个 opencd_* 旧模块名不许再被 import** ——
+    #   它们已合并进 `opencd.py`（子命令 parse/rate/log/map/gate/ingest）。
+    #   ★ 为什么需要这条：合并是**一次性**动作，但"从旧文件复制粘贴一行 import"
+    #     会在**运行时**才炸（`ModuleNotFoundError: opencd_parse`），而那时可能
+    #     在容器里跑了几轮 daemon 才有人看日志（`ERR-DOCKER` 一族：缺文件直到用才报）。
+    #     ⇒ 把"合并到底做干净了没有"钉成一条**离线可跑**的判据。
+    #   ★ 判据走 AST 的 `import` 节点（不看文本）：注释里提到旧名（本文件就到处是）
+    #     不该算数 —— 同 ⑧ 的理由（文本匹配会假红，假红会逼人把判据关掉）。
+    _OLD_OPENCD = {"opencd_parse", "opencd_rate", "opencd_log",
+                   "opencd_map", "opencd_gate", "opencd_ingest"}
+    _stale_imports = []
+
+    def _imported_top_names(tree):
+        names = set()
+        for n in _ast.walk(tree):
+            if isinstance(n, _ast.Import):
+                for a in n.names:
+                    names.add(a.name.split(".")[0])
+            elif isinstance(n, _ast.ImportFrom) and n.module:
+                names.add(n.module.split(".")[0])
+        return names
+
+    for _p in sorted(_ROOT.rglob("*.py")):
+        _parts = set(_p.relative_to(_ROOT).parts)
+        if _parts & _SKIP_DIRS:
+            continue
+        if any(part.endswith(_SKIP_DIR_SUFFIX) for part in _parts):
+            continue
+        try:
+            _t3 = _ast.parse(_p.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            continue
+        _hitnames = _imported_top_names(_t3) & _OLD_OPENCD
+        if _hitnames:
+            _stale_imports.append((str(_p.relative_to(_ROOT)), sorted(_hitnames)))
+
+    if _stale_imports:
+        ok[0] = False
+        _show2 = "\n".join(f"        · {f}: import {'/'.join(ns)}" for f, ns in _stale_imports[:12])
+        detail.append(
+            "✗ ⑧b 仍有文件 import **已合并**的旧模块名（`opencd_parse` 等六个）：\n"
+            f"{_show2}\n"
+            "     ⇒ 这些模块已并入 `opencd.py`。改成 `import opencd as <别名>`"
+            "（或 `import opencd as P` 等，保留原别名，调用体不动）。\n"
+            "     ★ 不改成 opencd ⇒ 运行到那一步才 `ModuleNotFoundError`。")
+
     return ok[0], detail
 
 
@@ -521,9 +693,11 @@ def main():
     config.print_runtime_info()
     db.init_db()
 
-    from qbittorrentapi import Client
-    qb = Client(host=config.QB_HOST, username=config.QB_USER, password=config.QB_PASS)
-    qb.auth_log_in()
+    # ★★ 唯一构造点 `qb_client.build`（`ERR-QB-08`）：优先 API Key，回退账号密码。
+    #   ★ 这里**刻意不加 try/except** —— 老代码也是硬崩（本阶段要 qB 才能干活，
+    #     连不上就该让整条 main 停），`build()` 连不上会抛 ⇒ 契约不变。
+    import qb_client
+    qb = qb_client.build(config)
     print("✅ 已连通 qBittorrent")
 
     torrents = qb.torrents_info(category=config.OPENCD_CATEGORY)
@@ -853,6 +1027,9 @@ if __name__ == "__main__":
         print("      且 TRANSFERABLE 的尾巴**逐字**等于闸门④ 那条 ALLOW）")
         print("  ⑦e-3 这些常量必须能被 ast.literal_eval 静态解出"
               "（否则靠 AST 抽常量的那 4 个工具会在运行时才炸）")
+        print("  ⑧ qB 构造点唯一：qb_client.py 之外零 `Client(` / 零 `auth_log_in`"
+              "（ERR-QB-08：别让'第 14 处'长回来）")
+        print("  ⑧b 六个 opencd_* 旧模块名零 import（已并入 opencd.py，防复制粘贴回来）")
         print()
         if _detail:
             print("\n".join(_detail))

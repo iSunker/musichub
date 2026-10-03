@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # =====================================================================
-# 本地 → NAS 生产 的白名单同步（musopia_script2）
+# 本地 → NAS 生产 的白名单同步（opencd2others）
 #
-#   本地: D:\Projects\musopia\zhuanzhong（默认 = 脚本所在目录，SRC 可覆盖）
+#   本地: D:\Projects\opencd2others\zhuanzhong（默认 = 脚本所在目录，SRC 可覆盖）
 #   生产: NAS 上的 compose 目录（DST 指定，或写进 .deploy.nasrc）
 #
 # 为什么需要它：
@@ -15,9 +15,11 @@
 #      白名单 = Dockerfile 的 COPY 行 + Dockerfile/docker-compose.yml 本身。
 #      多一个不用同步，少一个容器里就缺模块（下面有自检会核对）。
 #   2. 绝不覆盖生产独有的运行时状态与密钥：
-#      .env（真实 Cookie / qB 密码 / 图床 Key）、data.db（254 条记录 +
-#      站点 ID）、daemon_state.json（调度进度）、daemon_heartbeat、
-#      output_torrents/。它们不在白名单里，动不到；脚本还会断言一遍。
+#      .env（真实 Cookie / qB 密码 / 图床 Key）、以及 `data/` 下的全部状态
+#      （data.db + 254 条记录与站点 ID、daemon_state.json 调度进度、
+#        daemon_heartbeat、readd_queue.json、lsky_token.json、
+#        output_torrents/、covers/、raw_html/）。
+#      它们不在白名单里，动不到；脚本还会断言一遍。
 #   3. 覆盖前备份到本地 .deploy-backup/<时间戳>/，可一键回滚。
 #      备份放**本地**：不污染 NAS 上的 docker build 上下文，也不会因为
 #      写 NAS 中途失败而把备份一起丢掉。
@@ -28,7 +30,7 @@
 #   bash deploy.sh --apply            写入（自动先备份）
 #   bash deploy.sh --rollback         回滚到最近一次备份
 #   临时指定目标（优先级高于 .deploy.nasrc）:
-#   DST=//iSunker-DS423/docker_ssd/musopia_script2 bash deploy.sh
+#   DST=//iSunker-DS423/docker_ssd/opencd2others bash deploy.sh
 # =====================================================================
 set -euo pipefail
 
@@ -45,7 +47,7 @@ _DST_FROM_ENV="${DST:-}"
 
 SRC="${SRC:-$SELF_DIR}"
 DST="${_DST_FROM_ENV:-${DST:-}}"
-DST="${DST:?请设置 DST（NAS 上的 compose 目录），或写进 $SELF_DIR/.deploy.nasrc 一行：DST=//iSunker-DS423/docker_ssd/musopia_script2}"
+DST="${DST:?请设置 DST（NAS 上的 compose 目录），或写进 $SELF_DIR/.deploy.nasrc 一行：DST=//iSunker-DS423/docker_ssd/opencd2others}"
 BACKUP_ROOT="$SRC/.deploy-backup"
 
 # 白名单。★ 这份清单要和 Dockerfile 的 COPY 行保持一致 ——
@@ -60,8 +62,10 @@ FILES=(
   run.py publish.py update_metadata.py sync_site.py
   backfill_covers.py check_db.py backfill_covers_opencd.py
   daemon.py healthcheck.py
-  crawl.py opencd_parse.py opencd_rate.py opencd_log.py
-  opencd_map.py opencd_gate.py opencd_ingest.py cover_fetch.py
+  # ★★ 2026-10-04：`opencd_parse/rate/log/map/gate/ingest` 六个模块已合并成
+  #   单文件 `opencd.py`（CLI 子命令——用法见 README / .claude/RULES.md）。
+  #   同步与 Dockerfile 的 COPY 行保持一致（本脚本末尾会反查，漏了就拒绝部署）。
+  crawl.py opencd.py cover_fetch.py
   topup_opencd_fields.py observe_custom_fields.py
   sync_opencd_tid.py readiness_probe.py qb_probe.py flip_status.py
   # ★ 蟹黄堡站适配层（2026-09-24 加）—— publish.py 会 import 它，
@@ -70,6 +74,11 @@ FILES=(
   # ★ 延迟回加队列（2026-10-03 加）—— publish.py 与 daemon.py **都** import 它。
   #   不进白名单 ⇒ 容器里没有它 ⇒ import 即 ImportError（上面 crabpt_site 同款场景）。
   readd_queue.py
+  # ★★ qB 客户端工厂（2026-10-04 加）—— run/publish/daemon/qb_probe 与 6 个 tools
+  #   **都** import 它（`import qb_client`）。不进白名单 ⇒ 容器里没有它 ⇒ **import 即
+  #   ImportError**（`crabpt_site` / `readd_queue` 同款场景，`ERR-QB-08` 的修法载体）。
+  #   ★ 它是"key 优先 / 回退账号密码"的唯一构造点，缺它整个回加路全挂。
+  qb_client.py
   # ★★ `tools/` 目录（2026-09-26 加）—— Dockerfile 里是 `COPY tools/ ./tools/`。
   #   为什么整个目录同步而不是逐个列文件：`tools/` 下的脚本是**按需在容器里跑**的
   #   （`docker compose run --rm tools python tools/xxx.py`），逐个列必然漏
@@ -101,9 +110,15 @@ FILES=(
 
 # 生产独有，绝不同步。写在这里是为了把"动不到"变成一条**可检查的断言**，
 # 而不是靠每次读代码时自己想起来。
+# ★ 2026-10-05：全部状态收进 `data/` 子目录（compose 里 `${STATE_DIR:-./data}:/data`）
+#   ⇒ 断言改用 `data/` 前缀。**别只改一半** —— 前缀对不上就等于断言失效
+#   （`NEVER` 是"白名单里不许出现它"的判据，写成旧路径会让它永远为真却什么都没防住）。
 NEVER=(
-  .env data.db data.db-journal data.db-wal data.db-shm
-  daemon_state.json daemon_heartbeat output_torrents
+  .env
+  data/data.db data/data.db-journal data/data.db-wal data/data.db-shm
+  data/daemon_state.json data/daemon_heartbeat data/daemon_env.json
+  data/readd_queue.json data/lsky_token.json
+  data/output_torrents data/covers data/raw_html
 )
 
 MODE="${1:---dry-run}"
@@ -392,7 +407,7 @@ fi
 #   这里代码是**构建时 COPY 进镜像**的，同步 .py 对正在运行的容器零影响。
 #   真正会打断它的是结尾那条 `up -d --build`（重建镜像 = 重启容器）。
 #   所以这条提示是给你判断"现在重建合不合适"用的，不是安全护栏。
-HB_FILE="$DST/daemon_heartbeat"
+HB_FILE="$DST/data/daemon_heartbeat"
 if [[ -f "$HB_FILE" ]]; then
   HB="$(tr -d '[:space:]' < "$HB_FILE" 2>/dev/null || true)"
   if [[ "${HB:-}" =~ ^[0-9]+$ ]]; then
@@ -513,7 +528,7 @@ cat <<'MSG'
 ────────────────────────────────────────────────────────────
 接下来在 **NAS 上**手动执行（脚本没法替你做，SSH 没开）：
 
-  cd <这个目录的 NAS 路径>            # 例: /volume2/docker_ssd/musopia_script2
+  cd <这个目录的 NAS 路径>            # 例: /volume2/docker_ssd/opencd2others
   sudo docker compose config --quiet && echo 'YAML OK'
   sudo docker compose up -d --build   # ★ 必须 up --build，不是 restart
   sudo docker logs --tail=60 opencd2musopia

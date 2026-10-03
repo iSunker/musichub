@@ -43,10 +43,14 @@ x-common: &common
     #   同名键只为本机跑自检用，两者互不覆盖 —— 本地 .env 不进容器。）
     - VERTEX_DB=/vertex/sql.db
   volumes: &common-volumes
-    # 状态（data.db / output_torrents / daemon_state.json）放在脚本目录，
+    # 状态（data.db / output_torrents / daemon_state.json / readd_queue.json /
+    # lsky_token.json / covers / raw_html …）统一放在 `${STATE_DIR:-./data}` 子目录，
+    # 与 compose 文件本身的目录**分开** —— 这样：
+    #   · 与 `data/` 平级的只剩容器定义类文件（compose / Dockerfile / .env / README）；
+    #   · 状态可整目录备份/搬移，不会和源码混在一起。
     # 而不是匿名命名卷：SMB 上直接看得到、能备份，出问题也能直接查库。
-    # 那份已经回填好 254 个站点 ID 的 data.db 就在这里，不需要任何迁移。
-    - ${STATE_DIR:-.}:/data
+    # 那份已经回填好 254 个站点 ID 的 data.db 就在 `data/` 里，不需要任何迁移。
+    - ${STATE_DIR:-./data}:/data
     # 抽元数据、找封面要读音乐文件，只读挂载
     - ${MUSIC_DIR:-/volume1/video/music}:/downloads:ro
     - ${INCOMPLETE_DIR:-/volume2/qb_temp/temp_docker_opencd}:/downloads/incomplete:ro

@@ -28,12 +28,16 @@ COPY config.py db.py descr.py assets.py musopia.py \
      run.py publish.py update_metadata.py sync_site.py \
      backfill_covers.py check_db.py backfill_covers_opencd.py \
      daemon.py healthcheck.py \
-     crawl.py opencd_parse.py opencd_rate.py opencd_log.py \
-     opencd_map.py opencd_gate.py opencd_ingest.py cover_fetch.py \
+     crawl.py opencd.py cover_fetch.py \
      topup_opencd_fields.py observe_custom_fields.py \
      sync_opencd_tid.py readiness_probe.py qb_probe.py flip_status.py \
      crabpt_site.py \
-     readd_queue.py ./
+     readd_queue.py \
+     qb_client.py ./
+# ★ 2026-10-04：`opencd_parse/rate/log/map/gate/ingest` 六个模块已合并成
+#   单文件 `opencd.py`（CLI 子命令 parse/rate/log/map/gate/ingest）。上面那行
+#    已同步替换。★ 合并后 `run.py --selftest` 的 ⑧b 判据会扫全仓库断言**没有**
+#    任何文件再 import 那六个旧名（防"合了但没改完"），见 ERRATA。
 
 # ★★ `tools/` 整个目录也打进去（2026-09-26）—— 原先**只 COPY 根目录的 .py**，
 #    于是容器里根本没有 `/app/tools/` ⇒ 任何 `tools/*.py` 都只能在本机跑。

@@ -11,10 +11,11 @@
   1. **两半分开**：offline（纯本地、随时可重生）/ online（要连 NAS 才读得到）。
      两半各带 generated_at —— 它们的刷新节奏不同。
   2. **数字只从事实源取**，绝不在这里重抄口径：
-     - stale 判据 → `db._published_where(only_stale=True)`（借 04_probes 的桩机制）
+     - stale 判据 → `db._published_where(only_stale=True)`（借 doc-audit/audit.py（原 04_probes）的桩机制）
      - 自检项数 → 各脚本自己的 `--selftest --json`（不解析人读的 ✅/❌ 行）
        ★ 为什么不正则解析：各脚本分母口径**并不统一**
-         （descr/gate/ingest/map/rate/cover 是 ok+fails，opencd_parse 是 total_checked），
+         （descr/gate/ingest/map/rate/cover 是 ok+fails，opencd parse 是 total_checked；
+          2026-10-04 六个 opencd_* 合并成 opencd.py 后口径不变），
          拿一个正则去套多种分母 = 制造一个"看起来很正常的"错数字（ERR-META-01 一族）。
      - 阶段间隔 → `daemon.INTERVALS` 的**同源**（本文件从 config 读，见 _intervals）
   3. **NAS 不可达时保留上一次的 online 块**，只写 reachable=false + skipped_reason。
@@ -50,18 +51,24 @@ sys.stdout.reconfigure(encoding="utf-8")
 REPO = pathlib.Path(__file__).resolve().parent.parent
 OUT = REPO / "counts.json"
 
-# 与 tools/doc-audit/04_probes.py 同款：NAS 根 → 部署目录
+# 与 tools/doc-audit/audit.py 同款：NAS 根 → 部署目录
 NAS = "//iSunker-DS423"
-DEFAULT_DST = f"{NAS}/docker_ssd/musopia_script2"
+# ★ 2026-10-05：生产端改名 `musopia_script2` → `opencd2others`，且状态移进 `data/`
+#   子目录（compose `${STATE_DIR:-./data}:/data`）。本工具的 `dst` 口径 = **data 目录**
+#   （下面 `dst / "data.db"` 直接拼）。
+DEFAULT_DST = f"{NAS}/docker_ssd/opencd2others/data"
 
 # ★ 要跑自检的脚本（键 = 传给 gen_counts 的路径，也是 counts.json 里的标识）
+#   ★★ 2026-10-04：`opencd_*` 六个模块已合并成 `opencd.py`（子命令 parse/rate/
+#     log/map/gate/ingest）⇒ 这里改成**参数列表**：字符串 = 单脚本，列表 =
+#     `python <第一项> <其余参数>`（例：`python opencd.py parse --selftest --json`）。
 SELFTEST_SCRIPTS = [
     "descr.py",
-    "opencd_gate.py",
-    "opencd_ingest.py",
-    "opencd_map.py",
-    "opencd_parse.py",
-    "opencd_rate.py",
+    ["opencd.py", "gate"],
+    ["opencd.py", "ingest"],
+    ["opencd.py", "map"],
+    ["opencd.py", "parse"],
+    ["opencd.py", "rate"],
     "cover_fetch.py",
     "tools/opencd-crawl-selftest.py",
 ]
@@ -83,18 +90,28 @@ DISABLED_STAGES: set = set()        # ★ 由 .env.example 的 ENABLE_* 实际�
 
 
 def resolve_dst():
-    """NAS 部署目录。优先级与 deploy.sh 一致（见 ERR-DEPLOY-01）：
-    DST 环境变量 → .deploy.nasrc → 硬编码兜底。★ .nasrc 是默认值，不是强制值。"""
+    """NAS 上**状态目录（data/）**的路径。优先级与 deploy.sh 一致（见 ERR-DEPLOY-01）：
+    DST 环境变量 → .deploy.nasrc → 硬编码兜底。★ .nasrc 是默认值，不是强制值。
+    ★★ 注意口径差异：`.deploy.nasrc` 里的 `DST=` 是 **compose 目录**（deploy.sh 的
+      同步目标），而本工具的 `dst` 要的是其下的 **`data/`**（库/心跳都在那里）
+      ⇒ nasrc 分支必须补 `data/`，否则 `dst / "data.db"` 会指到 compose 目录下的
+      `data.db`（= 不存在）—— 这正是 `ERR-META-01` 的"路径对不上但静默返回空"形状。
+    """
     v = os.environ.get("DST")
     if v:
-        return pathlib.Path(v)
+        return _as_data_dir(pathlib.Path(v))
     nrc = REPO / ".deploy.nasrc"
     if nrc.exists():
         for ln in nrc.read_text(encoding="utf-8").splitlines():
             ln = ln.strip()
             if ln.startswith("DST="):
-                return pathlib.Path(ln[4:].strip())
+                return _as_data_dir(pathlib.Path(ln[4:].strip()))
     return pathlib.Path(DEFAULT_DST)
+
+
+def _as_data_dir(p):
+    """把 compose 目录路径归一成其下的 `data/`；若已经指向 `data/` 则原样返回。"""
+    return p if p.name == "data" else p / "data"
 
 
 # ---------------------------------------------------------------- offline
@@ -151,23 +168,30 @@ def _disabled(env):
 
 
 def _selftests():
-    """跑每个脚本的 --selftest --json，读**末行** JSON。"""
+    """跑每个脚本的 --selftest --json，读**末行** JSON。
+
+    ★ 条目可以是字符串（单脚本）或列表（`[脚本, *前置参数]`）——
+      后者给合并后的 `opencd.py <子命令>` 用。键取 JSON 里的 `script` 字段
+      （含子命令，如 `opencd.py parse --selftest`），拿不到才退回路径标识。
+    """
     out = {}
     for rel in SELFTEST_SCRIPTS:
-        cmd = [sys.executable, str(REPO / rel), "--selftest", "--json"]
+        parts = [rel] if isinstance(rel, str) else list(rel)
+        label = parts[0] + ((" " + " ".join(parts[1:])) if len(parts) > 1 else "")
+        cmd = [sys.executable, str(REPO / parts[0]), *parts[1:], "--selftest", "--json"]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True,
                                encoding="utf-8", errors="replace",
                                cwd=str(REPO), timeout=300)
             last = [l for l in (r.stdout or "").strip().splitlines() if l.strip()]
             data = json.loads(last[-1]) if last else {}
-            out[data.get("script", rel)] = {
+            out[data.get("script", label)] = {
                 "ok": data.get("ok"), "total": data.get("total"),
                 "exit": r.returncode,
             }
         except Exception as e:                                # noqa: BLE001
-            out[rel] = {"ok": None, "total": None, "exit": None,
-                        "error": f"{type(e).__name__}: {e}"}
+            out[label] = {"ok": None, "total": None, "exit": None,
+                          "error": f"{type(e).__name__}: {e}"}
     return out
 
 
@@ -269,10 +293,12 @@ def collect_offline():
 def _db_read(dst):
     """只读打开 NAS 上的生产库。★ 不 cp（ERR-SQL-01）；UNC 不能塞进 sqlite URI。"""
     import importlib.util
-    # ★ 直接复用 04_probes 的 _ro / _stale_where —— 那是全项目最硬的一份只读读法，
+    # ★ 直接复用 doc-audit/audit.py 的 _ro / _stale_where —— 那是全项目最硬的一份只读读法，
     #   而且 _stale_where 会去 import db._published_where ⇒ 口径永不重抄（ERR-META-03）。
+    #   ★ 2026-10-05：原先加载的是 `04_probes.py`，四个审计脚本合并成 `audit.py` 后
+    #     改指向它（`_ro` / `_stale_where` 名字一字未改，仍在模块级）。
     spec = importlib.util.spec_from_file_location(
-        "_probes04", str(REPO / "tools" / "doc-audit" / "04_probes.py"))
+        "_probes04", str(REPO / "tools" / "doc-audit" / "audit.py"))
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     con = mod._ro(str(pathlib.Path(dst) / "data.db"))
