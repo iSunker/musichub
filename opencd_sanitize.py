@@ -15,7 +15,7 @@ OpenCD（皇后）详情页 HTML 脱敏 —— 让页面样本可以安全进仓
     python opencd_sanitize.py --in X --out Y   # 单文件
 
 ★ 设计纪律（两条，都来自本项目的既有教训）：
-  1. **按值的形状抹，不只按键名。** 抄 `tools/doc-audit/04_probes.py` 的 `redact()` ——
+  1. **按值的形状抹，不只按键名。** 抄 `tools/doc-audit/audit.py`（原 `04_probes.py`）的 `redact()` ——
      按 key 名匹配会漏掉「嵌在 URL / 文本里的」凭据（passkey 就是这样：它出现在
      `download.php` 的 query 里，不在任何叫 passkey 的字段里）。
   2. **脱敏必须可验证，且要验两个方向。** 一个「永远说没问题」的检查器比没有更危险

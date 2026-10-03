@@ -76,10 +76,10 @@ import requests
 import config
 import net   # ★ 统一网络出口（强制 IPv4）——新 Session 一律走 net.new_session()
 import db
-import opencd_ingest
-import opencd_log as L
-import opencd_parse
-import opencd_rate
+import opencd as opencd_ingest
+import opencd as L                    # 原 `import opencd_log as L`；log 已并入 opencd
+import opencd as opencd_parse
+import opencd as opencd_rate
 
 sys.stdout.reconfigure(encoding="utf-8")
 

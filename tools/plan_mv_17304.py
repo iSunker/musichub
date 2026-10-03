@@ -138,8 +138,8 @@ def main(argv=None):
             # ══════════════════════════════════════════════════════════════
             # ★★★ 2026-09-26 实测**连踩两次**——两次都是"客户端接错了"，记下来
             #      免得再犯：
-            #   ① 我先写 `readd_qb.make_gate_and_client()` ⇒ `AttributeError`
-            #      （那函数**不在** `readd_qb` 里，在 `probe_subtitles.py` 里）；
+            #   ① 我先写 `readd_qb.make_gate_and_client()` ⇒ `AttributeError`（脚本本已合并入 `tools/readd.py`）
+            #      （那函数**不在** readd_qb 里，在 `probe_subtitles.py` 里）；
             #   ② 改成 `probe_subtitles.make_gate_and_client()` 后 ⇒ 又报
             #      `'Client' object has no attribute 'download_torrent'`。
             #  根因：这个项目里有**两个不同的 `Client`**：
@@ -147,7 +147,7 @@ def main(argv=None):
             #      · `musopia.MusopiaClient`   = **乌托邦站**（有
             #        `.download_torrent()`，自己管 cookie，**不共用** RateGate）
             #  而 sid=17304 是**乌托邦站**的种子 ⇒ 该用 `MusopiaClient`，
-            #  权威依据不是"哪个名字看着对"，而是 `readd_qb.py:1022` 里**干这
+            #  权威依据不是"哪个名字看着对"，而是 `tools/readd.py` 的 qb 段里**干这
             #  件事的那一处**用的就是 `MusopiaClient`（`ERR-META-03`：同一件事
             #  只能有一处实现 ⇒ 照抄那一处，不另造）。
             # ★ 「照抄哪一处」的判据是**它做的是同一件事**（下乌托邦的种子），
@@ -268,9 +268,9 @@ def main(argv=None):
               f"{'是' if (meta and not meta['is_multi']) else '否'}")
         print()
         print("  ① 停任务（只读查状态，确认到不是 running 再做下一步）")
-        print(f"     → 用 readd_qb 的 --recheck-only 预览确认 hash：")
+        print(f"     → 用 tools/readd.py qb 的 --recheck-only 预览确认 hash：")
         print(f"       sudo docker compose run --rm tools python "
-              f"/data/tools/readd_qb.py --verify-hashes <02afb787…>")
+              f"tools/readd.py qb --verify-hashes <02afb787…>")
         print("  ② 停止该任务（★ 这是 qB 写操作，要显式做）")
         _what = "目录" if meta["is_multi"] else "文件"
         print(f"  ③ 搬**{_what}**（★ 用 mv，同文件系统内 ⇒ 秒级、不复制字节）")

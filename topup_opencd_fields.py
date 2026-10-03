@@ -113,9 +113,9 @@ except Exception:
 
 import config
 import db
-import opencd_ingest
-import opencd_parse
-import opencd_rate
+import opencd as opencd_ingest
+import opencd as opencd_parse
+import opencd as opencd_rate
 
 import crawl  # ★ 复用它的 Client / fetch_detail / RAW_DIR —— **不重造一条出网路**
 

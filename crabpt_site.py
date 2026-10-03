@@ -55,7 +55,7 @@ import config
 import net   # ★ 统一网络出口（强制 IPv4）——新 Session 一律走 net.new_session()
 import db
 import descr
-import opencd_map
+import opencd
 
 # ★ 复用乌托邦那份 UA / 错误提取 —— 两站都是 NexusPHP，出错的页面形状同族。
 #   ★ 不各写一份：这两样不是"站点差异"，是"NexusPHP 共性"，各写一份就是两个口径

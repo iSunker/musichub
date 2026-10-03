@@ -71,8 +71,8 @@ os.environ["DATA_DIR"] = _TMP
 
 import crawl                      # noqa: E402
 import db                         # noqa: E402
-import opencd_parse as op         # noqa: E402
-import opencd_rate as cr          # noqa: E402
+import opencd as _opencd          # noqa: E402
+op = cr = _opencd                 # noqa: E402
 
 SAMPLE = os.path.join(REPO, "opencdhtml", "sanitized")
 HITS = []                          # mock 收到的请求路径
@@ -270,7 +270,7 @@ def main(json_mode=False):
 
     # ---------- 判据⑦：日志不爆表 ----------
     print("\n【判据⑦】日志防爆表（长文本截断 / 明细折叠）")
-    import opencd_log as L
+    import opencd as L
     long_log = "x" * 5000
     c.check("brief 截断长文本", True, len(L.brief(long_log)) < 250)
     c.check("mask_secrets 抹 passkey", True,

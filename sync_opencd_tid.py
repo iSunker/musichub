@@ -221,7 +221,7 @@ def open_readonly(path):
       ③ 无条件 `PRAGMA query_only=1`（双保险）。
 
     ★ 不 cp —— `ERR-SQL-01`（cp 会丢 WAL 里未 checkpoint 的数据）。
-    ★ UNC 的坑（`04_probes.py` 记过）：不能写 `file://iSunker-DS423/...`，
+    ★ UNC 的坑（`tools/doc-audit/audit.py`，原 `04_probes.py` 记过）：不能写 `file://iSunker-DS423/...`，
       那会把主机名当 URI 的 authority 而报 `invalid uri authority`。
       ⇒ 要用 `file://` + **前导斜杠的路径**（即多两个斜杠）。
     """
