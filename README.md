@@ -36,7 +36,7 @@ qBittorrent(:3020, 分类 opencd)
 | **改页面渲染**（标题 / 副标题 / 简介 / 日志 / 曲目） | **页面内容渲染** ← 发布和编辑共用一处，改这里两边同时生效 |
 | **批量改已发布的 250+ 个页面** | **编辑已发布页面** + **更新路线** |
 | 改完代码怎么测 | **改完代码怎么测（Docker）** |
-| **把代码推到 NAS 生产** | **部署与同步（deploy.sh）** |
+| **把代码推到 NAS 生产** | **构建与部署（本机构建 → GHCR → NAS pull）** |
 | 我卡住了（页面没图 / 记录被跳过 / 容器 unhealthy） | **排障** |
 | 搞清调度为什么是单容器 | **为什么是单容器 + 自研调度** |
 | **下一步该做什么** | **当前状态与下一步** |
@@ -54,13 +54,11 @@ qBittorrent(:3020, 分类 opencd)
 
 ## 目录结构
 
-**生产端（NAS）** `opencd2others/` —— 与 `data/` 平级只放**容器定义类文件**：
+**生产端（NAS）** `opencd2others/` —— 只剩「**一份 compose + 真凭据 + 状态**」三类：
 
 ```
 opencd2others/                      # NAS 部署目录（compose 就放这里，./ 即指它）
 ├─ docker-compose.yml               # opencd2musopia 常驻 + tools/once 一次性任务
-├─ Dockerfile                       # 代码 COPY 进镜像（不是 bind mount）
-├─ .dockerignore                    # 构建上下文排除（凭据/状态/产物，防外溢）
 ├─ .env                             # 站点 Cookie / qB 密码 / 图床 Key（唯一密钥来源，绝不进仓库）
 ├─ .env.example                     # 占位符模板（全是 changeme）
 ├─ README.md                        # ← 本文件：操作手册（唯一事实源，**会上生产**）
@@ -76,22 +74,31 @@ opencd2others/                      # NAS 部署目录（compose 就放这里，
    └─ raw_html/                     # 皇后详情页落盘（解析层重放用）
 ```
 
+> ★★ **2026-10-06 起：构建已移到本机**（`bash build-push.sh` → 推 GHCR → NAS 只 `pull`）。
+> ⇒ 生产端**不再有** `Dockerfile` / `.dockerignore` / 27 个 `.py` / `tools/`。
+> 镜像从 `ghcr.io/isunker/opencd2others:latest` 拉；`docker compose up` 不再需要 `--build`。
+> 理由：NAS 顶层曾摊着 27 个 `.py`（构建上下文）＋ NAS 出网受限（实测 `registry-1.docker.io`
+> 不可达）⇒ 在 NAS 上构建本就脆弱；本机构建又快又稳，且镜像按 git-sha 打 tag ⇒ **可回滚**。
+
 **本机仓库**（`D:\Projects\opencd2others\zhuanzhong`，**git 只在这里**）—— 除上面全部内容外，还多：
 
 ```
-├─ config.py … qb_client.py 等全部 .py    # 代码（deploy.sh 白名单同步到 NAS；COPY 进镜像）
-├─ deploy.sh                        # ★本地→NAS 白名单同步（开发工具，不上 NAS）
+├─ config.py … qb_client.py 等全部 .py    # 代码（本机构建时 COPY 进镜像；不落 NAS 磁盘）
+├─ Dockerfile / .dockerignore        # ★ 构建定义（只在本机 —— 构建上下文 = 本仓库）
+├─ build-push.sh                     # ★ 本机构建 + 推 GHCR（取代旧的 deploy.sh 同步）
+├─ deploy.sh                         # ⚠️ 已弃用，只保留 NEVER 名单与教训（见文件头）
 ├─ tools/                           # 开发工具：readd.py（回加）/ nas_health.py 巡检 /
-│                                   #   gen_counts.py 生成真值 / doc-audit/audit.py 文档只读投影
+│                                   #   gen_counts.py 生成真值 / build-preflight.sh 构建自检 /
+│                                   #   doc-audit/audit.py 文档只读投影
 ├─ CLAUDE.md / .claude/RULES.md     # ★ 每轮自动读取的规则（本机专属，不上生产）
 ├─ ERRATA.md                        # 教训索引（`ERR-*` 表；不上生产）
 ├─ SESSION-NOTES.md                 # 会话记录（只增不改；不上生产）
 └─ counts.json                      # ★自动生成：会动的量的真值（不上生产，**永不手改**）
 ```
 
-> ★ **生产端不收 `tools/`、`ERRATA.md`、`SESSION-NOTES.md`、`counts.json`、探测脚本** ——
-> 那些只在本机。`deploy.sh` 的白名单（= `Dockerfile` 的 COPY 行 + compose 定义类文件）
-> 决定哪些会同步过去；白名单**不含** `.env`（生产独有真凭据，须手工维护）。
+> ★ **生产端不收源码 / `tools/` / `Dockerfile` / `ERRATA.md` / `SESSION-NOTES.md` /
+> `counts.json` / 探测脚本** —— 那些只在本机。哪些会进镜像由 `Dockerfile` 的 `COPY` 行决定；
+> `tools/build-preflight.sh` 在构建前反查它（见「构建与部署」）。
 > ★ **生产端不是 git 仓库**（`.git` 只在本机），别在生产端跑 git。
 
 > ★ **每份文件多少行、有多少条记录、自检过多少项** —— 这些是**每天都动的量**，
@@ -148,8 +155,9 @@ opencd2others/                      # NAS 部署目录（compose 就放这里，
 
 ## 部署步骤（分阶段，每步可独立验证）
 
-> 前置：把本目录内容整个放到 NAS 部署目录（本文档举例用 `/volume2/docker_ssd/opencd2others`）。
-> `cp .env.example .env`，然后填 `.env`：至少 `QB_PASS`、`MUSOPIA_COOKIE`、`MUSOPIA_PASSKEY`、`PICGO_API_KEY`。
+> 前置：NAS 部署目录准备好 compose + `.env` + `data/`（本机构建推 GHCR，见「构建与部署」）。
+> 本文档举例用 `/volume2/docker_ssd/opencd2others`。首次部署：`cp .env.example .env`，
+> 然后填 `.env`：至少 `QB_PASS`、`MUSOPIA_COOKIE`、`MUSOPIA_PASSKEY`、`PICGO_API_KEY`。
 > **这四个缺失时 `config.py` 会直接终止程序**（不留默认值，见「安全」）。
 
 ### Phase 0 — 空跑一轮，绝不改站点
@@ -193,13 +201,15 @@ docker compose --profile tools run --rm tools python update_metadata.py --apply 
 
 ```bash
 # .env 里 DRY_RUN=false
-docker compose up -d --build musopia      # ★ 只点名 musopia，别裸 up
+docker compose pull                       # ★ 先拉本机推上来的镜像
+docker compose up -d --remove-orphans musopia      # ★ 只点名 musopia，别裸 up
 ```
 
 > **★ 为什么必须带服务名 `musopia`**：不带服务名时 `docker compose up -d`
 > 会把 compose 文件里**所有**服务一起拉起 —— 包括 `profiles: [tools]` 的一次性
 > `tools` / `once`（它们本是「按需 `run --rm`」的，被 `up` 拉起就成了常驻）。
-> 所以重建常驻容器**一律**写成 `docker compose up -d --build musopia`。
+> 所以重建常驻容器**一律**写成 `docker compose up -d musopia`。
+> ★ 先 `pull`：镜像在上一步由本机 `build-push.sh` 推到 GHCR，NAS 不 `pull` 拿不到新的。
 
 日常新种子流程：`run.py` → `publish.py`（Phase 5 的 daemon 会自动做）。
 
@@ -214,7 +224,8 @@ docker compose up -d --build musopia      # ★ 只点名 musopia，别裸 up
 | 站点 ID 回填了 | `check_db.py` | 不再有大量 `site_torrent_id` 为空的记录 |
 | 编辑不误伤 | `update_metadata.py 14611 --apply --verify` | 回读校验通过；站点上 `medium/codec/team/tags` **没变** |
 | 容器活着 | `docker compose ps` | `healthy` |
-| 本地与生产一致 | `bash deploy.sh`（本地跑） | `✓ 生产与本地一致，无需同步` |
+| 本机镜像已推 GHCR | `docker buildx imagetools inspect ghcr.io/isunker/opencd2others:latest`（本机跑） | 有 amd64 manifest |
+| NAS 跑的是新镜像 | `docker inspect opencd2musopia --format '{{.Image}}'` | 与上面 digest 一致 |
 
 ---
 
@@ -377,7 +388,8 @@ cd /volume2/docker_ssd/opencd2others
 DRY_RUN=true docker compose --profile tools run --rm once
 
 # 2. 看日志没问题后，改 .env 里 DRY_RUN=false，然后常驻
-docker compose up -d --build musopia      # ★ 点名 musopia（裸 up 会连 tools/once 一起拉）
+docker compose pull                       # ★ 先拉本机推上来的镜像
+docker compose up -d --remove-orphans musopia   # ★ 点名 musopia（裸 up 会连 tools/once 一起拉）
 
 # 3. 观察
 docker compose logs -f opencd2musopia    # 或 docker logs -f opencd2musopia
@@ -386,24 +398,37 @@ docker compose ps                 # 看 healthy 状态
 
 ### ⚠️ 改了代码之后怎么生效
 
-代码是 `COPY` 进镜像的（不是 bind mount），所以：
+**代码在镜像里**（不是 bind mount）。但**构建在本机**（2026-10-06 起），所以流程是
+「本机 build + push → NAS pull」：
 
 ```bash
-docker compose restart            # ❌ 只重启容器，跑的还是旧镜像里的旧代码
-docker compose up -d --build musopia   # ✅ 重新构建镜像并替换容器，新代码才生效（★ 点名 musopia）
+# ① 本机：构建 + 推 GHCR（会先跑 tools/build-preflight.sh 自检）
+bash build-push.sh
+
+# ② NAS：拉新镜像 + 重建常驻容器
+cd /volume2/docker_ssd/opencd2others
+/usr/local/bin/docker compose pull
+/usr/local/bin/docker compose up -d --remove-orphans musopia   # ★ 只 musopia
 ```
 
-> **★ 裸 `docker compose up -d --build`（不带服务名）的副作用**：它会把 `tools` /
+**别再用的两条**（旧模型遗留）：
+```bash
+docker compose restart            # ❌ 只重启容器，跑的还是旧镜像里的旧代码
+docker compose up -d --build      # ❌ 生产端已无 build: 定义，会直接报错
+```
+
+> **★ 裸 `docker compose up -d`（不带服务名）的副作用**：它会把 `tools` /
 > `once` 也一并拉起 —— 这两个是 `profiles: [tools]` 的**一次性**服务，被 `up` 拉起后
 > 会**常驻**，与 daemon 并发写同一个 SQLite（`database is locked` 的来源）。
-> ⇒ 重建常驻容器**只写** `docker compose up -d --build musopia`。
+> ⇒ 重建常驻容器**只写** `docker compose up -d musopia`。
 
-`restart` 后看不到新行为、日志里没有新输出，**九成是这个原因**。
+`restart` 后看不到新行为、日志里没有新输出，**九成是这个原因**（或忘了 push / 忘了 pull）。
 
-> **★ 顺序也有讲究**：`up -d --build` 必须跑在**任何** `--profile tools run` **之前**。
-> 三个 service（`musopia` / `tools` / `once`）共用同一个镜像 `musopia-script:latest`
-> （compose 里 `x-common` 锚点定的），而 `docker compose run` **只在镜像不存在时才构建** ——
-> 镜像没重建就直接 `run --rm tools python run.py --recheck`，跑的是**旧代码**，
+> **★ 顺序也有讲究**：`pull` 必须跑在**任何** `--profile tools run` **之前**。
+> 三个 service（`musopia` / `tools` / `once`）共用同一个镜像
+> `ghcr.io/isunker/opencd2others:latest`（compose 里 `x-common` 锚点定的），而
+> `docker compose run` **不会自动 pull**（旧模型里是"只在镜像不存在时才 build"）——
+> 镜像没先 `pull` 就直接 `run --rm tools python run.py --recheck`，跑的是**旧代码**，
 > 会白跑一遍还看不出问题（`--recheck` 静默完成，只是结果没变）。
 
 ### 看日志
@@ -425,7 +450,7 @@ docker compose logs -f opencd2musopia    # 等价写法
 ```bash
 docker rm -f musopia_publish musopia_scan
 # 或者下次 up 时顺带清理
-docker compose up -d --build --remove-orphans musopia   # ★ 末尾点名 musopia；--remove-orphans 负责清旧容器
+docker compose up -d --remove-orphans musopia   # ★ 末尾点名 musopia；--remove-orphans 负责清旧容器
 ```
 
 ### 为什么是单容器 + 自研调度，而不是几个 cron
@@ -585,10 +610,13 @@ docker compose --profile tools run --rm tools \
 
 ## 改完代码怎么测（Docker）
 
-代码是 `COPY` 进镜像的，**改完必须先重建镜像**，`docker compose restart` 跑的还是旧代码：
+代码在镜像里，**改完要先本机构建 + 推 + NAS 拉**，`docker compose restart` 跑的还是旧代码：
 
 ```bash
-docker compose build
+# 本机
+bash build-push.sh
+# NAS
+docker compose pull && docker compose up -d --remove-orphans musopia
 ```
 
 下面用 `tools` profile 的一次性容器，跑完即删（`--rm`），不影响常驻的 `opencd2musopia`：
@@ -633,50 +661,61 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 > docker compose --profile tools run --rm tools python update_metadata.py --stale-only --apply --yes --rate 10
 > ```
 
-确认无误后让常驻容器生效：`docker compose up -d --build`（**不是** `restart`）。
+确认无误后让常驻容器生效：本机 `bash build-push.sh` → NAS `docker compose pull && docker compose up -d --remove-orphans musopia`（**不是** `restart`）。
 
 ---
 
-## 部署与同步（deploy.sh）
+## 构建与部署（本机构建 → GHCR → NAS `pull`）
 
-本机改完代码怎么送上去 —— 见 **deploy.sh**，它做的是**白名单同步**：
+**2026-10-06 起，构建在本机做**，NAS 只负责拉镜像 + 起容器。旧 `deploy.sh`（SMB 白名单
+同步）**已弃用** —— 生产端不再需要源码，没有"要同步的文件"了。
 
+### 本机
 ```bash
-bash deploy.sh                     # 预览差异（默认 dry-run）
-bash deploy.sh --apply             # 写入（自动先备份到 .deploy-backup/<时间戳>/）
-bash deploy.sh --rollback          # 回滚到最近一次备份
+bash build-push.sh                 # 构建 + 推 ghcr.io/isunker/opencd2others:latest 与 :<git-sha>
+bash build-push.sh v1.2            # 额外打一个自定义 tag
+SKIP_PUSH=1 bash build-push.sh     # 只本机构建、不推（本地验证）
 ```
+`build-push.sh` 会：
+1. 先跑 **`tools/build-preflight.sh`** —— 查「`Dockerfile` 说要 `COPY` 的**源在本机存在吗**」
+   + CRLF 行尾检测。
+   ★ 这条护栏**没消失、只是前移**：`COPY` 漏列一个文件时**构建不会报错**，要到跑阶段才
+   `ModuleNotFoundError`（本仓库已踩过 `qb_client.py`、`readd_queue.py` 两次）。
+2. `docker buildx build --platform linux/amd64 --provenance=false --sbom=false`。
+   - `--platform linux/amd64`：NAS 是 x86_64（本机也是）⇒ 同架构；显式写出防在别架构机器上构建。
+   - `--provenance=false --sbom=false`：关掉 buildx 默认产的 attestation manifest ——
+     NAS 是 **Docker 24.0.2**，对它在 manifest list 里多出的 `unknown/unknown` 项有兼容问题。
+3. 打 **两个 tag**：`latest`（NAS 用）+ `:<git-sha>`（工作区脏时加 `-dirty`）⇒ **可回滚**。
 
-设计要点：
+### NAS
+```bash
+ssh -p 36688 -i "C:/Users/艾森克/.ssh/id_ed25519" iSunker@192.168.0.7
+cd /volume2/docker_ssd/opencd2others
+/usr/local/bin/docker compose pull
+/usr/local/bin/docker compose up -d --remove-orphans musopia
+/usr/local/bin/docker compose logs --tail=60 opencd2musopia
+```
+- ★ NAS 用户**在 docker 组** ⇒ 用 `/usr/local/bin/docker`，**不用 sudo**。
+- ★ **顺序纪律**：`pull` 必须在**任何** `--profile tools run` **之前** ——
+  `run` 不会自动 pull，会用本地旧镜像（症状同 `ERR-DOCKER-01`："跑了但没生效"）。
+- ★ **验证跑的是新镜像**（别用"push 过"推"NAS 上生效了"）：
+  ```bash
+  docker inspect opencd2musopia --format '{{.Image}}'
+  docker buildx imagetools inspect ghcr.io/isunker/opencd2others:latest   # 本机跑，比对 digest
+  ```
+- ★ **回滚**：compose 里 `image:` 换成 `:<上一个 git-sha>` tag 再 `pull && up -d`。
 
-- **白名单 = `deploy.sh` 里的 `FILES=(...)` 数组**。它含全部 `.py`，**另外还含**
-  `Dockerfile` / `docker-compose.yml` / `README.md` / `.env.example`
-  —— 所以它**不等于** `Dockerfile` 的 `COPY` 行（旧描述就是这么写错的，2026-09-22 订正）。
-  脚本还会**反向自检**：从 `Dockerfile` 解出实际要 `COPY` 的 `.py` 逐个核对，漏一个就拒绝部署。
-  ★ 真值（白名单全集 / Dockerfile COPY 全集 / 双向差集）见 `counts.json` 的 `offline.deploy`。
-- ★★ **白名单 ≠ 容器内可见 —— 这是两条独立的路，别混（2026-09-19 踩过）**：
+### 关于旧的 `deploy.sh`
+已改为「弃用说明桶」：不再同步任何文件，只保留 `NEVER` 名单与历史教训注释
+（`config.py` / `db.py` / `daemon.py` 里多处引用它作为权威）。可 `bash deploy.sh --list-never`
+打印"生产独有、绝不进镜像"的状态清单（`.env` + 全部 `data/`）。
 
-  | | 决定 |
-  |---|---|
-  | `deploy.sh` 的 `FILES` 白名单 | 文件**能不能被部署过去**（`deploy.sh` 读它）|
-  | `Dockerfile` 的 `COPY` 行 / compose 的 `volumes` | 跑起来**容器里看不看得见** |
-
-  白名单里有它，只说明「部署会成功」；**不说明容器跑起来找得到它**。
-  实测翻车形状：脚本放 `tools/` → 在 NAS 上跑 → 容器报
-  `can't open file '/app/tools/publish_probe.py'`（`tools/` 两条都不占）。
-  要进容器只有两条路：写进镜像的 `COPY` 行（得重建镜像），或放进
-  **compose 根目录**（`${STATE_DIR:-.}` bind mount 成 `/data`，容器里看得见）。
-  ★ 连带：`python /data/x.py` 时 Python 只把**脚本所在目录**加进 `sys.path`、**不加 cwd**
-  （容器 `WORKDIR` 是 `/app`）⇒ `import config` 直接 `ModuleNotFoundError`，
-  脚本得自己 `sys.path.insert(0, "/app")`。
-- **`.env` / `data.db` / `daemon_state.json` / `daemon_heartbeat` / `output_torrents` 永不在白名单里**，
-  脚本开头有显式断言（混进去直接退出）。
-- 写入走「临时文件 + `mv`」**原子替换**。
-- 目标路径读 `.deploy.nasrc`（已 gitignore），也可用 `DST=` 临时覆盖 —— **外部 `DST` 优先**。
-
-> ⚠️ **deploy.sh 只负责把文件放过去，不重建容器。** NAS 的 SSH 没开，本机不能在
-> NAS 上执行命令，所以脚本结尾会把 NAS 上要手动跑的命令打出来：
-> `sudo docker compose up -d --build`（**不是** `restart`）。
+> ★ **本机构建顺带修好的三条历史问题**（详见 ERRATA）：
+> - `ERR-DOCKER-07`：`WARN buildx: git was not found` 的根因是"本机有 git、NAS 没有" ——
+>   构建移到本机后**消失**。
+> - `ERR-DOCKER-09`：`COPY` 吃进 SMB 缓存里的旧文件 —— 根因**只在 NAS 构建时**存在。
+> - `ERR-DOCKER-10`：镜像里的 `tools/` 是"构建那一刻的快照"、和 NAS 上的实时副本对不上 ——
+>   现在 `tools/` 根本不落 NAS，这条自动失效。
 
 ---
 
@@ -729,7 +768,7 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 | **改了记录但页面迟迟不更新** | 有变更时 edit 应在 60s 内跟上。若长时间不动，看日志有没有 `⏸️ [edit] 本轮未推进`（卡在某条永远失败的记录上，如缺 takeedit 表单）；否则查 `docker compose logs opencd2musopia` 里 edit 阶段是否在报错（Cookie 失效会走指数退避） |
 | 容器 unhealthy | 心跳停了。`docker compose logs opencd2musopia` 看卡在哪个阶段 |
 | 想立刻重跑某阶段 | 删掉 `daemon_state.json` 里对应的 `last_run`，或整个文件删掉重启 |
-| 改了代码但行为没变 | `restart` 不重新构建镜像。用 `docker compose up -d --build` |
+| 改了代码但行为没变 | 忘了本机构建/推送，或 NAS 没 `pull`。本机 `bash build-push.sh` → NAS `docker compose pull && up -d`（`restart` 跑的还是旧镜像） |
 | **站点打回「請更正曲目列表，使其易於閱讀」** | 源 CUE 被**西欧单页码页**写坏（非 ASCII 字符整体变成 `.`），或码页不在 `LOG_ENCODINGS` 里、被兜底解成**私用区乱码**。先看本地 `tracklist` 是不是整片点号/乱码。`read_tracklist()` 已按**每份 CUE** 判退化并回退到音频文件名（见「曲目列表兜底」）|
 | **多碟页面出现两个同名 `CDx` 折叠块** | 有张碟的目录名不符合 `CD/DISC/DISK+数字`，补号与已有碟号撞了。已修（补号避开已占用编号），见上文「多碟日志的存储」 |
 | `database is locked` | 有别的进程在并发写库。检查是否有孤儿容器（`docker ps`），见「清理孤儿容器」 |
@@ -744,7 +783,7 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
   用 `require_env()`：**缺失直接 `sys.exit`**，源码里不给「看起来能跑」的真实默认值 ——
   免得悄悄拿一个可能已过期/泄露的旧值继续跑。
 - `.env.example` 里全是 `changeme` 占位符，可安全提交。
-- `deploy.sh` 的白名单**永不包含** `.env`，且有断言兜底。
+- `.env` **永不进 git、也永不进镜像**（`.gitignore` 排 `.env`/`.env.*`，`.dockerignore` 排 `.env*`）。
 
 ---
 
@@ -836,7 +875,9 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
    **以本节末那笔的序号 ①②③ 为准**（关键差别：第二把钥匙要**单独一次**上线，
    即「先代码、后钥匙、最后总闸」三趟，不能合并成两趟）。
    当时写的两条注意事项**仍然有效**，抄录如下：
-   - NAS 上改 `.env` 后必须 `sudo docker compose up -d --build`
+   - NAS 上改 `.env` 后必须**重建/重建容器**（早期是 `sudo docker compose up -d --build`；
+     2026-10-06 起构建移到本机，等价做法是 `docker compose pull && docker compose up -d musopia`
+     —— 若只改了 `.env` 不改代码，`docker compose up -d musopia` 就够，它**会 recreate**）
      （★ **不是 `restart`** —— 它重启的是同一个容器、沿用同一份环境变量，
      **新的 `.env` 根本不会被读到**）。
    - **先手工跑一条**再交回定时：

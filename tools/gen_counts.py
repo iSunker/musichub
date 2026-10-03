@@ -262,26 +262,30 @@ def _errata():
 
 def collect_offline():
     env = _parse_env_example()
-    files, never = _sh_array("FILES"), _sh_array("NEVER")
+    # ★ 2026-10-06：构建移到本机后，`deploy.sh` 的 `FILES` 白名单**已不存在**
+    #   （deploy.sh 退化为弃用说明，只保留 `NEVER`）。所以这里只读 `NEVER`。
+    never = _sh_array("NEVER")
     copy_py = _dockerfile_copy_files()
+    # ★「Dockerfile 说要 COPY 的 .py」必须真的在磁盘上（本机）。
+    #   这是 tools/build-preflight.sh 的同一条判据，在这里出个计数便于巡检。
+    copy_py_present = sorted(f for f in copy_py if (REPO / f).exists() or (REPO / "src" / f).exists())
     return {
         "generated_at": _now_iso(),
         "generator": "tools/gen_counts.py",
         "selftests": _selftests(),
         "env": {"source": ".env.example", "values": dict(sorted(env.items())),
                 # ★ 说清口径边界：这是**模板**的值，不是生产 `.env` 的值。
-                #   `.env` 在 deploy.sh 的 NEVER 名单里、本机拿不到（ERR-ENV-02），
+                #   `.env` 在 NEVER 名单里、本机拿不到（ERR-ENV-02），
                 #   所以「生产是不是真的关着某阶段」本文件**无从得知**。
-                "note": ".env.example（模板）的值；生产 .env 不在白名单、本机读不到，"
+                "note": ".env.example（模板）的值；生产 .env 本机读不到，"
                         "两者可能不一致 —— stages[].disabled 只表示「按模板该不该动」"},
-        "deploy": {
-            "files": files, "never": never, "readme_deployed": "README.md" in files,
+        "build": {
+            # ★ 2026-10-06：本机构建 + 推 GHCR ⇒ 这里出的是**构建**相关的真值
+            #   （旧的 `deploy.files` 白名单口径已随 deploy.sh 退场而消失）。
+            "never": never,
             "dockerfile_copy_py": copy_py,
-            # ★ 两向差集都出，因为 deploy.sh 的自检只查了一个方向
-            "dockerfile_copy_missing_from_whitelist":
-                sorted(set(copy_py) - set(files)),
-            "whitelist_missing_from_dockerfile":
-                sorted(set(f for f in files if f.endswith(".py")) - set(copy_py)),
+            "dockerfile_copy_py_present": copy_py_present,
+            "dockerfile_copy_py_missing": sorted(set(copy_py) - set(copy_py_present)),
         },
         "line_counts": _line_counts(),
         "errata": _errata(),
@@ -412,7 +416,9 @@ def main():
     n_ok = sum(1 for v in off["selftests"].values() if v.get("exit") == 0)
     print(f"✅ 写出 {out}")
     print(f"   offline  自检 {n_ok}/{len(off['selftests'])} 通过 · "
-          f"ERR {off['errata']['count']} 条 · 白名单 {len(off['deploy']['files'])} 项")
+          f"ERR {off['errata']['count']} 条 · COPY {len(off['build']['dockerfile_copy_py'])} 项"
+          + (f" · ★缺 {len(off['build']['dockerfile_copy_py_missing'])}"
+             if off['build']['dockerfile_copy_py_missing'] else ""))
     if on.get("reachable"):
         d = on["db"]
         print(f"   online   库 total={d['total']} exists={d['exists']} "

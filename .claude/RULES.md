@@ -7,7 +7,10 @@
 ## A. 生产端 vs 本机：什么放哪
 
 ### A.1 与 `data/` 平级的（容器定义类，上生产）
-`docker-compose.yml` · `Dockerfile` · `.dockerignore` · `.env` · `.env.example` · `README.md`
+`docker-compose.yml` · `.env` · `.env.example` · `README.md`
+> ★ 2026-10-06：**`Dockerfile` / `.dockerignore` / 27 个 `.py` / `tools/` 不再上生产** ——
+> 构建已移到本机（`bash build-push.sh` → 推 GHCR → NAS `pull`）。生产端只需要
+> "一份 compose + 真凭据 `.env` + 状态 `data/`"就能把镜像跑起来。
 
 ### A.2 进 `data/` 的（容器状态与产物，生产端**只在**这里）
 ```
@@ -19,32 +22,35 @@ output_torrents/  covers/  raw_html/
 > 判据：**"容器写它、人要看它"的都进 `data/`**。它们由 `config.DATA_DIR` /
 > compose 的 `${STATE_DIR:-./data}:/data` 统一寻址，容器内一律 `/data/...`。
 
-### A.3 **只在本机**、绝不上生产的（`deploy.sh` 白名单之外 + NEVER 名单）
-- `tools/` 整个目录（容器内按需用 `docker compose run --rm tools ...`，
-  但**源码只在本机维护**；镜像构建时由 Dockerfile `COPY tools/` 打进去）。
+### A.3 **只在本机**的（源码、工具、文档、元层 —— 一概不上生产）
+- **源码**：根目录全部 `.py`（将来收进 `src/`）—— 本机构建时 `COPY` 进镜像，
+  但**不落 NAS 磁盘**。
+- `tools/` 整个目录（容器内按需 `docker compose run --rm tools ...` —— 跑的是**镜像里**那份；
+  源码只在本机维护）。
 - 探测/诊断脚本：`_probe_*.py`、`diag_*.py`、`show_*.py`、`preview_*.py`、`fetch_*.py`。
-- 自测与回归：`tools/test_*.py`、`tools/verify_*.py`、`tools/*-selftest.py`。
+- 自测与回归：`tools/test_*.py`、`tools/verify_*.py`、`tools/*-selftest.py`、`tools/build-preflight.sh`。
 - 证据/产物：`*.html`（站点响应快照）、`*.log`、`counts.json`、`.scratch/`、`_preview/`。
+- 构建与部署工具：`Dockerfile`、`.dockerignore`、`build-push.sh`、`deploy.sh`（已弃用）、
+  `.deploy-backup/`。
 - 文档与元层：`CLAUDE.md`、`.claude/RULES.md`、`ERRATA.md`、`SESSION-NOTES.md`、
-  `PLAN-*.md`、`x/`、`deploy.sh`、`.deploy.nasrc`、`.deploy-backup/`。
-- **备份垃圾**（生产端发现即删，不留）：`.env.bak-*` / `.env.before-*` / `.env.pre-*` /
-  `Dockerfile.bak-*` / `*.db.bak-*` / `daemon_state.json.bak-*` /
-  `_env_backups_archived_*` / `qbtune_*.bak-*`。
-- `.git/`（生产端删；git 只在本机）。
+  `PLAN-*.md`、`x/`。
+- `.git/`（生产端不存；git 只在本机）。
 
 ---
 
-## B. `deploy.sh` 白名单同步规则
+## B. 本机构建 → GHCR → NAS `pull`（旧 `deploy.sh` 已弃用）
 
-- 白名单 = 脚本里的 `FILES` 数组；**权威来源是 `Dockerfile` 的 `COPY` 行**。
-  脚本末尾 `dockerfile_copy_files()` / `dockerfile_copy_dirs()` 会反查，
-  漏一个 ⇒ **拒绝部署**。改了 `Dockerfile` 就**必须**改 `FILES`。
-- `NEVER=(...)` 是"生产独有、绝不覆盖"的断言：`.env` + 全部 `data/` 状态。
-  白名单里混进它们 ⇒ 脚本拒绝部署。
-- 默认 dry-run；`--apply` 才写；写前备份到本机 `.deploy-backup/<时间戳>/`，
-  `--rollback` 回滚。
-- ★ `deploy.sh` 只会**叠加/覆盖**，**不会删除** NAS 上的文件。
-  要删生产端的东西只能手工（SMB 或 SSH `rm`）。
+- 构建入口 = **`bash build-push.sh`**：先跑 `tools/build-preflight.sh`，再
+  `docker buildx build --platform linux/amd64 --provenance=false --sbom=false`，
+  推 `ghcr.io/isunker/opencd2others:latest` + `:<git-sha>`。
+  - ★ `--provenance=false --sbom=false`：NAS 是 Docker 24.0.2，对 buildx 默认产的
+    attestation manifest 有兼容问题（会在 manifest list 里多出 `unknown/unknown`）。
+  - ★ `--platform linux/amd64`：NAS 是 x86_64；显式写出防在别的架构机器上构建出跑不了的镜像。
+- 前置（一次性）：本机与 NAS 各 `docker login ghcr.io`（private 镜像）。
+- `NEVER=(...)`（在旧 `deploy.sh` 里，`bash deploy.sh --list-never` 可打印）是
+  "生产独有、绝不进镜像"的断言：`.env` + 全部 `data/` 状态。
+- ★ 改了 `Dockerfile` 的 `COPY` 行 / 加了新模块 ⇒ `tools/build-preflight.sh` 会查
+  "COPY 的源在本机存在吗"。**这条护栏没有消失，只是从"同步时"前移到了"构建前"**。
 
 ---
 
@@ -62,8 +68,10 @@ mkdir -p "$DATA_DIR"
 python run.py --selftest                 # 主自检（含 ⑧ 接线断言）
 python tools/gen_counts.py               # 重生成 counts.json
 python opencd.py parse --selftest        # 合并后：模块自检（子命令分布见 README）
-bash deploy.sh                           # 预览（dry-run）
-bash deploy.sh --apply                   # 同步到 NAS
+
+bash build-push.sh                       # 本机构建 + 推 GHCR（含前置自检）
+SKIP_PUSH=1 bash build-push.sh           # 只本机构建、不推（本地验证）
+bash tools/build-preflight.sh            # 只跑构建前置自检
 ```
 
 ### C.2 NAS（SSH）
@@ -72,10 +80,12 @@ ssh -p 36688 -i "C:/Users/艾森克/.ssh/id_ed25519" iSunker@192.168.0.7
 # 登录后：
 cd /volume2/docker_ssd/opencd2others
 /usr/local/bin/docker compose config --quiet && echo 'YAML OK'
-/usr/local/bin/docker compose up -d --build musopia      # ★ 只 musopia
+/usr/local/bin/docker compose pull                       # ★ 先拉新镜像（构建在本机做）
+/usr/local/bin/docker compose up -d --remove-orphans musopia   # ★ 只 musopia；没有 --build 了
 /usr/local/bin/docker logs --tail=60 opencd2musopia
 /usr/local/bin/docker exec opencd2musopia python run.py --selftest
 ```
+> ★ `pull` 要在**任何** `--profile tools run` **之前**（`run` 不会自动 pull，会用旧镜像）。
 > ★ 非交互 SSH 下 docker 不在 PATH ⇒ 用全路径 `/usr/local/bin/docker`。
 > ★ SSH 输出过噪，过滤：`grep -v "WARNING\|post-quantum\|store now\|may need to be upgraded\|openssh.com"`。
 
@@ -106,6 +116,7 @@ cd /volume2/docker_ssd/opencd2others
 - [ ] `python run.py --selftest` ✅
 - [ ] 相关模块 `--selftest` ✅（数量与改动前一致，或**有意**变更并已在注释里说明）
 - [ ] 改了计数相关 ⇒ `python tools/gen_counts.py` 已重跑
-- [ ] `bash deploy.sh`（dry-run）无"白名单漏文件"报错
+- [ ] 改了 `Dockerfile` 的 `COPY` 行 / 加了新模块 ⇒ `bash tools/build-preflight.sh` 通过
+- [ ] 要上线 ⇒ `bash build-push.sh`（本机构建 + 推 GHCR），NAS 侧 `pull && up -d`
 - [ ] 文档同步：`README.md`（行为）/ `ERRATA.md`（教训）/ `SESSION-NOTES.md`（追加）
 - [ ] 没有把凭据 / `data/` 状态 / 备份垃圾带到生产端或 git

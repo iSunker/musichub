@@ -5,6 +5,11 @@
 !.env.example
 
 # ==================== 运行时状态与产物 ====================
+# ★ 2026-10-06：状态已统一收进 `data/` 子目录（compose `${STATE_DIR:-./data}:/data`）。
+#   下面这些无斜杠模式匹配**任意层级**，所以 `data/xxx` 也盖得住；
+#   但显式加一条 `data/` 整目录与 `.dockerignore` 的 `data/` 对齐，
+#   免得将来往 `data/` 放新名字的状态文件时两边口径不一致（漏进 git）。
+data/
 # SQLite 库（含种子记录、发布状态、站点 ID）
 data.db
 data.db-journal

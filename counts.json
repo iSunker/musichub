@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "offline": {
-    "generated_at": "2026-10-03T22:45:54Z",
+    "generated_at": "2026-10-03T23:31:08Z",
     "generator": "tools/gen_counts.py",
     "selftests": {
       "descr.py --selftest": {
@@ -107,44 +107,9 @@
         "VERTEX_DB_DIR": "/volume2/docker_ssd/vertex2/vertex/db",
         "VTID_INTERVAL": 86400
       },
-      "note": ".env.example（模板）的值；生产 .env 不在白名单、本机读不到，两者可能不一致 —— stages[].disabled 只表示「按模板该不该动」"
+      "note": ".env.example（模板）的值；生产 .env 本机读不到，两者可能不一致 —— stages[].disabled 只表示「按模板该不该动」"
     },
-    "deploy": {
-      "files": [
-        "config.py",
-        "db.py",
-        "descr.py",
-        "assets.py",
-        "musopia.py",
-        "net.py",
-        "run.py",
-        "publish.py",
-        "update_metadata.py",
-        "sync_site.py",
-        "backfill_covers.py",
-        "check_db.py",
-        "backfill_covers_opencd.py",
-        "daemon.py",
-        "healthcheck.py",
-        "crawl.py",
-        "opencd.py",
-        "cover_fetch.py",
-        "topup_opencd_fields.py",
-        "observe_custom_fields.py",
-        "sync_opencd_tid.py",
-        "readiness_probe.py",
-        "qb_probe.py",
-        "flip_status.py",
-        "crabpt_site.py",
-        "readd_queue.py",
-        "qb_client.py",
-        "tools",
-        "Dockerfile",
-        "docker-compose.yml",
-        ".dockerignore",
-        "README.md",
-        ".env.example"
-      ],
+    "build": {
       "never": [
         ".env",
         "data/data.db",
@@ -160,7 +125,6 @@
         "data/covers",
         "data/raw_html"
       ],
-      "readme_deployed": true,
       "dockerfile_copy_py": [
         "assets.py",
         "backfill_covers.py",
@@ -190,11 +154,39 @@
         "topup_opencd_fields.py",
         "update_metadata.py"
       ],
-      "dockerfile_copy_missing_from_whitelist": [],
-      "whitelist_missing_from_dockerfile": []
+      "dockerfile_copy_py_present": [
+        "assets.py",
+        "backfill_covers.py",
+        "backfill_covers_opencd.py",
+        "check_db.py",
+        "config.py",
+        "cover_fetch.py",
+        "crabpt_site.py",
+        "crawl.py",
+        "daemon.py",
+        "db.py",
+        "descr.py",
+        "flip_status.py",
+        "healthcheck.py",
+        "musopia.py",
+        "net.py",
+        "observe_custom_fields.py",
+        "opencd.py",
+        "publish.py",
+        "qb_client.py",
+        "qb_probe.py",
+        "readd_queue.py",
+        "readiness_probe.py",
+        "run.py",
+        "sync_opencd_tid.py",
+        "sync_site.py",
+        "topup_opencd_fields.py",
+        "update_metadata.py"
+      ],
+      "dockerfile_copy_py_missing": []
     },
     "line_counts": {
-      ".claude/RULES.md": 111,
+      ".claude/RULES.md": 122,
       ".scratch/mut/db_mut1.py": 1613,
       ".scratch/mut/errata_head.md": 448,
       ".scratch/mut/matrix.py": 98,
@@ -206,10 +198,10 @@
       ".scratch/mut/work/descr.py": 1097,
       ".scratch/mut/work/publish.py": 1778,
       ".scratch/verify_cprime.py": 88,
-      "CLAUDE.md": 101,
+      "CLAUDE.md": 112,
       "ERRATA.md": 640,
       "PLAN-crabpt.md": 891,
-      "README.md": 896,
+      "README.md": 937,
       "SESSION-NOTES.md": 4924,
       "assets.py": 1037,
       "backfill_covers.py": 144,
@@ -254,7 +246,7 @@
       "tools/fetch_page.py": 126,
       "tools/fix_no_torrent_file_status.py": 288,
       "tools/fix_onsite_titles_and_subtitles.py": 335,
-      "tools/gen_counts.py": 426,
+      "tools/gen_counts.py": 432,
       "tools/gen_field_table.py": 384,
       "tools/mark_no_forward.py": 291,
       "tools/nas_health.py": 1467,
@@ -406,18 +398,18 @@
     }
   },
   "online": {
-    "generated_at": "2026-10-03T22:46:03Z",
+    "generated_at": "2026-10-03T23:31:14Z",
     "reachable": true,
     "source_host": "\\\\iSunker-DS423\\docker_ssd\\opencd2others\\data",
     "heartbeat": {
       "alive": false,
-      "content_epoch": 1791067040,
-      "age_s": 520.4592843055725
+      "content_epoch": 1791069823,
+      "age_s": 450.94654083251953
     },
     "stages": {
       "scan": {
-        "last_run": 1791065235.7009351,
-        "age_s": 2325.053876876831,
+        "last_run": 1791068008.9909623,
+        "age_s": 2265.84978055954,
         "interval_s": 1800,
         "overdue": true,
         "disabled": false,
@@ -425,17 +417,17 @@
         "no_progress": null
       },
       "publish": {
-        "last_run": 1791065449.1893845,
-        "age_s": 2111.565427541733,
+        "last_run": 1791069063.9092877,
+        "age_s": 1210.9314551353455,
         "interval_s": 1800,
-        "overdue": true,
+        "overdue": false,
         "disabled": false,
         "last_ok": false,
         "no_progress": null
       },
       "sync": {
         "last_run": 1791031232.584512,
-        "age_s": 36328.17030000687,
+        "age_s": 39042.256230831146,
         "interval_s": 86400,
         "overdue": false,
         "disabled": false,
@@ -444,7 +436,7 @@
       },
       "covers": {
         "last_run": 1791054276.1431825,
-        "age_s": 13284.611629486084,
+        "age_s": 15998.697560310364,
         "interval_s": 21600,
         "overdue": false,
         "disabled": false,
@@ -453,7 +445,7 @@
       },
       "edit": {
         "last_run": 1791054323.7813177,
-        "age_s": 13236.973494291306,
+        "age_s": 15951.059425115585,
         "interval_s": 21600,
         "overdue": false,
         "disabled": false,
@@ -461,8 +453,8 @@
         "no_progress": true
       },
       "crawl": {
-        "last_run": 1791065466.6055267,
-        "age_s": 2094.1492853164673,
+        "last_run": 1791068040.3533342,
+        "age_s": 2234.4874086380005,
         "interval_s": 1800,
         "overdue": null,
         "disabled": true,
@@ -476,7 +468,7 @@
       "stale": 3,
       "no_log_file": 971,
       "success": 480,
-      "max_updated_at": "2026-10-03 22:11:01"
+      "max_updated_at": "2026-10-03 23:11:41"
     },
     "skipped_reason": null
   }
