@@ -25,6 +25,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -696,9 +697,18 @@ def _pending(stage):
 #   不新开容器、不塞进 qbtune（那个是下载调度、可停）；复用本容器已有的 30s
 #   主循环节奏即可，天生满足"到点±30s 内回加"的精度要求。
 #
-# ★★ 为什么放在 `for stage in stages` **之外**、主循环末尾：
+# ★★ 为什么放在 `for stage in stages` **之外**、且在主循环**开头**（tick 一开始）：
 #   它是**事件驱动**（到点必须做），不是按 interval 跑的阶段 ⇒ 塞进 stage 框架
-#   会被 interval/退避/pending 语义扭曲。主循环末尾一小步最干净。
+#   会被 interval/退避/pending 语义扭曲。
+#
+#   ★★★ 2026-10-04 修正位置（本行原在"主循环**末尾**"，是错的）：`run_stage`
+#     是**同步阻塞**的，`crawl` 单次可跑 ~38min。排在末尾 ⇒ 到点的回加**要等
+#     整轮 stage 全部跑完**才执行 ⇒ "15 分钟延迟"实测被拖成 15~53 分钟不定
+#     （2026-10-04 端到端实测抓到：heartbeat 落后 866s，队列条目到期却不被消费）。
+#     ⇒ 改到循环**开头**：每轮 tick 先排空队列，再跑阶段 —— 这样即使某个 stage
+#     长阻塞，延迟回加也已在本轮开头处理过，精度回到设计值（到点 ± 一个 tick）。
+#     ★ 教训（`ERR-META-14` 族）：上一版只验证了"接线在"（import 成功、函数名在），
+#       没做端到端实测 ⇒ "看着配好了 ≠ 真能用"。位置错了跟没接一样。
 #
 # ★★★ 为什么失败要**留在队列里重试**、且**绝不 raise**：
 #   这是 daemon 主循环里的一步 —— 抛出去会打断**所有**阶段。qB 连不上是常态
@@ -775,6 +785,49 @@ def _drain_pending_readds():
         log(f"⚠️  [readd] 写回队列出错（成功的那几条可能下轮重复 add，无害）: {e}")
 
 
+# ★★★ 2026-10-04：延迟回加改为**独立线程**（不再由主循环内联调用）。
+#
+#   为什么必须独立线程（2026-10-04 端到端实测抓到）：
+#   主循环是**单线程同步**的：一轮 tick 里顺序跑完所有到期 stage（`run_stage`
+#   阻塞）。`scan` 单次可跑 ~20min、`crawl` ~38min ⇒ 主循环**一整轮**都被占满。
+#   于是无论 `_drain_pending_readds()` 放循环开头还是末尾，**一轮 tick 内只被
+#   调一次**，之后到点的条目要**等整轮 stage 跑完**才轮到 ⇒ "15 分钟延迟"实测
+#   被拖成 15~53min 不定（实测：重建后进 scan，5min 不出轮，0:44 入队、0:45 到期
+#   的测试条目一直不被消费）。
+#
+#   ⇒ 唯一真正解决：把它挪出主循环、**每 30s 自跑一次**。这样精度回到设计值
+#     （到点 ± 一个 tick），且**与 stage 时长完全解耦**。
+#
+#   ★ 线程安全评估（为什么这是安全的）：
+#     · 队列文件：移出主循环后，**唯一**访问 `readd_queue.json` 的就是本线程
+#       ⇒ 无并发写、不需要文件锁（主循环已不再碰它，见下面 main 里没有调用了）。
+#     · qB 连接：本线程用自己的 `Client` 实例；与各 stage 的 `Client` 互不共享
+#       ⇒ qBittorrent 的 WebAPI 是无状态 HTTP，两个连接并存不冲突。
+#     · 异常隔离：线程体内每一圈都吞掉所有异常（`_drain_pending_readds` 本身
+#       "绝不 raise"，这里再兜一层）—— 线程绝不能因异常而死或带走主进程。
+#     · 退出：`daemon=True` ⇒ 主进程退出时线程自动结束；循环里也查 `_shutdown`，
+#       收到 SIGTERM 后 1s 内（sleep 切片）退出。
+READD_THREAD_TICK = 30           # 线程自跑间隔（秒），与主循环 SCHED_TICK 独立
+
+
+def _readd_thread_loop():
+    """独立线程：每 `READD_THREAD_TICK` 秒排空一次延迟回加队列。**绝不退出到线程外**。"""
+    log(f"🧵 [readd] 延迟回加线程启动（每 {READD_THREAD_TICK}s 扫一次队列）")
+    while not _shutdown:
+        try:
+            _drain_pending_readds()
+        except Exception as e:                                  # noqa: BLE001
+            # 兜底：`_drain_pending_readds` 本身已"绝不 raise"，这里是双保险。
+            # 线程**绝不能**因未捕获异常而死（死了 = 延迟做种静默失效，且没人知道）。
+            log(f"⚠️  [readd] 线程本轮异常（吞掉，继续）: {type(e).__name__}: {e}")
+        # 分片睡，好让 SIGTERM 及时生效
+        slept = 0.0
+        while slept < READD_THREAD_TICK and not _shutdown:
+            time.sleep(min(1.0, READD_THREAD_TICK - slept))
+            slept += 1.0
+    log("🧵 [readd] 延迟回加线程退出")
+
+
 def main():
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
@@ -836,6 +889,12 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
     stage_timeout = env_int("STAGE_TIMEOUT", 3600) if stage_timeout is None else stage_timeout
     fails = {s["name"]: 0 for s in stages}
 
+    # ★★★ 启动延迟回加**独立线程**（2026-10-04）——必须在主循环之前起，
+    #   这样它一开始就能排空队列，且不受随后任何长 stage（scan/crawl）阻塞。
+    #   `daemon=True` ⇒ 主进程退出即结束，不阻止容器停止。
+    #   见 `_readd_thread_loop` 上方那段"为什么必须独立线程"的注释。
+    threading.Thread(target=_readd_thread_loop, name="readd", daemon=True).start()
+
     while not _shutdown:
         beat()
         now = time.time()
@@ -851,6 +910,12 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
         #   在**循环末尾**（而不是每个跳过支里）落盘还有一个理由：一轮里 7 个
         #   阶段全跳过时，每阶段都写一次 = 每 30s 写 7 次盘，纯属浪费 SD 卡寿命。
         skipped = False
+
+        # ★ 延迟回加已移到**独立线程** `_readd_thread_loop`（2026-10-04）——
+        #   原因：主循环单线程同步，scan/crawl 一跑就把整轮占满，drain 放循环
+        #   开头/末尾都只能一轮调一次 ⇒ 被长 stage 饿住。详见该线程函数上方注释。
+        #   ★ 不要在这里（主循环内）再调 `_drain_pending_readds()` —— 会与线程
+        #     重复消费队列（虽幂等，但没必要，且徒增"两处调用"的口径分裂风险）。
 
         for stage in stages:
             if _shutdown:
@@ -942,10 +1007,9 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
         if skipped:
             save_state(state)
 
-        # ★ 延迟回加队列排空（2026-10-03）：到点的"延迟做种"在这里真正 add 进 qB。
-        #   放在 stage 循环**之外**（事件驱动，非 interval 阶段）；绝不 raise。
-        if not _shutdown:
-            _drain_pending_readds()
+        # ★ 延迟回加队列排空已移到本轮**开头**（见 `skipped = False` 之后那段注释）：
+        #   原在这里（stage 循环之后）⇒ 被 crawl 等长阻塞 stage 拖住。
+        #   ★ 不要把它移回来。
 
         if _shutdown:
             break
