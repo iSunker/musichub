@@ -103,7 +103,7 @@ except Exception:
 import config
 
 # ★ 生产库（本机经 SMB；容器内是 /data/data.db —— 由 config.DB_PATH 决定）
-LOCAL_DB = r"//iSunker-DS423/docker_ssd/musopia_script2/data.db"
+LOCAL_DB = r"//iSunker-DS423/docker_ssd/opencd2others/data/data.db"
 
 # ★★ 用户**手动**标记的"绝不发"（不是判据能推出来的 —— 所以硬钉在这里）。
 #   国名家名曲 3 条（禁止转发，用户手动加的）+ 周杰伦 3 条（★ 用户强调：不能发）

@@ -9,6 +9,407 @@
 
 ---
 
+## 2026-10-05（续 13）—— #40 部署上线（合并后代码上 NAS）+ README 危险示例标注
+
+> 承「续 12」。compact 后继续。本机复核 + 修复 + 部署完成。
+
+### A. #40 部署（已实测完成）
+
+- **`deploy.sh --apply`** 已把 `opencd.py` / `tools/readd.py` / `tools/doc-audit/audit.py`
+  等推上 NAS；NAS `cd /volume2/docker_ssd/opencd2others && docker compose up -d --build musopia`
+  重建（**只 musopia**）。
+- **手工删旧模块**：`deploy.sh` **不删** NAS 文件 ⇒ 已手工删 NAS 上 `opencd_parse/rate/log/
+  map/gate/ingest.py` 六个 + 旧 `tools/readd_qb/readd_crabpt/readd_site_missing.py` 三个。
+- **复核（本机 SSH 实测）**：
+  - `docker ps` → `opencd2musopia Up (healthy)`；容器名不变（`name:` 写死的效果）。
+  - NAS 生产目录：`opencd.py` 在、`opencd_*.py` **不存在**；状态全在 `data/`。
+  - 镜像内：`/app/opencd.py`（163640B）在、`/app/opencd_*.py` **不存在**、`/app/tools/readd.py` 在。
+  - 容器内 `python run.py --selftest` → **自检通过**。
+  - 日志：`✅ 预检通过：库内已有 1511 行记录`、`🔑 QB_API_KEY = 已配置`、readd 线程已起。
+
+### B. ★ 部署中发现并修复一处**真回归**（教训载体）
+
+- NAS-only 遗留脚本 `tools/watch_readd.py` 里是**裸** `Client(...) + auth_log_in()`，
+  撞上了 #29 新增的 ⑧ 接线断言（qB 构造点唯一）⇒ **容器内 `run.py --selftest` 报红**。
+  已改成 `qb_client.build(config)` ⇒ ⑧ 复绿。
+  ★ **教训**：`tools/` 里有**只在 NAS 上存在**的文件（不在本机 git）——本机全绿**不代表** NAS 全绿；
+  「判据必须在**目标环境**里也跑一遍」。这条正是"生产端该不该保留 tools"争议的余波（见续 12 §A）。
+
+### C. README 危险示例标注（#42 的一部分）
+
+- 给 `docker compose up -d --build` 的示例加**服务名 `musopia`**（`:196`/`:375`/`:388`/`:418`）
+  并加说明：**裸 `up -d` 会把 `profiles:[tools]` 的 `tools`/`once` 一并拉起**（变常驻、
+  与 daemon 并发写 SQLite）。`:418` 的 `--remove-orphans` 保留（清孤儿是它的目的），末尾点名 musopia。
+
+### 未解 / 待办
+
+- **#41** 本机目录 + GitHub 仓库改名 → `opencd2others`（用户已确认）。
+- **#42** 余项：ERRATA 补条（候选见下）。
+- **#34** 18 条 `site_publish` 站点已 404 的清洗（用户"后面再解决"）。
+
+---
+
+## 2026-10-05（续 12）—— ★★★ 生产端目录整理 + 代码轻度合并 + 规则文件
+
+**背景**：用户要求整理生产端（NAS）目录：改名、状态收进 `data/`、去 git、合并同族模块、
+写"每轮自动读取"的规则文件。
+
+### A. 生产端（NAS）目录改造（已实测完成）
+
+- **改名**：`musopia_script2` → **`opencd2others`**（NAS `/volume2/docker_ssd/opencd2others`）。
+  ★ compose 顶层 `name: opencd2musopia` **写死** ⇒ 改名不影响容器记账（实测：`mv` 后
+  `docker compose up -d musopia` 正常 Recreate，容器名不变）。
+- **状态收进 `data/`**：compose 由 `${STATE_DIR:-.}:/data` 改 **`${STATE_DIR:-./data}:/data`**；
+  `data.db`（13.5MB）/`daemon_state.json`/`daemon_heartbeat`/`daemon_env.json`/
+  `readd_queue.json`/`lsky_token.json`/`output_torrents/`/`covers/`/`raw_html/` 全 `mv` 进 `data/`。
+  实测：容器内 `/data` **读到 1511 tasks**，healthy。
+- **删生产端本地专属物**：`.git`（212K）、15 个备份垃圾（`.env.bak-*`/`Dockerfile.bak-*`/
+  `*.db.bak-*`/`daemon_state.json.bak-*`/`qbtune_*.bak-*`/`_env_backups_archived_*`）、
+  6 个 `_probe_*.py`、3 个 `.html` 证据、2 个 `_*.sh`、`_warm_cover.log`、`.watch_readd_mark.json`、
+  `probe.py`、`__pycache__/`、`ERRATA.md`/`SESSION-NOTES.md`（不在白名单）。
+- **★ 保留 `tools/` 在生产端**：与用户"删 tools"的初意**相反** —— 因为 `Dockerfile` 有
+  `COPY tools/ ./tools/`，而**构建上下文就是该目录**；删了容器内
+  `docker compose run --rm tools ...` 全废（判据：**"该不该同步"要按"谁拷它"去数**）。
+- **`deploy.sh`**：`NEVER` 全改 `data/` 前缀（含新状态文件）；路径示例改新名；
+  `.deploy.nasrc` 的 `DST` 改 `.../opencd2others`。
+- **`.dockerignore`**：状态项改 `data/` 前缀（`data/` + `**/data.db` 双保险），加 `readd_queue.json`/
+  `lsky_token.json`/`covers`，再加 `CLAUDE.md`/`.claude`（本机规则不进上下文）。
+- **备份**：本机 `.deploy-backup/prerestructure-*/`（含 `.env` + `data.db` + 各 state；gitignored）。
+
+### B. 代码轻度合并（已实测完成，本机全绿）
+
+- **`opencd_parse/rate/log/map/gate/ingest` 六个 → `opencd.py`**（3101 行）。
+  导入图是**无环 DAG**（parse←map←ingest）。撞名处置：`main`×5 → 单一 dispatcher +
+  `_main_parse/rate/map/gate/ingest`；`_check`×3 → `_check_map/_check_gate/_check_ingest`；
+  `cmd_selftest`×2 → `_selftest_parse/_selftest_rate`。保 `opencd_ingest` 的 argv/env 前置块
+  在**文件顶部、import db 之前**（否则 `db→config→require_env` 会 `sys.exit`）。
+  CLI：`python opencd.py <parse|rate|log|map|gate|ingest> [...]`。
+  ★ 实测各子命令 `--selftest` 计数与合并前**逐项一致**：parse 71/71、rate 21/21、
+  map 85/85、gate 19/19、ingest 60/60；log 是纯库（无 CLI）。
+- **`tools/readd_qb/readd_crabpt/readd_site_missing` → `tools/readd.py`**（子命令 `qb|crabpt|site`）。
+  ★ 修了一个**继承来的**缺陷：只有 `/app` 在 `sys.path` ⇒ **本机跑不了**
+  （`ModuleNotFoundError: config`）；补了仓库根路径插入（与 `nas_health.py` 同款）。
+- **`tools/doc-audit/{01_headings,02_refs,03_terms,04_probes}` → `tools/doc-audit/audit.py`**
+  （子命令 `headings|refs|terms|probes`）；`gen_counts.py` 的 importlib 路径改指 `audit.py`，
+  `_ro`/`_stale_where` 仍在模块级（实测 `gen_counts.py` 跑通 = 8/8 offline）。
+- **`run.py --selftest` 新增 ⑧b 判据**：六个 `opencd_*` 旧模块名**零 import**（AST，
+  不看文本注释）。★ 阴性对照实测：临时加 `import opencd_parse` ⇒ 报红；撤销 ⇒ 绿。
+- **`deploy.sh`/`Dockerfile`**：六行 → `opencd.py`。★ 阴性对照：从 `FILES` 删 `opencd.py`
+  ⇒ 脚本报「白名单漏了 Dockerfile 要 COPY 的文件」并**拒绝部署**（判据真生效）。
+
+### C. 规则文件（每轮自动读取）
+
+- **`CLAUDE.md`**（仓库根）：Claude Code 启动自动注入 —— 铁律（目录/部署/凭据/文档/固定动作）。
+- **`.claude/RULES.md`**：细目（生产端 vs 本机清单、白名单规则、命令、命名约定）；
+  `CLAUDE.md` 末尾 `@.claude/RULES.md` 引用。
+  ★ `.gitignore` 只忽略 `.claude/scheduled_tasks.json`（等状态文件），**不忽略整个 `.claude/`**
+  ⇒ `RULES.md` 会入库（实测 `git add -n .claude/` 只加 `RULES.md`）。
+
+### D. tools 路径常量修正（改名 + `data/` 的连带影响）
+
+改名 + 库移进 `data/` 后，所有**直接读 NAS 库/目录**的 tools 常量失效（`ERR-META-01` 形状：
+路径对不上但静默返回空）。已改 ~20 处：`LOCAL_DB`/`DB` 常量（`.../opencd2others/data/data.db`）、
+`nas_health.DST`（指向 `.../opencd2others/data`，因其下四个 state 都拼在 DST 后）、
+`queue_probe`（`dst/"data"/"data.db"`）、`gen_counts.DEFAULT_DST` + `resolve_dst`（nasrc 是
+compose 目录 ⇒ 补 `data/`）、`verify_cprime_step4` 文档/help、`doc-audit/terms.txt`。
+
+### 未解 / 待办（详见 TaskList）
+
+- **#40** 合并后代码**尚未上 NAS**（NAS 现跑旧代码，容器 healthy）。
+  ★ 注意：`deploy.sh` **不删** NAS 文件 ⇒ 上新的 `opencd.py` 后，NAS 上旧的
+  `opencd_parse.py` 等六个**要手工删**。
+- **#41** 本机目录 + GitHub 仓库改名 → `opencd2others`（用户已确认）。
+- **#42** SESSION-NOTES/ERRATA/README 细节收尾。
+- **#34** 18 条 `site_publish` 站点已 404 的清洗（用户"后面再解决"）。
+
+---
+
+## 2026-10-04（续 11）—— ★★★ 部署上线 + 补回 4 条「上站但没做种」+ 全量扫描
+
+> 承「续 10」。用户 compact 后继续，并给了站点 id（乌托邦 19525 / 蟹黄堡 215731 / 215726）。
+
+### A. #31 部署（已完成，实证）
+- 发现**运行中的 `opencd2musopia` 是旧代码**：`/app/qb_client.py` **不存在**、`publish.py` 里还有
+  `auth_log_in` ⇒ 日志全是 `⚠️ 连不上 qBittorrent (…IP 已被封禁…)`。
+- ★★ **踩坑（`ERR-DOCKER-09` 同族）**：第一次 rebuild 后 `/app/qb_client.py` **仍不存在** ——
+  因为 **Dockerfile 的 `COPY` 行没列 `qb_client.py`**（它靠**枚举文件名**维护，加文件必漏，
+  正是 deploy.sh 注释里警告过的形状）。修：`Dockerfile` COPY 行 + `deploy.sh` FILES **都加**
+  `qb_client.py`，再 deploy+rebuild ⇒ `ls /app/qb_client.py` ✅、`import qb_client` ✅。
+- NAS `.env` 加 `QB_API_KEY=qbt_ugIvm…`（**手工**，deploy.sh 白名单不含 `.env`；已备份）。
+- **实证**：`qb_probe.py` ③ `✅ 读到 2561 个种子`（**零 403**）；daemon 启动打
+  `🔑 QB_API_KEY = 已配置（走 API Key）`；`qb_client.build(config)` 返回 2561 条无异常。
+- ★ 顺带确认 `qbit_manage/docker-compose.yml` 三实例（suite/reseed/opencd）**统一 API Key**，
+  其中 opencd 用的 key 与本项目**同一个** ⇒ 一致。
+
+### B. ★★★ 根因：`site_publish.EXISTS` ≠ "站点那条在做种"
+- 用户点名三条没做种：乌托邦 `id=19525` Datcyde、蟹黄堡 `id=215731` Barbara、`id=215726` Mia Wray。
+- **实测方法（唯一靠谱）**：把**站点那条种子**下载下来读**真 infohash**，再去 qB 查。
+  ⇒ 三条的**站点 hash 与 DB `info_hash` 完全不同**（DB 记的是**皇后原种** hash；站点那条是
+  `run.py` 用**带站点 passkey 的新 announce 重生成**的 ⇒ hash 变了）。
+- **结论**：三条站点 hash **都不在 qB** ⇒ **真的没做种**。
+- **根因**：它们在 qB IP 被 **403 封禁期间**发布 ⇒ `readd_to_qb` 走到
+  `⚠️ 连不上 qBittorrent…本次不做回加` ⇒ **种子上了站、从没加进 qB**。
+  DB 的 `EXISTS` 只是**发布那一刻**写的，**不代表回加成功**。
+
+### C. 全量扫描（77 条 EXISTS）
+- 逐条下站点种子读真 hash，比对 qB：
+  `crabpt 17/20 在做种`、`musopia 38/57 在做种`、**没做种 4 条**（crabpt 3 + musopia 1），
+  `18 条 musopia 站点下载 404`（★ 站点已删这条，不是限速——已用 HTTP 状态坐实）。
+- ★★ **两个口径必须分开**（`ERR-META-05`）：「站点 hash 不在 qB」= 回加没成功；
+  「站点下载 404」= 站点已删该种（**与做种无关**，那是 `#23` 清洗的另一种情形）。
+
+### D. 补回（已完成，实证开始做种）
+- 新增工具 **`tools/readd_site_missing.py`**（dry-run 默认；`--apply` 才加）：
+  按**站点 id** 下种子 → 读真 hash → 查 qB → 缺则 `torrents_add(save_path=皇后原种的 save_path,
+  category=站点分类)`。逻辑逐字镜像 `readd_to_qb` / `readd_to_qb_crabpt`。
+- `--apply` 补了 **4 条**，复查（按站点 hash 直查）：
+  `19525 Datcyde uploading 上传49MiB` / `215731 Barbara uploading 307MiB` /
+  `215730 音田雅則 stalledUP` / `215726 Mia Wray uploading 384MiB` ⇒ **四条都在做种**。
+- ★ **未改 DB**：`site_publish.info_hash` 是**皇后原种 hash**（主键/对账键），**刻意不换**；
+  `status=EXISTS` 本来就对（种子确实在站上）。缺的只是"qB 里那条"，现已补。
+
+### E. 仍未处理
+- **#33** NAS 部署目录改名 `musopia_script2` → `opencd2others`（用户先前要求，未做；风险见 TaskList）。
+- ★ 全量扫描暴露的 **18 条站点 404**（已删）—— 是否要把 `site_publish` 里这些标成 `DELETED`/`UNKNOWN`，
+  待用户定（`#23` 的另一半）。
+- ★ 是否给"回加成功"加一条**持久判据**（不让 `EXISTS` 冒充"在做种"）——待议。
+
+---
+
+## 2026-10-04（续 10）—— ★ #29 接线断言落地 + #30 文档（compact 后接着做）
+
+> 承「续 9」。用户 compact 后继续：**#29 → #30 → 等 #31 部署**。
+
+### #29 已完成（本地，**未部署**）
+- **`run.py --selftest` 加第 ⑧ 组判据**：AST 扫**全仓库** `*.py`，断言
+  `qb_client.py` **之外零** `Client(` / 零 `auth_log_in`（`ERR-QB-08` 的护栏）。
+- ★★ **第一版假红（当场修，记进注释）**：只查 `X.Client(...)` ⇒ 报 **11 处**，
+  其中 **10 处是皇后站点客户端** `crawl.Client`（`crawl.py:145`，**根本不用
+  `qbittorrentapi`**），1 处是 `repos\Pt-Autoseed\…` 的 `transmissionrpc.Client`
+  （另一个项目）—— **一个真目标都没有**。⇒ 判据收紧成**两条都必须成立**：
+  ① 该文件**真的 import 了 `qbittorrentapi`**；② 命中的调用是被调用者名对得上
+  （`qbittorrentapi.Client(...)` 或 `from qbittorrentapi import Client` 后的裸 `Client(...)`）。
+  ★ 教训：**回归判据宁可精确，不可宽** —— 假红会逼人把判据关掉（`ERR-META` 一族）。
+- **跳过目录**：`.git`/`.venv`/`__pycache__`/`.scratch`/`.deploy-backup`/`.claude`/`repos`
+  等 + `*_bak/_backup/_old/-bak/-backup` 后缀目录（那些是**另一份**代码，扫它们=假红）。
+- **阴性对照已跑**：临时在 `qb_probe.py` 塞一行 `from qbittorrentapi import Client;
+  _negctl = Client(...)` ⇒ 判据**报红**且**精确点名** `qb_probe.py:78`；撤回后再跑 **绿**。
+- 结果：`python run.py --selftest` **✅ 通过**（需 dummy env 骗过 import 期 `require_env`）；
+  `python tools/verify_cprime_run.py` **exit 0**。
+
+### #30 已完成（本地，**未部署**）
+- **`.env.example`**：`QB_PASS` 之后加 `QB_API_KEY=` 段（**可选**、附取 key 方式、
+  留空即**逐字回退**、★ 是**凭据不许打印**、★★ 必须**手工加到 NAS 的 .env**——deploy.sh 白名单不含它）。
+- **`ERRATA.md`**：新增 **`### ERR-QB-08`**（教训：**「重试本身可以是故障的成因」**；
+  根因：qB 5.x 登录失败计数 + 13 处各自 `auth_log_in()`；★ 封禁在 qB **进程内存**里、
+  **不会**被本项目 rebuild 清掉，要清得重启 `qbittorrent-opencd`）。
+  ★ `tools/doc-audit/02_refs.py` 已核：**悬空 0 / 半悬空 0 / LEGACY 0**。
+- **本文件**：已记（续 10）。
+
+### 本轮**未做**（剩 #31 / #25）
+- **#31** NAS 部署：`bash deploy.sh --apply` → `docker compose up -d --build musopia`（**只 musopia**）
+  → NAS `.env` 手工加 `QB_API_KEY=qbt_...` → 重建 → `docker exec opencd2musopia python qb_probe.py`
+  实证**零 `LoginFailed` / 零 403**。
+- **#25** 收尾：`tools/readd_crabpt.py --tids 215726,215730 --apply --recheck`。
+
+### 未提交/未部署清单（compact 安全性）
+- 本地改动（**未 git commit、未 deploy**）：`qb_client.py`(新)、`config.py`、`run.py`、
+  `publish.py`、`daemon.py`、`qb_probe.py`、`backfill_covers.py`、`backfill_covers_opencd.py`、
+  `tools/readd_qb.py`、`tools/readd_crabpt.py`、`tools/diag_17304.py`、`tools/qb_state_probe.py`、
+  `tools/survey_content_path.py`、`.env.example`、`ERRATA.md`、`SESSION-NOTES.md`。
+
+---
+
+## 2026-10-04（续 9）—— ★ qB 连接收敛为单一工厂 + API Key（修「登录重试把自己封 IP」）（compact 前落盘）
+
+> 用户：qB 升到 **5.2.4** 后 IP 被封（`身份认证失败次数过多，您的 IP 地址已被封禁`，登录接口 403）。
+> 问：能不能直接用 API Key 加种子？→ 已设计并实现（本轮）。
+
+### 结论（已实测坐实）
+- qB 5.x 对**登录接口**做**失败计数**；本项目原有 **13 处**各自 `Client()+auth_log_in()`
+  ⇒ **重试本身就是把 IP 推向封禁的力量**（一次配置错误被放大成一次中断）。教训 = `ERR-QB-08`。
+- `qbittorrent-api==2026.10.0`（镜像已 pin）**原生支持** `Client(host=..., api_key=KEY)`，
+  走 `Authorization: Bearer`，**不碰登录接口** ⇒ 不再被封。
+- 实测：3020 容器 conf 里已有 `WebUI\APIKey=qbt_...`；`curl -H "Authorization: Bearer <key>"`
+  → **200**（**无视当前封禁**），无 auth → 403。⇒ 配 key 即可**立刻恢复**，**不必重启 qB**（用户已选「先不管封禁」）。
+- 注意：本项目**只连 3020**（`QB_HOST`），代码**零处**引用 reseed 的 3060。
+
+### 本轮已做（本地，**未部署**）
+1. **新增 `qb_client.py`**（根目录）：唯一构造点 `build(config_mod=None, api_key=None)`。
+   · 有 `QB_API_KEY` → `Client(host=..., api_key=key)`（**不调** `auth_log_in`）；无 → 回退账号密码。
+   · ★★ 承重纪律：`from qbittorrentapi import Client` **必须在函数体内**（不许提到模块顶）——
+     `tools/verify_cprime_run.py` 靠"`import run` 之前注入假 `qbittorrentapi`"做回归，提到顶会毁掉它。
+   · 读键一律 `getattr(config_mod,"QB_API_KEY","")`（兼容 `tools/test_readd_queue.py` 的 4 属性假 config）。
+   · 默认**抛**异常、**不**返回 None（各调用点原有 try/except 保留，契约不变）。
+   · `--selftest`（**不需要 .env**）：9 项含阴性对照，**已全绿**。
+2. **`config.py`**：加 `QB_API_KEY = os.getenv("QB_API_KEY", "")`（**可选**，同 CRABPT_COOKIE 先例）；
+   `print_runtime_info()` 加一行「QB_API_KEY = 已配置/未配置」（**不打印 key**）。
+3. **迁移 13 处构造**（12 文件）→ `import qb_client; qb = qb_client.build(config)`：
+   `run.py` / `publish.py`（2 处）/ `daemon.py` / `qb_probe.py` / `backfill_covers.py` /
+   `backfill_covers_opencd.py` / `tools/{readd_qb,readd_crabpt,diag_17304,qb_state_probe,survey_content_path}.py`。
+   · 两个 `tools/*.py` 的函数名保持 `qb_client`（调用方依赖），用 `import qb_client as qbc` 避同名。
+   · 四个"两段式"脚本（qb_probe/diag_17304/qb_state_probe/survey_content_path）保留
+     「ImportError vs 连接失败」两段判据（`build()` 首行 import 抛的正是 ImportError）。
+   · **已 py_compile 全绿**；`python tools/verify_cprime_run.py` **仍绿**（假注入回归未破）。
+   · `tools/reconcile_19525.py` 无需改（只用 db + 站点 GET，无 qB）。
+
+### 本轮**未做**（compact 后接着做 —— TaskList #25/#29/#30/#31）
+- **#29** `run.py --selftest` 加**接线断言**（AST 读源码，断言 `qb_client.py` 之外零 `Client(`/`auth_log_in`；
+  含阴性对照：临时塞回裸 `Client(` 必报红）。
+- **#30** 文档：`.env.example` 加 `QB_API_KEY=` 段；`ERRATA.md` 加 **`ERR-QB-08`**；本文件已记。
+- **#31** NAS 部署：`bash deploy.sh --apply` → `docker compose up -d --build musopia`（**只 musopia**）
+  → NAS `.env` 手工加 `QB_API_KEY=qbt_...` → 重建 → `docker exec opencd2musopia python qb_probe.py`
+  实证**零 `LoginFailed` / 零 403**。
+- **#25** 收尾：2 条蟹黄堡补种 `tools/readd_crabpt.py --tids 215726,215730 --apply --recheck`
+  （现在有了 key 认证才能跑；工具已写好且 dry-run 通过到"连不上 qB"那一步，正是被封所致）。
+
+### 未提交/未部署清单（compact 安全性）
+- 本地改动（**未 git commit、未 deploy**）：`qb_client.py`(新)、`config.py`、`run.py`、`publish.py`、
+  `daemon.py`、`qb_probe.py`、`backfill_covers.py`、`backfill_covers_opencd.py`、
+  `tools/readd_qb.py`、`tools/readd_crabpt.py`、`tools/diag_17304.py`、`tools/qb_state_probe.py`、
+  `tools/survey_content_path.py`；以及上一轮遗留的 `ERRATA.md`/`SESSION-NOTES.md`/`publish.py`(蟹黄堡修复)。
+- 计划落盘：`C:\Users\艾森克\.claude\plans\cuddly-watching-spark.md`（已批准）。
+
+---
+
+## 2026-10-04（凌晨·续 5）—— 三个未完成任务的状态（compact 前落盘）
+
+> 本节是**待办的落盘处**（TaskList 里也有对应 #22~#25），确保 compact 后能续。
+
+### #22 善后：把测试真发的 19525 写回库 ★ 最高优先（防重发）
+- 诊断时**真发**了 Datcyde（`info_hash=37850b204c2aa7be0f26a6c29cae4afb54025180`），
+  站点 id=**19525**，但**裸 POST 没落库** ⇒ 下一轮 daemon 会**再发一次**（真·重复）。
+- **需用户决定**：① 写回库（`db.set_site_id(ih, "19525", site_status="EXISTS", status="PUBLISHED")`
+  + `db.site_publish_set(ih, db.SITE_MUSOPIA, "19525")`）；或 ② 删站上 19525。
+
+### #23 清洗本地库（用户本轮新要求）
+- 用户：**"之前不是洗了库了么，200 多个种子都因为资料不全被删除了，本地库都要清洗一下啊"**。
+- 背景（已知）：站点曾**批量删除**我们发的种子（资料不全）⇒ `site_publish` 的 `EXISTS`
+  与 `tasks.site_status` **都不是站上事实**（幽灵行）。
+- 现成工具：**`tools/reset_deleted_site_status.py`**（把"站上已删"行的 `site_status` 改回 `UNKNOWN`，
+  **不删行**；保留 `log_content`/`content_path` 等抓轨成果）。
+- ★ 连带后果（用户已知情）：改回 `UNKNOWN` ⇒ 这些行**重新落进待发队列 ⇒ 会被重发**。
+  **若不想重发，需另定判据**（见该工具头部长注释）。**执行前必须先与用户确认口径**。
+- ★ 我的实测已撞上此问题的实例：Datcyde 行 `tasks.site_status=UNKNOWN` 但
+  `site_publish=('14657','EXISTS')`，而站上 **14657 已被删** ⇒ 三条记录互相矛盾 ⇒ 被重发。
+
+### #24 部署蟹黄堡回加修复（本地已改完，未部署）
+- `publish.py`：`readd_to_qb_crabpt` 的 `t.get('info_hash','')` → `info_hash[:12]`（已改）。
+- `ERRATA.md` 加 **`ERR-PUBLISH-02`**（已加）。
+- `publish.py` 加**第 4 条自检** `selftest_readd_names_defined`（symtable 版，含阴性对照；
+  本地 harness 已验：正确绿、坏源码报红；已接进 `--selftest` 的 `ok1 and ok2 and ok3 and ok4`）。
+- **待做**：`bash deploy.sh --apply` → `docker compose up -d --build musopia` →
+  `docker exec opencd2musopia python publish.py --selftest`（4 条全绿）。
+
+### #25 2 条蟹黄堡种子仍未做种（用户说手动补）
+- 蟹黄堡 19 条发布中，**17 条用户已手动补种**；剩 **2 条**未做种：
+  · **Mia Wray**（`32480ba483b2`，站点 id 215726）
+  · **音田雅則 - back shot**（`0799afa3645a`，站点 id 215730）
+- 用户明确"手动补了一些"，故此项**默认等用户自补**；若要代补需用户授权。
+
+### 本次两处**非本次任务**但已改动的文件（未提交）
+- `publish.py`、`ERRATA.md`、`SESSION-NOTES.md` —— 均因 #24 而改，**未 deploy、未 git commit**。
+
+---
+
+## 2026-10-04（凌晨·续 4）—— ★ 诊断：蟹黄堡回加 qB 的 `UnboundLocalError`（19 条全没做种）+ 乌托邦 PU 后仍发不出
+
+> 用户提问："Mia Wray - hi, it's nice to meet me 2025 - FLAC Multi File 发布过了 15 分钟怎么没做种？"
+> "乌托邦怎么 9.30 以来也没发布？我昨天升到 PU 了。就是蟹黄堡没做种。"
+> **结论来自只读探测**（未发任何发布请求，未改生产）。
+
+### A. 蟹黄堡（CrabPT）—— 根因坐实：`publish.py::readd_to_qb_crabpt` 的 `t` 未定义
+
+- **症状**：目标种子 `32480ba4…`（Mia Wray）在 qB 里 `state=stalledUP`、`category=opencd`、
+  tracker = `https://tracker.open.cd/announce.php`（**皇后**），**不是** `crabpt.vip`。
+  ⇒ 它只是**皇后那条在顺带做种**；**蟹黄堡侧从没被回加**。
+- **证据（铁证）**：`site_publish site='crabpt'` **19 条**（id 215344～215730）。
+  ★★ **订正**：初判"19/19 全没做种"的依据是"按**原 infohash** 查 qB，19/19 tracker = `tracker.open.cd`"
+  —— **那是错的判据**：**回加后的种子 infohash 会变**（站点重写 announce/pieces，见 `readd_to_qb_crabpt` docstring ①），
+  必须**按名字**配对（`ERR-META-19/20` 的形状：数不出来 ≠ 它不在）。
+  订正后按**名字**配对：**17 条已由用户手动补种**（qB 里带 `crabpt.vip` tracker，hash 与原种不同），
+  **仅剩 2 条仍未做种**：
+    · **Mia Wray - hi, it's nice to meet me (2025)**（id 215726）—— 用户本次问的那条
+    · **[260902] 音田雅則 - back shot**（id 215730）
+  ⇒ bug **真实存在**（日志+代码铁证），只是用户手工补种绕过了大部分后果；余下 2 条 = "bug 崩 + 还没手动补"。
+- **根因**：`readd_to_qb_crabpt` 走 `SEED_DELAY_MIN=15` 的延迟回加分支时，
+  `readd_queue.enqueue(..., note=f"蟹黄堡 {t.get('info_hash','')[:12]}…")`
+  —— **`t` 在该函数里从未定义**（函数参数是 `info_hash`），
+  而 `t = got[0]` 出现在**函数末尾的复核块**（`enqueue` 之后）⇒
+  **`UnboundLocalError: local variable 't' referenced before assignment`**。
+  ⇒ `enqueue` 从未成功 ⇒ **队列里没有它** ⇒ 15 分钟后**没有任何东西去加回 qB**。
+- **日志铁证**：`2026-10-04 04:05:27 ❌ 回加 qB 出错: local variable 't' referenced before assignment`。
+- **对照**：乌托邦版 `readd_to_qb` 的同一处写的是 `note=f"乌托邦 {info_hash[:12]}…"`
+  （用**参数** `info_hash`，正确）⇒ 蟹黄堡版是**从乌托邦版抄漏/抄错**。
+- **readd 队列状态**：`/data/readd_queue.json` = `{"version":1,"items":[]}`（空）—— 与上述一致。
+- **触发条件**：`config.SEED_DELAY_MIN = 15`（>0）⇒ 该 bug **一开启延迟回加就必现**；
+  这正是 2026-10-03 新接的线（`ERR-ENV-03` 形状：新接的路径没跑过真实分支）。
+- **未做（待用户拍板）**：修法 = 把 `t.get('info_hash','')` 改成 `info_hash[:12]`（同乌托邦版）。
+  ★ 另需**补做 19 条的历史回加**（种子已上站，必须补做种，否则 hit-and-run）——
+  这是**不可逆动作的补救**，先只读列出清单、由人确认后再动。
+
+### B. 乌托邦（Musopia）—— 9-30 起没发布，**用户已升 PU 但今日仍失败**
+
+- **时间线（权威源）**：`site_publish site='musopia'` 最后一条成功 = **2026-09-25 20:33:53**（id 17497）；
+  此后**再无** musopia 成功记录 ⇒ 乌托邦自 **9-25 晚**起停发（用户感知为"9.30 以来"）。
+- **已知历史真因（`ERR-SITE-09`）**：账号原为 `User`，只能**周六12:00～周日23:59** 发种；
+  9 月有「发种大赛」（9-01～9-30 User 及以上自由发），**9-30 24:00 结束** ⇒
+  10-01～10-03（工作日）发不出 = **站点时段规则**，与代码无关。
+- **新变量（本次关键）**：用户**昨天升到 PU**。只读探针确认：
+  首页 `class='PowerUser_Name'`、用户名 `iSunker` ⇒ **确实已是 Power User**（有随时发种权限）。
+- **仍未解**：`2026-10-04 04:05` daemon 的 `publish` 阶段（`--limit 1`）**仍失败**：
+  `❌ 发布失败: 未拿到重定向 ID，HTTP 200`（`takeupload.php` 返回 200 而非 302）。
+  今日 NAS/容器时间 = **10-04 星期日 04:0x CST**（★ 在 User 窗口内、且已是 PU）⇒ **权限不再是解释**。
+- **只读探测已做**：
+  - `upload.php` 可打开（HTTP 200，标题「音乐乌托邦 :: 发布」）⇒ **不是登录问题**。
+  - 表单字段含 `resource_count` / `rip_score` / `type` / `uplver` / `team_sel[4|7]` /
+    `medium_sel[4|7]` / `audiocodec_sel[4]` / `codec_sel[7]` / `tags[4|7][]` 等。
+  - `descr.build_form_fields` 发送集**不含** `resource_count`、**不含** `rip_score`
+    （代码注释明写 `rip_score`「待确认关系 ⇒ **先不发**，不猜」）⇒ **疑似缺字段**（PU 新必填？），**未坐实**。
+- **时区陷阱（本次踩到，值得记）**：用户**本机时间比 NAS 慢 8 小时**
+  （本机 `2026-10-03 20:08 周六` 时，NAS = `2026-10-04 04:08 周日 CST`）。
+  ⇒ 用户按本机时间说"昨天/15分钟前"，在 NAS 口径上差 8 小时。**凡涉"窗口/时刻"的判断，一律以 NAS 为准。**
+
+- **★★ 用户批准"真发一条"后的决定性实测（2026-10-04，用裸 `takeupload.php` POST 连发 3 条）**：
+  - 结果**逐条不同**：
+
+    | # | 种子 | 结果 |
+    |---|---|---|
+    | 0 | Ysaÿe Sonatas | ❌ HTTP 200，`title=音乐乌托邦 :: 上传失败！` |
+    | 1 | **Datcyde - Positive Climb** | ✅ **HTTP 302 → `details.php?id=19525&uploaded=1`**（**真发成功**） |
+    | 2 | Forever Now 2026 | ❌ HTTP 200，`title=…上传失败！` |
+
+  - ⇒ **发布通道完全正常**（#1 用**同一套字段、同一秒**成功，拿到 id 19525）；
+    **不是**权限/时段/字段问题 ⇒ 那两条是**被站点逐条拒**（内容层面规则）。
+  - **失败页形态**：`title=「上传失败！」`、正文**零消息**（`#outer` 之后只剩 "全站 [Free] 生效中！"），
+    与 `ERR-SITE-09` 描述的空消息页**一致**；`_extract_error()` 对它束手无策
+    （报出的"未拿到重定向 ID，HTTP 200"是**症状不是原因**）。
+  - **账号健康**：`分享率: 无限`、`上传量: 718.98 GB`、`H&R: [0/0/10]`、`可连接: 是`。
+
+- **★★★ 本次实测暴露的 3 个关联问题（都需用户决定，勿擅动）**：
+  1. **我"真发"了一条 → 站点已有 id 19525，但库没记**：
+     Datcyde（`info_hash=37850b20…`）本次**真发成功**（id 19525），但那是**裸 POST**、
+     **没走 `db.set_site_id`** ⇒ **本地不知道已发** ⇒ 下一轮 daemon 会**再发一次**（真·重复）。
+     ⇒ **必须把 19525 写回库**（或删除站上 19525）。★ 待用户决定后执行。
+  2. **该行的三处状态互相矛盾**（这才是它进队列的原因）：
+     · `tasks.site_status = UNKNOWN`、`status = SUCCESS`、`site_torrent_id = ''`
+     · 但 `site_publish(musopia) = ('14657','EXISTS')`（**2026-09-09**）
+     · 而站上 **14657 已被删除**（详情页无 h1）
+     ⇒ 三条记录**各自为政**：`site_publish` 说"发过"、`tasks` 说"没有"、站上"已删"。
+     ⇒ 这个不一致让该行**重新进了待发队列**，于是被**重新发了**（19525）。
+     ★ 这是**独立的数据一致性 bug**，与 PU/时段无关。
+  3. **"上传失败！"的那两条**是站点**内容规则**拒绝（具体原因站点不回消息）——
+     需人工去站点看（或联系管理组）。**不是**代码能修的。
+
+- **待办（未做，等用户拍板）**：
+  - 是否把 **19525** 写回库（否则会重发）。
+  - 本机时区**比 NAS 慢 8 小时** —— 是否要修（否则"发布时间/窗口"的人工判断总是错位 8 小时）。
+    有无 `Location` 头）—— **需要真的 POST 一次**（发布**不可逆**）⇒ 必须先获用户同意。
+  - 对照实验：对一条**已发布**（重复种）POST ⇒ 若返回 `302 …&existed=1`，说明"通道正常、只是新种被拒"，
+    可把"权限/字段"与"通道"分开。
+
+---
+
 ## 2026-10-04（凌晨·续）—— ★★ 废弃自研 qbtune，改用外部 `qbit_manage`
 
 ### 0. 决定（用户拍板）
