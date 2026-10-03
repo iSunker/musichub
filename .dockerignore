@@ -48,17 +48,24 @@ docker-compose.yml
 *.key
 
 # —— 运行时状态（生产独有，绝不进镜像）——
-#   ★ `config.py` 从 `/data` 读它们，镜像里**不该**有影子副本：
+#   ★ 2026-10-05：状态全部收进 `data/` 子目录（compose `${STATE_DIR:-./data}:/data`）。
+#     `config.py` 从 `/data` 读它们，镜像里**不该**有影子副本：
 #     多一份就迟早有人读错那一份（ERR-META-03 那一族）。
-data.db
+#   ★ 用 `**/` 前缀是为了**两种布局都排掉**：生产端是 `data/data.db`，
+#     而本机仓库根目录历史上也曾平铺过 `data.db`（`**/` 同时盖住两层）。
+data/
+**/data.db
 data.db-journal
 data.db-wal
 data.db-shm
 daemon_state.json
 daemon_heartbeat
 daemon_env.json
+readd_queue.json
+lsky_token.json
 tools/.nas_health_last.json
 output_torrents
+covers
 
 # —— 一次性诊断脚本（按需 `docker compose run` 挂进 /data，不打进镜像）——
 _probe_*.py
@@ -88,6 +95,9 @@ counts.json
 ERRATA.md
 SESSION-NOTES.md
 .deploy.nasrc
+# —— 本机助手规则与会话状态（与镜像无关）——
+CLAUDE.md
+.claude
 
 # —— 音乐媒体（compose 里是只读挂载，不该随上下文走）——
 downloads

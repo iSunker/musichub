@@ -102,7 +102,7 @@ import sys
 sys.stdout.reconfigure(encoding="utf-8")
 
 # ★ 默认走 NAS 上的生产库（SMB）。容器内请显式传 `--db /data/data.db`。
-LOCAL_DB = r"//iSunker-DS423/docker_ssd/musopia_script2/data.db"
+LOCAL_DB = r"//iSunker-DS423/docker_ssd/opencd2others/data/data.db"
 
 # ★★ 唯一允许改的列。其余一概不碰 —— 尤其 `small_descr` / `torrent_file`。
 SET_COLS = ("formatted_title",)

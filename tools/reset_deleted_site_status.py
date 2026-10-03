@@ -61,7 +61,7 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-LOCAL_DB = r"//iSunker-DS423/docker_ssd/musopia_script2/data.db"
+LOCAL_DB = r"//iSunker-DS423/docker_ssd/opencd2others/data/data.db"
 
 # ★ 实测**还在**站点上的（用户 2026-09-23 确认）⇒ 保留
 DEFAULT_KEEP = ("15972", "15974", "17099")

@@ -117,11 +117,11 @@ def resolve_root(cli_root):
 
     ★★★ 为什么需要这层（2026-09-28 实测踩过）：
       `nas_health.py` 的 `DST` 是 **Windows/SMB 视角**的路径
-      （`//iSunker-DS423/docker_ssd/musopia_script2`）。
+      （`//iSunker-DS423/docker_ssd/opencd2others/data`，★ 已含 `data/` 子目录）。
       在 **NAS 宿主上**跑本工具时，那个路径**不存在** ⇒ 报
       「❌ 读不到库: //iSunker-DS423/…/data.db」，**看着像 SMB 抖动**（`ERR-SMB-02`），
       实际是**把 A 环境的常量拿到 B 环境用**（`ERR-META-01` 的形状）。
-      NAS 宿主上的真路径是 `/volume2/docker_ssd/musopia_script2`。
+      NAS 宿主上的真路径是 `/volume2/docker_ssd/opencd2others/data`。
 
     ★★ 为什么不"先试 DST、读不到再退到本地路径"：
       那就是**兜底值与真实结果混着报**（`ERR-META-14`）——
@@ -149,7 +149,7 @@ def resolve_root(cli_root):
     sys.exit(
         f"❌ 无法定出库的位置（**拒绝猜**）。\n"
         f"     `nas_health.py` 的 DST = {dst!r}，本机**读不到**。\n"
-        f"     ★ 若你在 **NAS 宿主**上跑：加 `--root /volume2/docker_ssd/musopia_script2`\n"
+        f"     ★ 若你在 **NAS 宿主**上跑：加 `--root /volume2/docker_ssd/opencd2others/data`\n"
         f"     ★ 若你在**容器**里跑：加 `--root /data`\n"
         f"     ★ 若你在**本机**跑：确认 NAS 的 SMB 共享开着（ERR-SMB-02）\n"
         f"   （本节原先没有这条分支 ⇒ 会拿一个不存在的路径去连，报成"
@@ -238,7 +238,7 @@ def main():
                     help="与这个基线文件比对（判据在这一步才印）")
     # ★★★ 必须能显式指定库在哪 —— 见 `resolve_root()` 里那段（两种环境的路径口径不同）。
     ap.add_argument("--root", default="",
-                    help="库所在目录（NAS 宿主: /volume2/docker_ssd/musopia_script2；"
+                    help="库所在目录（NAS 宿主: /volume2/docker_ssd/opencd2others/data；"
                          "容器: /data）。不给则按 MUSOPIA_DIR 环境变量 → "
                          "nas_health.py 的 DST 依次取，且**来源会印出来**。")
     args = ap.parse_args()

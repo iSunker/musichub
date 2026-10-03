@@ -18,8 +18,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.stdout.reconfigure(encoding="utf-8")
 
 import descr
-import opencd_map as M
-import opencd_parse as P
+import opencd as _opencd
+M = P = _opencd
 
 LINE = "─" * 78
 

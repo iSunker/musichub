@@ -23,7 +23,11 @@ import time
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-DST = pathlib.Path("//iSunker-DS423/docker_ssd/musopia_script2")
+# ★ 2026-10-05：生产端状态全部收进 `data/` 子目录（compose `${STATE_DIR:-./data}:/data`）
+#   ⇒ 这里指向 **data/ 目录本身**，下面 `(dst or DST) / "daemon_env.json"` 等才成立。
+#   ★ 别把它改回上级目录：那样四个 state 文件全都会找不到（ERR-META-01 同族的
+#     "路径对不上但静默返回空"）。`--dst` / 环境变量 `DST` 仍可覆盖此默认值。
+DST = pathlib.Path("//iSunker-DS423/docker_ssd/opencd2others/data")
 SNAP = pathlib.Path(__file__).with_name(".nas_health_last.json")
 
 # 时间口径：state 里的 last_run 是 epoch（UTC 无歧义）；
@@ -416,7 +420,7 @@ def read_db(dst=None):
     #    ★★ 但它**只到"上站"为止，到不了"做种"**：qB 侧 `state=missingFiles` 这种
     #      坏种**照样是 `PUBLISHED`**（实测：修 `readd_to_qb` 前那 6 条全是）。
     #      ⇒ 本文件**不连 qB**（纯 SMB 只读）⇒ 那一条**只能另测**：
-    #         cd /volume2/docker_ssd/musopia_script2
+    #         cd /volume2/docker_ssd/opencd2others
     #         sudo docker compose run --rm tools python -c "..."   # 查 qB 里的 state
     #      或（延迟后）按 infohash 查 `content_path` / `state`。
     #      ★ 别把这条 `PUBLISHED` 数**当成**"做种正常" —— 那是两码事（ERR-META-01）。

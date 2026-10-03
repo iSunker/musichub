@@ -10,7 +10,7 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-DB = "//iSunker-DS423/docker_ssd/musopia_script2/data.db"
+DB = "//iSunker-DS423/docker_ssd/opencd2others/data/data.db"
 
 # ★★★ 2026-09-28：本文件上方那句"不自己另写一套判据"原先**没做到** —— ⑨ 节
 #   手写了一遍转种口径，而且写的是**过时**的那一份（漏了闸门④）。

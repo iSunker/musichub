@@ -126,7 +126,7 @@ def collect(con, raw_dir):
         解析空   ⇒ 该页本来就没写正文（正常，不是错误）
         坏文件   ⇒ HTML 损坏 / 不是详情页 ⇒ **要查**
     """
-    import opencd_parse
+    import opencd as opencd_parse
 
     todo, no_file, empty, broken = [], [], [], []
     rows = load_targets(con)

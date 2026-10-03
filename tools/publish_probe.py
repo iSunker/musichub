@@ -9,7 +9,7 @@
   ⇒ 必须自己把 /app 补上，否则 `import config` 直接 ModuleNotFoundError。
 
 在 NAS 上运行（**一行**，先 cd 到 compose 目录）:
-    cd /volume2/docker_ssd/musopia_script2
+    cd /volume2/docker_ssd/opencd2others
     sudo docker compose --profile tools run --rm tools python /data/_probe_publish.py
 """
 import os

@@ -81,7 +81,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-LOCAL_DB = r"//iSunker-DS423/docker_ssd/musopia_script2/data.db"
+LOCAL_DB = r"//iSunker-DS423/docker_ssd/opencd2others/data/data.db"
 
 
 def _rows(conn, only):

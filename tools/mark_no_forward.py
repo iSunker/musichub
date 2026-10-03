@@ -58,7 +58,7 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-LOCAL_DB = r"//iSunker-DS423/docker_ssd/musopia_script2/data.db"
+LOCAL_DB = r"//iSunker-DS423/docker_ssd/opencd2others/data/data.db"
 
 # ★★ 用户 2026-09-23 **两次**点名的禁转行，合起来正是"当时的整个发布队列"：
 #    第一次：3 条中國名家名曲  「这三个是禁止转发呀！我手动添加的，不发」

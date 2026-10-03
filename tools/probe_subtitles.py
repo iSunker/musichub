@@ -71,7 +71,7 @@ sys.path.insert(0, os.environ.get("MUSOPIA_APP_DIR", "/app"))
 
 import config        # noqa: E402
 import crawl         # noqa: E402  ★ 用它的 Client / _make_gate / _DbLedger / save_raw
-import opencd_parse  # noqa: E402  ★ 解析口径**只此一份**，不自己写
+import opencd as opencd_parse  # noqa: E402  ★ 解析口径**只此一份**，不自己写
 
 
 # ── 「站上且副标题空」的目标口径 ──────────────────────────────────────────

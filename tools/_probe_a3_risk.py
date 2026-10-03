@@ -14,7 +14,7 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-DB = "//iSunker-DS423/docker_ssd/musopia_script2/data.db"
+DB = "//iSunker-DS423/docker_ssd/opencd2others/data/data.db"
 SITE = "musopia"
 
 conn = sqlite3.connect(DB, timeout=30)

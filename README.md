@@ -54,53 +54,57 @@ qBittorrent(:3020, 分类 opencd)
 
 ## 目录结构
 
+**生产端（NAS）** `opencd2others/` —— 与 `data/` 平级只放**容器定义类文件**：
+
 ```
-musopia_script2/                    # NAS 部署目录（compose 就放这里，./ 即指它）
+opencd2others/                      # NAS 部署目录（compose 就放这里，./ 即指它）
 ├─ docker-compose.yml               # opencd2musopia 常驻 + tools/once 一次性任务
 ├─ Dockerfile                       # 代码 COPY 进镜像（不是 bind mount）
+├─ .dockerignore                    # 构建上下文排除（凭据/状态/产物，防外溢）
 ├─ .env                             # 站点 Cookie / qB 密码 / 图床 Key（唯一密钥来源，绝不进仓库）
 ├─ .env.example                     # 占位符模板（全是 changeme）
-├─ config.py                        # 统一配置；密钥缺失直接终止，不留"看起来能跑"的默认值
-├─ db.py                            # ★唯一 schema 来源 + 自动迁移 + 所有查询
-├─ descr.py                         # ★副标题 / BBCode 简介 / 站点下拉项推断（发布与编辑共用）
-├─ assets.py                        # 封面查找、图床上传、日志与 CUE 解析
-├─ musopia.py                       # 站点客户端（登录检查、上传列表、读改写式编辑）
-├─ run.py                           # 扫描 qB → 提元数据 → 生成种子 → 入库
-├─ publish.py                       # 发布新种子 + 回加 qB 做种
-├─ update_metadata.py               # ★批量编辑已发布页面
-├─ sync_site.py                     # 回填 site_torrent_id（编辑的前置条件）
-├─ backfill_covers.py               # 补历史缺失的封面
-├─ daemon.py                        # ★单容器串行调度六个阶段
-├─ check_db.py                      # 状态速览，排查问题先跑这个
-├─ healthcheck.py                   # 容器健康检查（读写心跳文件）
-├─ deploy.sh                        # ★本地→NAS 白名单同步（开发工具，不上 NAS）
-├─ tools/                           # 开发工具：nas_health.py 巡检 / gen_counts.py 生成真值 /
-│                                   #   doc-audit/ 文档只读投影（headings / refs / terms / probes）
 ├─ README.md                        # ← 本文件：操作手册（唯一事实源，**会上生产**）
+└─ data/                            # ★ 全部容器状态与产物（compose `${STATE_DIR:-./data}:/data`）
+   ├─ data.db                       # SQLite：种子记录 + 发布状态 + 站点 ID
+   ├─ daemon_state.json             # 各阶段 last_run / last_ok（调度进度）
+   ├─ daemon_heartbeat              # 纯 unix 时间戳，daemon 每轮刷新
+   ├─ daemon_env.json               # ★ 容器内**生效的**白名单开关快照（daemon 每轮写）
+   ├─ readd_queue.json              # 延迟回加队列（SEED_DELAY_MIN>0 时）
+   ├─ lsky_token.json               # Lsky 图床 token 缓存
+   ├─ output_torrents/              # 生成的 .torrent
+   ├─ covers/                       # 封面缓存
+   └─ raw_html/                     # 皇后详情页落盘（解析层重放用）
+```
+
+**本机仓库**（`D:\Projects\opencd2others\zhuanzhong`，**git 只在这里**）—— 除上面全部内容外，还多：
+
+```
+├─ config.py … qb_client.py 等全部 .py    # 代码（deploy.sh 白名单同步到 NAS；COPY 进镜像）
+├─ deploy.sh                        # ★本地→NAS 白名单同步（开发工具，不上 NAS）
+├─ tools/                           # 开发工具：readd.py（回加）/ nas_health.py 巡检 /
+│                                   #   gen_counts.py 生成真值 / doc-audit/audit.py 文档只读投影
+├─ CLAUDE.md / .claude/RULES.md     # ★ 每轮自动读取的规则（本机专属，不上生产）
 ├─ ERRATA.md                        # 教训索引（`ERR-*` 表；不上生产）
+├─ SESSION-NOTES.md                 # 会话记录（只增不改；不上生产）
 └─ counts.json                      # ★自动生成：会动的量的真值（不上生产，**永不手改**）
 ```
+
+> ★ **生产端不收 `tools/`、`ERRATA.md`、`SESSION-NOTES.md`、`counts.json`、探测脚本** ——
+> 那些只在本机。`deploy.sh` 的白名单（= `Dockerfile` 的 COPY 行 + compose 定义类文件）
+> 决定哪些会同步过去；白名单**不含** `.env`（生产独有真凭据，须手工维护）。
+> ★ **生产端不是 git 仓库**（`.git` 只在本机），别在生产端跑 git。
 
 > ★ **每份文件多少行、有多少条记录、自检过多少项** —— 这些是**每天都动的量**，
 > 一律**不写在这份手册里**（写死等于制造一个必然过时的"事实"）。真值看 `counts.json`：
 > `python tools/gen_counts.py` 重新生成；只想看某个数用 `python -c "import json;..."` 取。
 
-**运行时状态**（`.gitignore` 覆盖，不随代码走）：
-
-```
-data.db                     # SQLite：种子记录 + 发布状态 + 站点 ID
-output_torrents/            # 生成的 .torrent
-daemon_state.json           # 各阶段 last_run / last_ok（调度进度）
-daemon_heartbeat            # 纯 unix 时间戳，daemon 每轮刷新
-daemon_env.json             # ★ 容器内**生效的**白名单开关快照（daemon 每轮写）
-```
-
-> 这些**放在脚本目录**而不是命名卷，是因为 compose 里是 `${STATE_DIR:-.}:/data`：
-> SMB 上直接看得到、能备份、出问题能直接查库。那份**站点 ID 已回填**的
-> `data.db` 就在这里，**不需要任何迁移**。
+> 状态放 `data/` 子目录（而不是命名卷、也不与源码混放）的理由：compose 里是
+> `${STATE_DIR:-./data}:/data` ⇒ SMB 上直接看得到、能整目录备份、出问题能直接查库，
+> 又不和 40+ 个 `.py` 混在一起。那份**站点 ID 已回填**的 `data.db` 就在 `data/` 里，
+> **不需要任何迁移**。
 > ★ 具体条数**不写死在文档里** —— 它是每天都在动的量，写死等于制造一个必然过时的"事实"。
 > 要看现在的数：`python tools/gen_counts.py`（生成 `counts.json`，含库条数/自检项数/各阶段周期）。
-> 只想深挖某一个探针：`python tools/doc-audit/04_probes.py`。
+> 只想深挖某一个探针：`python tools/doc-audit/audit.py probes`。
 
 > ★★ **`daemon_env.json` 是什么、为什么要有它**：真正决定"哪些阶段关着"的是
 > **容器内的环境变量**。本机的两个替代来源都拿不到：NAS 那份 `.env` 在 `deploy.sh`
@@ -144,14 +148,14 @@ daemon_env.json             # ★ 容器内**生效的**白名单开关快照（
 
 ## 部署步骤（分阶段，每步可独立验证）
 
-> 前置：把本目录内容整个放到 NAS 部署目录（本文档举例用 `/volume2/docker_ssd/musopia_script2`）。
+> 前置：把本目录内容整个放到 NAS 部署目录（本文档举例用 `/volume2/docker_ssd/opencd2others`）。
 > `cp .env.example .env`，然后填 `.env`：至少 `QB_PASS`、`MUSOPIA_COOKIE`、`MUSOPIA_PASSKEY`、`PICGO_API_KEY`。
 > **这四个缺失时 `config.py` 会直接终止程序**（不留默认值，见「安全」）。
 
 ### Phase 0 — 空跑一轮，绝不改站点
 
 ```bash
-cd /volume2/docker_ssd/musopia_script2
+cd /volume2/docker_ssd/opencd2others
 DRY_RUN=true docker compose --profile tools run --rm once
 ```
 
@@ -189,8 +193,13 @@ docker compose --profile tools run --rm tools python update_metadata.py --apply 
 
 ```bash
 # .env 里 DRY_RUN=false
-docker compose up -d --build
+docker compose up -d --build musopia      # ★ 只点名 musopia，别裸 up
 ```
+
+> **★ 为什么必须带服务名 `musopia`**：不带服务名时 `docker compose up -d`
+> 会把 compose 文件里**所有**服务一起拉起 —— 包括 `profiles: [tools]` 的一次性
+> `tools` / `once`（它们本是「按需 `run --rm`」的，被 `up` 拉起就成了常驻）。
+> 所以重建常驻容器**一律**写成 `docker compose up -d --build musopia`。
 
 日常新种子流程：`run.py` → `publish.py`（Phase 5 的 daemon 会自动做）。
 
@@ -362,13 +371,13 @@ crawl（扫 qB 反查皇后、抓详情页入库）★ 默认关（ENABLE_CRAWL=
 ### 部署
 
 ```bash
-cd /volume2/docker_ssd/musopia_script2
+cd /volume2/docker_ssd/opencd2others
 
 # 1. 先空跑一轮：只预览，绝不改站点
 DRY_RUN=true docker compose --profile tools run --rm once
 
 # 2. 看日志没问题后，改 .env 里 DRY_RUN=false，然后常驻
-docker compose up -d --build
+docker compose up -d --build musopia      # ★ 点名 musopia（裸 up 会连 tools/once 一起拉）
 
 # 3. 观察
 docker compose logs -f opencd2musopia    # 或 docker logs -f opencd2musopia
@@ -381,8 +390,13 @@ docker compose ps                 # 看 healthy 状态
 
 ```bash
 docker compose restart            # ❌ 只重启容器，跑的还是旧镜像里的旧代码
-docker compose up -d --build      # ✅ 重新构建镜像并替换容器，新代码才生效
+docker compose up -d --build musopia   # ✅ 重新构建镜像并替换容器，新代码才生效（★ 点名 musopia）
 ```
+
+> **★ 裸 `docker compose up -d --build`（不带服务名）的副作用**：它会把 `tools` /
+> `once` 也一并拉起 —— 这两个是 `profiles: [tools]` 的**一次性**服务，被 `up` 拉起后
+> 会**常驻**，与 daemon 并发写同一个 SQLite（`database is locked` 的来源）。
+> ⇒ 重建常驻容器**只写** `docker compose up -d --build musopia`。
 
 `restart` 后看不到新行为、日志里没有新输出，**九成是这个原因**。
 
@@ -411,7 +425,7 @@ docker compose logs -f opencd2musopia    # 等价写法
 ```bash
 docker rm -f musopia_publish musopia_scan
 # 或者下次 up 时顺带清理
-docker compose up -d --build --remove-orphans
+docker compose up -d --build --remove-orphans musopia   # ★ 末尾点名 musopia；--remove-orphans 负责清旧容器
 ```
 
 ### 为什么是单容器 + 自研调度，而不是几个 cron
@@ -736,8 +750,8 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 
 ## 当前状态与下一步
 
-**状态（2026-09-14 核 · 2026-09-19 复核）**：生产在 NAS `/volume2/docker_ssd/musopia_script2` 常驻运行，
-本机在 `D:\Projects\musopia\zhuanzhong` 有一份完整开发副本。
+**状态（2026-09-14 核 · 2026-09-19 复核）**：生产在 NAS `/volume2/docker_ssd/opencd2others` 常驻运行，
+本机在 `D:\Projects\opencd2others\zhuanzhong` 有一份完整开发副本。
 ★ **全部代码文件本机 ↔ NAS 逐字节一致**（2026-09-19 复核：`deploy.sh` 报「生产与本地一致」）。
 
 > ✅ **2026-09-17/18 那笔积压已清（2026-09-19 10:21 部署）**：`publish.py` 匿名默认值、

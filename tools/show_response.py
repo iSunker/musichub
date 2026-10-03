@@ -4,7 +4,7 @@
 ★ 同 publish_probe.py：脚本在 `/data`、代码在 `/app`，得自己把 /app 补进 sys.path。
 
 在 NAS 上运行（**一行**，先 cd 到 compose 目录）:
-    cd /volume2/docker_ssd/musopia_script2
+    cd /volume2/docker_ssd/opencd2others
     sudo docker compose --profile tools run --rm tools python /data/_probe_show.py
 """
 import os

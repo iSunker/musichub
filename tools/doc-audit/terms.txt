@@ -4,10 +4,10 @@
 
 # ---- 环境与路径 ----
 iSunker-DS423
-/volume2/docker_ssd/musopia_script2
+/volume2/docker_ssd/opencd2others
 /volume1/video/music
 /volume2/qb_temp/temp_docker_opencd
-D:\Projects\musopia\zhuanzhong
+D:\Projects\opencd2others\zhuanzhong
 
 # ---- 容器与镜像 ----
 musopia-script:latest

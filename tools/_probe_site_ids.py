@@ -24,7 +24,7 @@
 - 每个请求之间由 `MusopiaClient` 自带的 `_throttle()` 限速（默认 1.5s）。
 
 在 NAS 上运行（**一行**，先 cd 到 compose 目录）:
-    cd /volume2/docker_ssd/musopia_script2
+    cd /volume2/docker_ssd/opencd2others
     sudo docker compose --profile tools run --rm tools python /data/_probe_site_ids.py
 
 ★ 为什么**照旧**放在 /data（= 宿主 compose 目录）而不是 tools/：

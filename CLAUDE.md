@@ -1,0 +1,101 @@
+# CLAUDE.md — 本项目的工作纪律（每轮对话开头自动读取）
+
+> 本文件是**给 AI 助手读的铁律**，不是给人看的手册。人的手册是 `README.md`。
+> 细目在 `.claude/RULES.md`（本文件末尾用 `@` 引用，会被一并注入）。
+> ★ 改动本文件 = 改动"每轮都生效的约束"，请当作纪律变更来评审，别顺手改。
+
+---
+
+## 0. 这个项目是什么
+
+从 qBittorrent 抓 OpenCD（皇后）的抓轨资源 → 抽元数据 → 发到 **Musopia（乌托邦）**
+与 **CrabPT（蟹黄堡）** → 回加 qB 做种 → 批量编辑已发布页面。
+一个常驻容器（`opencd2musopia`）跑 `daemon.py` 串行调度各阶段。
+
+---
+
+## 1. 目录与部署（最容易搞错的）
+
+- **本机仓库**：`D:\Projects\opencd2others\zhuanzhong`（= 本项目地址，**git 只在这里**）。
+- **生产端（NAS）**：`\\iSunker-DS423\docker_ssd\opencd2others`（SMB 路径）
+  = NAS 上的 `/volume2/docker_ssd/opencd2others`。
+- 生产端结构：与 `data/` 平级**只放容器定义类文件**（`docker-compose.yml` /
+  `Dockerfile` / `.dockerignore` / `.env` / `.env.example` / `README.md`）；
+  **所有容器状态与产物都在 `data/` 子目录**（`data.db` / `daemon_state.json` /
+  `daemon_heartbeat` / `daemon_env.json` / `readd_queue.json` / `lsky_token.json` /
+  `output_torrents/` / `covers/` / `raw_html/`）。
+  compose 里是 `${STATE_DIR:-./data}:/data`。
+- **生产端不留 git**：`.git` 只在本机。生产端也不留 `tools/`、探测脚本（`_probe_*.py`）、
+  证据文件（`*.html`）、备份垃圾（`*.bak-*` / `.env.before-*`）——**那些只在本机**。
+- **代码上生产 = `deploy.sh` 白名单同步**，见 §3。
+
+> ★ 生产端目录**不是** git 仓库，**不要**在生产端跑任何 git 命令；
+> 也**不要**在生产端 create/编辑 `.py`（会被下次 `deploy.sh` 覆盖或造成两份真值）。
+
+---
+
+## 2. 凭据与安全（违反 = 安全事故）
+
+- `.env`（站点 Cookie / qB 密码 / 图床 Key / `QB_API_KEY`）是**生产独有真凭据**：
+  - **绝不进 git**（`.gitignore` 已排 `.env` / `.env.*` / `!.env.example`）。
+  - **绝不在生产端做 `.env` 备份**（历史已因此堆了 10+ 个 `.env.bak-*`，已清理）。
+  - **绝不打印、绝不进日志、绝不进 `daemon_env.json` 快照**
+    （`daemon.ENV_SNAPSHOT_KEYS` 是白名单，凭据键不在其中）。
+  - `.env` **不在** `deploy.sh` 白名单 ⇒ 改了 `.env.example` 里的新键，
+    **必须手工**加到 NAS 那份 `.env`（`ERR-ENV-02`）。
+- `data.db` 是**只读**（`PRAGMA query_only=1`）；**不要** `cp` 生产库到本机当事实源。
+- 单容器：`docker compose up -d` **不带服务名**会带起别的服务 ⇒ 只做
+  `docker compose up -d --build musopia`。
+
+---
+
+## 3. 部署与同步纪律
+
+- 同步：`bash deploy.sh`（**默认 dry-run**）→ 确认 → `bash deploy.sh --apply`。
+  白名单 = `deploy.sh` 的 `FILES` + `Dockerfile` 的 `COPY` 行，**两者必须一致**；
+  脚本末尾会拿 Dockerfile 反查白名单，漏了就**拒绝部署**（这是护栏，别绕过）。
+- 重建：NAS 上 `cd <compose目录> && docker compose up -d --build musopia`
+  （**只 musopia**；`restart` 跑的是旧镜像，无效）。
+- 验证**镜像里**那份（别用"NAS 文件系统上有"推"容器里有"）：
+  `docker exec opencd2musopia python <模块> --selftest`。
+- NAS SSH：`ssh -p 36688 iSunker@192.168.0.7`，私钥显式给
+  `C:/Users/艾森克/.ssh/id_ed25519`（`$HOME` 有 mojibake，写 `~` 会失败）。
+  NAS 用户**在 docker 组** ⇒ 用 `/usr/local/bin/docker`，**不用 sudo**。
+  ★ 时区：本机比 NAS 慢 8 小时；NAS = CST。
+
+---
+
+## 4. 改代码的固定动作
+
+1. **改完必跑**：`python run.py --selftest`（含接线断言）。
+2. 涉及计数/自检项数时：`python tools/gen_counts.py` 重新生成 `counts.json`
+   （**别手改 `counts.json`**，它是产物）。
+3. 本机跑自检需要 dummy env（`config.require_env` 会 `sys.exit`）：
+   ```bash
+   export QB_PASS=x MUSOPIA_COOKIE=x MUSOPIA_PASSKEY=x PICGO_API_KEY=x \
+          OPENCD_COOKIE=x DATA_DIR="$PWD/.scratch/selftest-data"
+   mkdir -p "$DATA_DIR"
+   ```
+4. **判据必须先拿已知样本校验一次**（阴性对照）：新写的断言要能在一个**已知会红**
+   的输入上报红，否则它可能永远为真（`ERR-META-01`：失效的检测比不检测更危险）。
+
+---
+
+## 5. 文档纪律
+
+- `SESSION-NOTES.md`：**只增不改**，逆序（最新在最上面），改就追加一节。
+- `ERRATA.md`：**只写教训 + 根因，不写日期、不写会变的数字**；每条必须是一个
+  `### ERR-XX-NN` 标题（`tools/doc-audit/audit.py`，原 `02_refs.py`，靠它解析引用）。
+- `README.md`：人的操作手册，**是事实源**；改了行为要同步改它（`ERR-META-04`）。
+- 会变的量（库条数、自检项数、阶段周期）**一律不写死在文档里**——看 `counts.json`。
+
+---
+
+## 6. 其他铁律
+
+- **不主动 `git commit`**，除非用户明确要求。要提交时：若在默认分支先开分支。
+- 别在生产端跑 `git`、别在生产端编辑 `.py`、别在生产端留备份垃圾。
+- 用户已明确**不做**的事：不修 `daemon` 内存泄漏、不管 `QB_API_KEY` 轮换。
+- `deploy.sh` **没有**"删除 NAS 文件"的能力（只叠加同步，不替换、不删）。
+
+@.claude/RULES.md
