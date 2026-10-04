@@ -1313,6 +1313,86 @@ def selftest_readd_names_defined(verbose=True):
         for d in detail:
             print(f"    {d}")
     return (not detail), detail
+
+
+# ── ★★ 负向自检：发布循环"失败分级处置"确实存在（#21）──────────────────────
+#
+# ★★★ 为什么需要它：`#21` 的整个价值 = 「坏种子 (REJECT) 跳过并标 FAILED、站点崩
+#   (SITE_DOWN) 立即停」这一条**分支结构**。而这个结构的**失效方式恰恰是静默的**：
+#   谁哪天图省事把它"简化"回"任何失败都 `continue`"，代码照样跑、自检照样绿
+#   （除了本条），而**坏种子又开始堵死整条队列** —— 用户点名要修的那个病**原样复发**。
+#   ⇒ 判据必须**钉住这个结构本身**，而不是钉住某次运行的结果。
+#
+# ★ 判据取自**本文件自己的源码**（AST，非手抄清单 —— 那必然漂移，`ERR-META-03`）。
+#   `main()` 里那段循环要同时满足：
+#     ① 出现 `SITE_DOWN:` 的判定（否则站点崩会被当成"这条坏"继续连打）
+#     ② `SITE_DOWN` 支用 `break`（停），不是 `continue`
+#     ③ `REJECT:` 支带 `db.save_task(..., status="FAILED", ...)`（否则坏种子不出队，队列不动）
+#     ④ 退出码区分 `site_down`（否则站点崩不退避）
+#   ★ 阴性对照：把"REJECT 支那段的 `db.save_task(status='FAILED')`"抹掉 ⇒ 必须报红。
+def selftest_publish_failure_classification(verbose=True):
+    """断言发布循环按 `SITE_DOWN`/`REJECT` **分级处置**（#21）。返回 `(是否通过, 明细)`。
+
+    ★ 判据基于**源码文本**（不是 `_code_only`）：因为这里的契约**正是字符串前缀**
+      `"SITE_DOWN:"` / `"REJECT:"` —— 它们是 `musopia.upload_torrent` 与 `publish.main`
+      之间的**机器可读接口**。`_code_only` 会把这些前缀清掉（它专为"查名字"设计），
+      用在**这里**反而是错的（会把要查的东西删掉）—— 所以本自检**不**走 `_code_only`。
+      ★ 但 `save_task` 这类**动作**用源码文本查同样成立（它是名字，不受影响）。
+    """
+    src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    tree = _ast.parse(src)
+    fn = next((n for n in _ast.walk(tree)
+               if isinstance(n, _ast.FunctionDef) and n.name == "main"), None)
+    if fn is None:
+        return False, ["★ 找不到 main —— 函数被改名了？本条自检失效"]
+    # ★ 取 main 的**源码切片**（按行号），保留字符串 —— 见 docstring 的理由。
+    lines = src.splitlines()
+    start = fn.lineno - 1
+    end = max((getattr(n, "lineno", start) for n in _ast.walk(fn)), default=start)
+    body = "\n".join(lines[start:end])
+
+    def _scan(text):
+        out = []
+        if "SITE_DOWN:" not in text:
+            out.append("★★ main() 里没有 `SITE_DOWN:` 判定 ⇒ 站点崩会被当成"
+                       "「这条坏」继续连打整条队列（#21 复发）")
+        if "REJECT:" not in text:
+            out.append("★★ main() 里没有 `REJECT:` 分级 ⇒ 无法区分「这条坏」与「站点崩」")
+        # ★ 退出码分层：`site_down` 这个名字必须出现（它驱动"非 0 + 退避"）
+        if "site_down" not in text:
+            out.append("★★ main() 里没有 `site_down` ⇒ 站点崩不再触发退避"
+                       "（Cookie 过期时会每周期白敲站点）")
+        # ★ 坏种子必须被标 FAILED 出队 ⇒ `db.save_task` 这个**动作**必须存在。
+        if "save_task" not in text:
+            out.append("★★ main() 里没有 `db.save_task` ⇒ 被拒的种子**不出队**，"
+                       "下一轮还在，队列推不动（FAILED 出队是本改动的关键机制）")
+        return out
+
+    detail = _scan(body)
+
+    # ---------- 阴性对照：抹掉坏种子出队那段，判据必须报红 ----------
+    # ★ 锚点 = main 源码里 `save_task` 那些行；**全部**删掉后，**只重扫 main 的切片**
+    #   （★ 不能重扫整份文件 —— 那样会把**本自检函数自己**源码里的 `save_task` 也扫进来，
+    #    于是阴性对照永远报不出红、自检形同虚设。这是本自检第一版的真 bug。）
+    if "save_task" not in body:
+        detail.append("✗ 阴性对照的**锚点**没找到（main 里 `save_task` 那行已变？）⇒ "
+                      "本条自检失效（锚点漂了 = 没测）")
+    else:
+        bad_body = "\n".join(ln for ln in lines[start:end] if "save_task" not in ln)
+        neg = _scan(bad_body)
+        if not any("save_task" in d for d in neg):
+            detail.append("✗ ★ 阴性对照失败：删掉 `save_task` 那几行后判据**没**报红 "
+                          "⇒ 本条自检是空的")
+
+    if verbose:
+        mark = "✅" if not detail else "❌"
+        print(f"{mark} 发布失败分级自检：main() 按 SITE_DOWN/REJECT 分级、坏种子标 FAILED 出队"
+              f"（含阴性对照）")
+        for d in detail:
+            print(f"    {d}")
+    return (not detail), detail
+
+
 def run_crabpt(args):
     """蟹黄堡（crabpt.vip）发布路径。★ 与 `main()` 的乌托邦路径**并列**，不互相调用。
 
@@ -1744,15 +1824,21 @@ def main():
         #   ★ 独立失效模式：前三条查的是"站点/口径"，这条查的是"**Python 作用域**"
         #     —— `ERR-PUBLISH-02` 就是它（`t` 未定义 ⇒ 19 条发布成功却 0 条做种）。
         ok4, _ = selftest_readd_names_defined()
-        # ★ 四条判据**都要**跑（`and` 而不是 `or`）—— 它们是**独立**的失效模式：
+        # ★★ 第 5 条（2026-10-04 加，#21）：发布循环的**失败分级处置**结构。
+        #   ★ 独立失效模式：前四条查"站点/口径/作用域"，这条查"**控制流分支**"
+        #     —— 坏种子跳过(REJECT→标FAILED→continue) / 站点崩停止(SITE_DOWN→break)。
+        #     它**静默失效**：简化回"统一 continue"照样绿，而坏种子又开始堵队列。
+        ok5, _ = selftest_publish_failure_classification()
+        # ★ 五条判据**都要**跑（`and` 而不是 `or`）—— 它们是**独立**的失效模式：
         #   ① 碰了乌托邦的列（"发一条污染四个判据"）
         #   ② 队列取错（"静默多发、不可撤销"）
         #   ③ ★ 队列口径与**解释口径**分叉（"工具告诉你它在队列里、实际不发"
         #      —— 2026-09-28 实测，`--only` 报文与实际筛选互相矛盾）
         #   ④ ★ 回加路里名字用在了绑定之前（"发布成功却永不做种"，`ERR-PUBLISH-02`）
+        #   ⑤ ★ 失败不再分级 ⇒ 坏种子堵死队列（#21 复发，静默）
         #   ★ 用 `or` 的话，一条报红时另一条**根本没跑**，而"没跑"与"通过"
         #     在输出上应当长得不一样（`ERR-META-14`：兜底不许冒充真结果）。
-        ok = ok1 and ok2 and ok3 and ok4
+        ok = ok1 and ok2 and ok3 and ok4 and ok5
         # ★★ 必须 `sys.exit`，**不能 `return`** —— `main()` 是被
         #   `if __name__ == "__main__": main()` 调的，那个写法的返回值**会被丢掉**
         #   ⇒ 退出码恒为 0 ⇒ **自检报红也没人看得见**（阴性对照实测踩到这一条）。
@@ -1957,6 +2043,12 @@ def main():
             print(f"⚠️  连不上 qBittorrent ({e})，本次不做回加")
 
     ok = fail = 0
+    # ★★ 2026-10-04（#21）：区分"这条坏"与"站点崩" —— 前者跳过继续，后者立即停。
+    #   · `rejected`：内容被站点拒（`REJECT:` 前缀 / 抛 SiteError）⇒ 标 FAILED 出队，发下一条；
+    #   · `site_down`：站点侧问题（`SITE_DOWN:` 前缀 / 登录失效）⇒ **停**，非 0 退出让退避生效。
+    #   ★ 为什么必须在循环外声明：`break` 之后要用它决定退出码（见函数末尾）。
+    rejected = 0
+    site_down = False
     # ★★ 上一次**上传**的时刻 —— `PUBLISH_MIN_GAP` 按它算"距上一条多久"。
     #   ★ 用 `None` 而不是 0：`time.time()` 是个大数，用 0 会让第一条算出
     #     "距上一条已有 50 年 ⇒ 不用等"——**结论对，但推理是假的**
@@ -1972,6 +2064,9 @@ def main():
         #     无论上一条成功还是失败，下一条都先等。
         #   ★ 放在开头还让"睡多少"可测：间距 = 距上次**上传**的时间，
         #     而不是"sleep(120) + 上一条耗时"（那会让旋钮名不副实）。
+        #   ★★ 2026-10-04（#21）：`continue` 的**语义收窄了** —— 现在只有"这条坏
+        #     （REJECT）"才 `continue`；"站点崩（SITE_DOWN）"改为 `break`（不再往下发）。
+        #     ⇒ 这段间隔逻辑仍然放在循环开头，对所有继续走的人**必然**生效。
         if i > 1 and gap > 0 and last_upload_ts is not None:
             wait_publish_gap(gap, i, len(valid), last_upload_ts)
 
@@ -1983,14 +2078,42 @@ def main():
         last_upload_ts = time.time()
         try:
             torrent_id, msg = client.upload_torrent(task["torrent_file"], fields)
-        except (SiteError, LoginExpired) as e:
+        except LoginExpired as e:
+            # ★★ 登录失效 = 站点侧问题（Cookie 过期）⇒ **立即停**，不再往下发。
+            #   不标 FAILED —— 这条种子本身没问题，是站点的问题；标了会**误杀**。
+            print(f"    🛑 登录失效，停止本轮（不标记本条，稍后重试）: {e}")
+            site_down = True
+            break
+        except SiteError as e:
+            # ★ 其它 SiteError（种子文件不存在 / 读不出等）= 这条的问题 ⇒ 跳过、发下一条。
             print(f"    ❌ {e}")
             fail += 1
+            rejected += 1
+            db.save_task(info_hash=task["info_hash"], status="FAILED",
+                         reason=f"publish_failed: {e}")
             continue
 
         if not torrent_id:
-            print(f"    ❌ 发布失败: {msg}")
+            # ★★ 按 `upload_torrent` 给出的**机器可读前缀**分流（#21 的核心判据）：
+            #   · SITE_DOWN: ⇒ 站点侧 ⇒ 停 + 非 0（让退避生效，绝不连打整条队列）；
+            #   · REJECT:    ⇒ 这条被拒 ⇒ 标 FAILED 出队、发下一条。
+            if isinstance(msg, str) and msg.startswith("SITE_DOWN:"):
+                print(f"    🛑 站点侧问题，停止本轮（不标记本条）: {msg}")
+                site_down = True
+                break
+
+            # 到这里 = 这条被拒（REJECT 或未知）。
+            # ★★ 标 FAILED 是**关键机制**（不是顺手写库）：
+            #   `PENDING_PUBLISH_WHERE` 首条件是 `status='SUCCESS'`（db.py:347）
+            #   ⇒ 标 FAILED **立刻出队** ⇒ 下一轮 `get_pending_publish()` 不再返回它
+            #   ⇒ 队列自然推进，不会每条都卡在同一条上。
+            #   `FAILED ∈ PROTECTED_STATUSES` ⇒ scan 重扫不会把它冲回 SUCCESS。
+            #   （这与 2026-10-04 应急时手动做的那步是**同一动作**，此处自动化。）
+            print(f"    ❌ 发布被拒（本条标 FAILED 出队，继续下一条）: {msg}")
             fail += 1
+            rejected += 1
+            db.save_task(info_hash=task["info_hash"], status="FAILED",
+                         reason=f"publish_failed: {msg}")
             continue
 
         ok += 1
@@ -2058,36 +2181,47 @@ def main():
         readd_to_qb(qb, client, task["info_hash"], torrent_id)
 
     print("\n" + "=" * 60)
-    print(f"🎯 发布完成：成功 {ok} 条，失败 {fail} 条")
+    print(f"🎯 发布完成：成功 {ok} 条，失败 {fail} 条"
+          f"（其中被拒标 FAILED {rejected} 条）"
+          + ("；⚠️ 站点侧问题已中止本轮" if site_down else ""))
 
-    # ★ 说真话的退出码（2026-09-18）。
+    # ★ 说真话的退出码（2026-09-18；2026-10-04 按 #21 **重划判据**）。
     #
-    # daemon 判一个阶段成败**只看退出码**（`daemon.py:280` 的 `if code == 0`），
-    # 而这里原先**一条路都不 sys.exit** —— 于是「成功 0 条，失败 5 条」也以 0 退出，
-    # daemon 每轮把 `fails["publish"]` 清零 ⇒ **指数退避分支根本进不去**
-    # ⇒ 按 `PUBLISH_INTERVAL` 原样重来一次。
+    # daemon 判一个阶段成败**只看退出码**（`daemon.py:620` 的 `if code == 0`），
+    # 非 0 ⇒ `fails[name]++` ⇒ **指数退避**（`daemon.py:992`，最长 6h）。
     #
-    # 后果不是"保险没生效"，是**反向**的：`daemon.py:14-15` 明写「Cookie 过期这类
-    # 问题会让每个阶段都失败，不退避就是每 30 分钟无意义地敲站点一次」，
-    # 而实测发种权限是**会抖**的（`ERRATA.md` 的 `ERR-SITE-01`：16:19 全败、
-    # 18:50 全成）⇒ 这个「一天 240 次无效 POST」的窗口会**反复**出现。
+    # ★★ #21 的核心：原判据是"只要有失败就非 0"，于是 **一条坏种子 → 整条队列陪绑退避 2~6h**。
+    #   现在按**失败的性质**分层（两类处置相反）：
     #
-    # ★ 判据分层，别混成一个数：
-    #   - 有失败（重试有意义，多半是权限/站点抖动）→ 非 0，让退避生效；
-    #   - 有成功、也有失败 → 同样非 0。**不能因为"成功了几条"就当成功** ——
-    #     那正是原先那条静默路径的形状。
-    #   - 失败一条都没有 → 0，正常。
-    #   - 一条都没试（没待办 / 全被拦 / dry-run / 用户取消）→ 0。这些**不是**失败，
-    #     退避它们只会让"没活干"被误记成"连续失败"。
+    #   ① `site_down`（站点崩 / Cookie 失效）⇒ **非 0**：这是**该退避**的情形
+    #      —— `daemon.py:14-15` 明写「Cookie 过期这类问题会让每个阶段都失败，不退避就是
+    #      每 30 分钟无意义地敲站点一次」。且我们已 `break`，**没有**连打整条队列。
+    #
+    #   ② 有 `rejected` 但**也有成功** ⇒ **0**：坏种子已逐条标 FAILED 出队，
+    #      队列在推进、站点也证明是好的 ⇒ 退避只会**拖慢真正的发布**，不该惩罚一次成功的"清障"。
+    #
+    #   ③ ★ **保守护栏**：`ok == 0 且 fail > 0`（一条都没成、全是 REJECT）⇒ **非 0**。
+    #      理由：整批全被拒**不像**"N 条恰好都是坏种子"，更像**判据误伤**（站点改版把
+    #      所有条都拒了 / 落盘前缀判错）⇒ 让它退避 + 日志把它**暴露**出来。
+    #      （`ERR-META-01`：别把系统性故障静默成"N 条坏种子"。）
+    #
+    #   ④ 失败一条都没有 ⇒ 0，正常。
+    #   ⑤ 一条都没试（没待办 / 全被拦 / dry-run / 用户取消）⇒ 0，这些**不是**失败。
     #
     # ★ 只退出码，**不 sys.exit(msg)** —— 上面那句汇总已经在 stdout 里了，
     #   再往 stderr 打一遍是重复信息（且容器里两条流都会进 docker logs）。
-    if fail:
-        # ★ 不在这里写死「每 30 分钟」—— 周期由 `PUBLISH_INTERVAL` 定，写死就等于
-        #   制造一个必然过时的"事实"（README 首页那条纪律）。只报事实：失败了几条。
-        print(f"↩️  以非 0 退出：有 {fail} 条失败，让 daemon 的退避生效"
-              f"（不再按 PUBLISH_INTERVAL 原样重来）")
+    if site_down:
+        print("↩️  以非 0 退出：站点侧问题（已中止本轮），让 daemon 的退避生效")
         sys.exit(1)
+    if fail and ok == 0:
+        # ③ 系统性失败护栏 —— 退避 + 日志暴露，别静默成"N 条坏种子"。
+        print(f"↩️  以非 0 退出：{fail} 条失败、**无一成功** —— 疑似系统性故障"
+              f"（判据误伤 / 站点改版？）而非「恰好都是坏种子」，让退避暴露它")
+        sys.exit(1)
+    if rejected:
+        # ② 清障成功 ⇒ 0。**不退避**（否则会拖慢真正的发布）。
+        print(f"ℹ️  退出码 0：{rejected} 条坏种子已标 FAILED 出队"
+              f"（队列已推进），其余 {ok} 条成功 ⇒ **不**触发退避")
 
 
 if __name__ == "__main__":

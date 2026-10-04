@@ -25,6 +25,14 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 # 这些是编辑器的排版按钮和文件上传控件，不属于要回填的表单数据
 SKIP_NAMES = {"b", "i", "u", "url", "IMG", "list", "quote", "tagcount", "nfo"}
 
+# 失败响应落盘目录。★★ 与 `crawl.RAW_DIR` **同一套口径**（env 可覆盖、懒创建、原子写）——
+#   ★ 为什么在 `musopia.py` 里**照抄**一份、而不是 `import crawl`：
+#     `crawl` 有重依赖（RateGate / opencd / db），而本站点客户端**不该反向依赖**抓取层
+#     （`cover_fetch.py` 头注释立的同一条边界规矩）。三行常量 + 一个写函数，不值得为它
+#     引入反向耦合（那会让 `import musopia` 顺带拖进整套抓取栈）。
+#   ★ 用 `OPENCD_RAW_DIR` 这个**同名** env ⇒ 与 crawl 落进**同一个目录**（人查一处即可）。
+RAW_DIR = os.getenv("OPENCD_RAW_DIR", os.path.join(config.DATA_DIR, "raw_html"))
+
 
 class SiteError(Exception):
     pass
@@ -415,7 +423,13 @@ class MusopiaClient:
     # ---------- 上传 ----------
 
     def upload_torrent(self, torrent_path, fields):
-        """发布新种子，返回 torrent_id 或 None。"""
+        """发布新种子，返回 `(torrent_id 或 None, 消息)`。
+
+        ★ 失败时消息带**机器可读前缀**（`publish.py` 据此分层处置，见 #21）：
+          · `"SITE_DOWN: ..."` = 站点侧问题（HTTP≠200 / 退回登录页）⇒ 调用方应停 + 退避；
+          · `"REJECT: ..."`    = 这条内容被拒（或确定性空壳失败）⇒ 调用方应跳过、发下一条。
+        成功时为 `(id, "ok")`，**不落盘**（成功响应无诊断价值）。
+        """
         if not os.path.exists(torrent_path):
             raise SiteError(f"种子文件不存在: {torrent_path}")
 
@@ -435,8 +449,29 @@ class MusopiaClient:
         if m:
             return m.group(1), "ok"
 
-        err = _extract_error(r.text or "")
-        return None, err or f"未拿到重定向 ID，HTTP {r.status_code}"
+        # ★★ 失败支一律**先落盘再判定**（#19）——否则每次排查都要"人肉 monkey-patch 重跑"
+        #   才能拿到站点的 HTML 快照，而重跑 = 真发种（**不可逆**）。
+        #   对比：`crawl.save_raw()` 早就在做同类事（详情页落 `raw_html/`）——同类机制
+        #   不该两套待遇。落盘失败**绝不**把发布搞崩（见 `_dump_takeupload`）。
+        _dump_takeupload(r.text, torrent_path)
+
+        # ★★ 判据分层（#21 的**唯一来源**）——把"这条坏"与"站点崩"分开，两者处置相反：
+        #   · 站点崩（HTTP≠200 / 退回登录页）⇒ 调用方应**立即停 + 退避**，绝不连打整条队列；
+        #   · 这条坏（站点明确拒了内容，或确定性空壳失败）⇒ 调用方应**跳过它、发下一条**。
+        #   ★ 用**机器可读前缀**承载判据（不改两元组签名 ⇒ 蟹黄堡路径零回归）：
+        #     老消费方看到的仍是"一句话"，新消费方按前缀分流。
+        body = r.text or ""
+        if r.status_code != 200:
+            return None, f"SITE_DOWN: HTTP {r.status_code}"
+        if "takelogin.php" in body or "login.php?returnto" in body:
+            # 与 `check_login()` / `fetch_edit_form()` 同一判据：页面退回登录页 = Cookie 失效
+            return None, "SITE_DOWN: 页面退回登录页（Cookie 已失效，请更新 .env）"
+
+        err = _extract_error(body)
+        if err:
+            return None, f"REJECT: {err}"
+        return None, (f"REJECT: 未拿到重定向 ID，HTTP {r.status_code}"
+                      f"（空壳失败页，响应已落盘：{RAW_DIR}/）")
 
     def download_torrent(self, torrent_id):
         r = self.get("/download.php", params={"id": torrent_id})
@@ -460,6 +495,38 @@ def _parse_torrent_links(html_text):
             continue
         out.append((m.group(1), htmllib.unescape(title).strip()))
     return out
+
+
+def _dump_takeupload(html, torrent_path=None):
+    """
+    把 `takeupload.php` 的**失败响应**落盘，供事后离线分析（★ 关键：**不必重跑**）。
+
+    ★ 为什么必须落盘（#19）：2026-10-04 那条皇后种子每次上传都返回 HTTP 200 +
+    "上传失败！" **空壳页**（`_extract_error()` 抠不出任何文字）。当时排查唯一的取证办法是
+    **人肉 monkey-patch 复现**——而重跑要**真发种**（不可逆）。落盘后即可"发一次、查无数次"。
+    ★ 键用**种子文件名**（`torrent_path` 的 basename）而非 info_hash：
+      `takeupload.php` 表单里**没有** info_hash（站点自己从文件算），而文件名嵌了完整标题、
+      对每条种子唯一 ⇒ 是这里拿得到的最好的稳定键。
+    ★ 原子写（`.tmp` + `os.replace`），与 `crawl.save_raw()` / `daemon.save_state()` 同款；
+      同一键反复失败只留**最后一份**（覆盖，不堆文件）。
+    ★ 落盘失败**绝不**抛出——取证是"锦上添花"，不能反过来把发布搞崩（那才是本末倒置）。
+
+    返回落盘路径；失败返回 None。
+    """
+    try:
+        os.makedirs(RAW_DIR, exist_ok=True)
+        base = os.path.basename(torrent_path or "") or "unknown"
+        # 去掉 .torrent 后缀 + 把路径不安全字符换成 `_`，避免把标题里的 `/` `:` 写进文件名
+        key = re.sub(r"[^0-9A-Za-z一-鿿._-]+", "_", os.path.splitext(base)[0])[:80]
+        p = os.path.join(RAW_DIR, f"{key or 'unknown'}-takeupload.html")
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(html or "")
+        os.replace(tmp, p)                       # 原子替换（同 crawl.save_raw）
+        return p
+    except OSError as e:                          # noqa: BLE001
+        print(f"⚠️  失败响应落盘失败（不影响发布）: {e}")
+        return None
 
 
 def _extract_error(body):
