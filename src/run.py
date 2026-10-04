@@ -387,6 +387,13 @@ def selftest():
          ("site_status", "site_torrent_id")),
         ("TRANSFERABLE_WHERE", "CROSS_SITE_DEDUP_WHERE", "transfer_rule",
          ("site_status", "site_torrent_id", "opencd_tid")),
+        # ★★★ 2026-10-04（#23 蟹黄堡发布队列）：`CRABPT_QUEUE_WHERE` 必须
+        #   以 `TRANSFERABLE_WHERE` **逐字开头**，多出来的尾巴只谈 `status`。
+        #   ★ 为什么是前缀判据而不是又一条 ⑦e-2 式的"逐字相等"：这里**允许**
+        #     追加（`status != 'FAILED'` 正是要加的那条），只要求"加的内容是
+        #     `status`、且不重复前缀里已有条件"—— 这正是 ⑦e 前缀族的设计。
+        ("CRABPT_QUEUE_WHERE", "TRANSFERABLE_WHERE", "status",
+         ("site_status", "site_torrent_id", "transfer_rule")),
     ]
     try:
         import db as _db
@@ -462,6 +469,7 @@ def selftest():
         _literals = [
             "PENDING_PUBLISH_WHERE", "CROSS_SITE_DEDUP_WHERE",
             "QUEEN_PUBLISHED_WHERE", "TRANSFERABLE_WHERE",
+            "CRABPT_QUEUE_WHERE",
             "STALE_CONDITION", "EDIT_RULE_GUARD",
         ]
         import ast as _ast2

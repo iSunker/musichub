@@ -497,7 +497,7 @@ def _parse_torrent_links(html_text):
     return out
 
 
-def _dump_takeupload(html, torrent_path=None):
+def _dump_takeupload(html, torrent_path=None, kind="takeupload"):
     """
     把 `takeupload.php` 的**失败响应**落盘，供事后离线分析（★ 关键：**不必重跑**）。
 
@@ -511,6 +511,12 @@ def _dump_takeupload(html, torrent_path=None):
       同一键反复失败只留**最后一份**（覆盖，不堆文件）。
     ★ 落盘失败**绝不**抛出——取证是"锦上添花"，不能反过来把发布搞崩（那才是本末倒置）。
 
+    ★★ `kind`（2026-10-04 加，#23）：落到哪个站的后缀。**默认 `takeupload`**（乌托邦，保持
+      #19 已上线行为不变）；**蟹黄堡**传 `crabpt-takeupload` ⇒ 落
+      `<名>-crabpt-takeupload.html`。为什么必须区分两站：两个站可能**同名种子**
+      （转种场景极常见：一条从乌托邦转去蟹黄堡）⇒ 用同一后缀会**互相覆盖**，
+      把"乌托邦失败页"和"蟹黄堡失败页"混成一份、取证价值归零。
+
     返回落盘路径；失败返回 None。
     """
     try:
@@ -518,7 +524,7 @@ def _dump_takeupload(html, torrent_path=None):
         base = os.path.basename(torrent_path or "") or "unknown"
         # 去掉 .torrent 后缀 + 把路径不安全字符换成 `_`，避免把标题里的 `/` `:` 写进文件名
         key = re.sub(r"[^0-9A-Za-z一-鿿._-]+", "_", os.path.splitext(base)[0])[:80]
-        p = os.path.join(RAW_DIR, f"{key or 'unknown'}-takeupload.html")
+        p = os.path.join(RAW_DIR, f"{key or 'unknown'}-{kind}.html")
         tmp = p + ".tmp"
         with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(html or "")

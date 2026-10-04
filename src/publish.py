@@ -1393,6 +1393,70 @@ def selftest_publish_failure_classification(verbose=True):
     return (not detail), detail
 
 
+def selftest_crabpt_failure_classification(verbose=True):
+    """断言 `run_crabpt` 按 `SITE_DOWN`/`REJECT`/`UNKNOWN` **分级处置**（#23）。
+    返回 `(是否通过, 明细)`。
+
+    ★ 与 `selftest_publish_failure_classification`（乌托邦那条，#21）**同款镜像**，
+      但对象是 `run_crabpt` 而非 `main`，且**多一个 `UNKNOWN:` 前缀**：
+      蟹黄堡的"HTTP 200 + 无 id + 无报错"**可能是真发成功了**（发布不可逆）
+      ⇒ 那类**不**能当 REJECT 出队（会漏发/发重），必须单列 `UNKNOWN:` 停 + 非 0。
+
+    ★ 判据基于**源码文本**（不是 `_code_only`）—— 理由同乌托邦那条：这里的契约
+      **正是字符串前缀**，`_code_only` 会把它清掉（它专为"查名字"设计）。
+    """
+    src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    tree = _ast.parse(src)
+    fn = next((n for n in _ast.walk(tree)
+               if isinstance(n, _ast.FunctionDef) and n.name == "run_crabpt"), None)
+    if fn is None:
+        return False, ["★ 找不到 run_crabpt —— 函数被改名了？本条自检失效"]
+    lines = src.splitlines()
+    start = fn.lineno - 1
+    end = max((getattr(n, "lineno", start) for n in _ast.walk(fn)), default=start)
+    body = "\n".join(lines[start:end])
+
+    def _scan(text):
+        out = []
+        for pref in ("SITE_DOWN:", "REJECT:", "UNKNOWN:"):
+            if pref not in text:
+                out.append(f"★★ run_crabpt() 里没有 `{pref}` 判定 ⇒ "
+                           f"蟹黄堡失败不再按性质分级（#23 复发）")
+        # ★ 退出码分层：`site_down` 必须出现（它驱动"非 0 + 退避"）。
+        if "site_down" not in text:
+            out.append("★★ run_crabpt() 里没有 `site_down` ⇒ 站点侧/无法判定不再触发退避"
+                       "（Cookie 过期或'可能已发成功'时会继续连打整条队列）")
+        # ★ 坏种子必须被标 FAILED 出队 ⇒ `db.save_task` 这个**动作**必须存在。
+        if "save_task" not in text:
+            out.append("★★ run_crabpt() 里没有 `db.save_task` ⇒ 被明确拒的种子**不出队**，"
+                       "下一轮还在（`ORDER BY updated_at` 让它恒在队首）⇒ 转种队列推不动")
+        return out
+
+    detail = _scan(body)
+
+    # ---------- 阴性对照：抹掉坏种子出队那段，判据必须报红 ----------
+    # ★ 锚点 = run_crabpt 源码里 `save_task` 那些行；全部删掉后**只重扫 run_crabpt 的切片**
+    #   （★ 不能重扫整份文件 —— 会把本自检函数自己源码里的 `save_task` 也扫进来，
+    #    于是阴性对照永远报不出红、自检形同虚设）。
+    if "save_task" not in body:
+        detail.append("✗ 阴性对照的**锚点**没找到（run_crabpt 里 `save_task` 那行已变？）⇒ "
+                      "本条自检失效（锚点漂了 = 没测）")
+    else:
+        bad_body = "\n".join(ln for ln in lines[start:end] if "save_task" not in ln)
+        neg = _scan(bad_body)
+        if not any("save_task" in d for d in neg):
+            detail.append("✗ ★ 阴性对照失败：删掉 `save_task` 那几行后判据**没**报红 "
+                          "⇒ 本条自检是空的")
+
+    if verbose:
+        mark = "✅" if not detail else "❌"
+        print(f"{mark} 蟹黄堡失败分级自检：run_crabpt() 按 SITE_DOWN/REJECT/UNKNOWN 分级、"
+              f"坏种子标 FAILED 出队（含阴性对照）")
+        for d in detail:
+            print(f"    {d}")
+    return (not detail), detail
+
+
 def run_crabpt(args):
     """蟹黄堡（crabpt.vip）发布路径。★ 与 `main()` 的乌托邦路径**并列**，不互相调用。
 
@@ -1716,9 +1780,8 @@ def run_crabpt(args):
         return
 
     # ---- 确认（★ 与 main() 同一处语义：`--yes` 跳过，`--auto` 另查钥匙）----
-    t = valid[0]
     if not args.yes:
-        answer = input(f"\n确认向**蟹黄堡**发布这 1 条吗？(y/N): ").strip().lower()
+        answer = input(f"\n确认向**蟹黄堡**发布这 {len(valid)} 条吗？(y/N): ").strip().lower()
         if answer != "y":
             print("🚫 已取消，未向站点提交任何数据。")
             return
@@ -1736,75 +1799,144 @@ def run_crabpt(args):
             print("=" * 60)
             sys.exit(3)
 
-    # ---- 提交 ----
+    # ---- 提交（#23：**逐条循环** + 失败分级）--------------------------------
     #
-    # ★★ 封面必须在**渲染字段之前**解决 —— `descr` 是提交内容的一部分，
-    #   而封面就写在 `descr` 里（`[img]…[/img]`）。顺序反了就等于没换。
-    #   ★ 而且这里**失败就退出**（不发）：见 `_crabpt_cover` 的 docstring
-    #     —— 两个退路（退回 picgo 的链 / 发一条没封面的）都被用户否掉了。
-    crabpt_cover, cover_why = _crabpt_cover(t)
-    print(f"   · 封面 ← {cover_why}")
-    if not crabpt_cover:
-        sys.exit("❌ 蟹黄堡封面没准备好 ⇒ **拒绝发布**（发布不可逆，宁可少发一条）。\n"
-                 "   ★ 修法：先让这条种子在本地有封面（`python backfill_covers_opencd.py`），\n"
-                 "     或检查 NAS `.env` 里的 `LSKY_TOKEN`（见 ERR-ENV-02）。")
-    # ★ 只覆盖**这一份 task 拷贝**的 `cover_url`，`build_fields` 会用它渲染 `descr`。
-    #   ★ 不改 `build_fields` 的签名 —— "用哪个封面"是**调用方的决定**，
-    #     而它只管渲染（两站共用同一个渲染函数喂不同的 URL，见 PLAN 7b）。
-    #   ★ 也**不**回写 `tasks.cover_url`（那是乌托邦那一份，别顶掉它）。
-    t = dict(t)
-    t["cover_url"] = crabpt_cover
+    # ★★ 为什么改成循环（#23 的**核心**，之前这里是 `t = valid[0]` 只发 1 条）：
+    #   旧行为"只发 1 条、任何失败就 `sys.exit(非0)`" ⇒ daemon 退避 ⇒ **每周期重试同一条**；
+    #   而转种队列 `ORDER BY updated_at`（确定性最老优先）⇒ 坏种子**恒在队首**
+    #   ⇒ 一条坏种子把**整条转种队列永久卡住**（比乌托邦更糟，乌托邦那条顺序是随机的）。
+    #   现在：被站点**明确拒**的种子标 `FAILED`（`CRABPT_QUEUE_WHERE` 不含它 ⇒ 出队）+
+    #   **继续发下一条**；站点侧问题 / 无法判定 ⇒ 立即停 + 非 0（退避）。
+    # ★★ 不改 `--limit` 语义：`valid` 仍是一轮至多 `CRABPT_MAX_PER_CYCLE` 条**候选**，
+    #   本改动只决定"被拒后是否继续遍历**已选的** `valid`"，**不放大**候选集合。
+    ok = rejected = 0
+    site_down = False
+    for t in valid:
+        # ★★ 封面必须在**渲染字段之前**解决 —— `descr` 是提交内容的一部分，
+        #   而封面就写在 `descr` 里（`[img]…[/img]`）。顺序反了就等于没换。
+        #   ★ 封面准备失败是**本地设施**问题（`LSKY_TOKEN` 没配 / 图传不上去），
+        #     不是"这条种子坏" ⇒ **停 + 非 0**（同站点侧），**不**标 FAILED
+        #     （否则会把一整队列好种子误杀成 FAILED）。
+        crabpt_cover, cover_why = _crabpt_cover(t)
+        print(f"   · 封面 ← {cover_why}")
+        if not crabpt_cover:
+            print("🛑 蟹黄堡封面没准备好 ⇒ 停止本轮（不标 FAILED —— 这是本地设施问题）。\n"
+                  "   ★ 修法：先让这条种子在本地有封面（`python backfill_covers_opencd.py`），\n"
+                  "     或检查 NAS `.env` 里的 `LSKY_TOKEN`（见 ERR-ENV-02）。")
+            site_down = True
+            break
+        # ★ 只覆盖**这一份 task 拷贝**的 `cover_url`，`build_fields` 会用它渲染 `descr`。
+        #   ★ 不改 `build_fields` 的签名 —— "用哪个封面"是**调用方的决定**，
+        #     而它只管渲染（两站共用同一个渲染函数喂不同的 URL，见 PLAN 7b）。
+        #   ★ 也**不**回写 `tasks.cover_url`（那是乌托邦那一份，别顶掉它）。
+        t = dict(t)
+        t["cover_url"] = crabpt_cover
 
-    fields = _crabpt_fields(t, args.anonymous)
-    print(f"\n🚀 向蟹黄堡提交：《{t.get('formatted_title')}》")
-    try:
-        tid, msg = client.upload_torrent(t.get("torrent_file"), fields, form_info)
-    except (SiteError, LoginExpired) as e:
-        sys.exit(f"❌ {e}")
+        fields = _crabpt_fields(t, args.anonymous)
+        print(f"\n🚀 向蟹黄堡提交：《{t.get('formatted_title')}》")
+        try:
+            tid, msg = client.upload_torrent(t.get("torrent_file"), fields, form_info)
+        except LoginExpired as e:
+            # ★ Cookie 失效 = 站点/凭据侧 ⇒ 停 + 非 0（退避），**不**推进队列、**不**标 FAILED。
+            print(f"    🛑 登录失效，停止本轮（不标 FAILED，稍后重试）: {e}")
+            site_down = True
+            break
+        except SiteError as e:
+            # ★ 网络/协议层异常（`requests` 抛的那个包装）⇒ 归"这条坏"存疑？
+            #   ★ 判据：`SiteError` 是**本函数/`upload_torrent` 主动 raise** 的
+            #     （种子文件读不出、缺文件…）——是**这条**的问题，与站点无关
+            #     ⇒ 标 FAILED 出队 + 继续下一条（否则一条坏种子文件永远卡队列）。
+            print(f"    ❌ {e}")
+            rejected += 1
+            db.save_task(info_hash=t["info_hash"], status="FAILED",
+                         reason=f"crabpt_publish_failed: {e}")
+            continue
 
-    if not tid:
-        # ★ 说真话的退出码（同 `main()` 末尾那段纪律）：有失败 ⇒ 非 0。
-        #   而且这条路径必须非 0：**站点可能已经建了种子而我们没读到 id**，
-        #   非 0 会让调用方**停下来**而不是"照常重来"。
-        sys.exit(f"❌ 蟹黄堡发布未取得站点 id：{msg}")
+        if not tid:
+            # ★★ 按**机器可读前缀**分流（#23）。三个前缀的处置**相反**，见
+            #   `crabpt_site.upload_torrent` 里那段长注释 —— 尤其 `UNKNOWN:` 与
+            #   乌托邦的空壳页**同名形态、相反处置**（乌托邦那份确实没发上去；
+            #   蟹黄堡这份**可能是真发成功了**）。
+            if msg.startswith("SITE_DOWN:"):
+                print(f"    🛑 蟹黄堡站点侧问题，停止本轮（不标 FAILED）: {msg}")
+                site_down = True
+                break
+            if msg.startswith("UNKNOWN:"):
+                # ★ 绝不标 FAILED、绝不继续：这条**可能已经在站点建好了**
+                #   （发布不可逆）⇒ 停 + 非 0，**要人上站点核对**。
+                #   ★ 复用 `site_down` 通道 ⇒ 退出码非 0（触发退避 + 暴露）。
+                print(f"    ⚠️  {msg}")
+                site_down = True
+                break
+            # 明确 REJECT（`REJECT:` 前缀）：内容被站点拒 ⇒ 标 FAILED 出队
+            #   （`CRABPT_QUEUE_WHERE` 不含 FAILED ⇒ 立刻出队）+ 继续发下一条。
+            if msg.startswith("REJECT:"):
+                print(f"    ❌ 发布被拒（本条标 FAILED 出队，继续下一条）: {msg}")
+                rejected += 1
+                db.save_task(info_hash=t["info_hash"], status="FAILED",
+                             reason=f"crabpt_publish_rejected: {msg}")
+                continue
 
-    print(f"    🎉 已提交，站点 ID = {tid}")
-    # ★★★ 落库：**只写蟹黄堡那一行**，绝不碰 `site_status`/`site_torrent_id`
-    #   （2026-09-25 修 —— 这两列是**乌托邦**的）。
-    #
-    #   ★ 改之前这里调的是 `db.set_site_id(..., site_status="EXISTS")`，
-    #     它写的是 `tasks` 上那**唯一一列** ⇒ 发一条蟹黄堡就等于对乌托邦宣称
-    #     "这条已发过"，于是**四个真实判据**同时被污染（发布队列 / 已发布集合 /
-    #     `run.py` 的 scan 跳过 / 巡检计数）。详见 `db.SITE_PUBLISH_TABLE` 那段。
-    #   ⇒ 现在"发到哪个站"存在**它自己的表**里 `(info_hash, site)`。
-    #
-    #   ★ `cover_url` 也一并落在这里（**每站一份**）：`_crabpt_cover()` 传进来的
-    #     是 Lsky 的链，与乌托邦那份 picgo 的链**互不影响**。
-    db.site_publish_set(t["info_hash"], db.SITE_CRABPT, tid,
-                        cover_url=crabpt_cover or None)
-    # ★ `status` / `reason` 仍走 `save_task`：它们是**本地处理状态**（与站点无关），
-    #   而 `flip_status.py` 的分类判据依赖 `status`。
-    #   ★ 不用 `set_site_id` —— 那会顺手写乌托邦那两列（就是上面刚修掉的 bug）。
-    db.save_task(info_hash=t["info_hash"], status="PUBLISHED",
-                 reason=f"crabpt_published_id:{tid}")
-    db.mark_synced(t["info_hash"])
-    print("    ℹ️  未做（已知缺口，见 PLAN-crabpt.md 附录 D.5）："
-          "technical_info 留空 · 日韩拆不出")
+            # ★ 兜底：**没见过**的前缀 ⇒ 归到"停 + 非 0 + 要人核对"（安全侧）。
+            #   ★ 为什么不 fall-through 当成"这条坏"出队：把一个**未知**失败当坏种子
+            #     标 FAILED 是不可逆的误杀（发布不可逆语境下，未知 ⇒ 要人看）。
+            #     这与 `UNKNOWN:` 同通道（site_down ⇒ 非 0 + 退避）。
+            print(f"    ⚠️  未识别的失败前缀（按'要人核对'处理，不推进队列）: {msg}")
+            site_down = True
+            break
 
-    # ★★ 回加做种（2026-10-02 接线）—— 用**蟹黄堡服务端**那份 .torrent，
-    #   做种路径沿用**乌托邦那条**。逐条理由见 `readd_to_qb_crabpt` 的 docstring。
-    #   ★ 放在 `_crabpt_readback` **之前**：先让做种这件事**有着落**，
-    #     再做字段回读（回读失败不影响发布，但做种失败要尽早可见）。
-    #   ★ 失败**不算阶段失败**（不 `sys.exit`）—— 见该函数 docstring ⑤。
-    if not args.no_readd:
-        readd_to_qb_crabpt(qb, client, t["info_hash"], tid)
+        ok += 1
+        print(f"    🎉 已提交，站点 ID = {tid}")
+        # ★★★ 落库：**只写蟹黄堡那一行**，绝不碰 `site_status`/`site_torrent_id`
+        #   （2026-09-25 修 —— 这两列是**乌托邦**的）。
+        #
+        #   ★ 改之前这里调的是 `db.set_site_id(..., site_status="EXISTS")`，
+        #     它写的是 `tasks` 上那**唯一一列** ⇒ 发一条蟹黄堡就等于对乌托邦宣称
+        #     "这条已发过"，于是**四个真实判据**同时被污染（发布队列 / 已发布集合 /
+        #     `run.py` 的 scan 跳过 / 巡检计数）。详见 `db.SITE_PUBLISH_TABLE` 那段。
+        #   ⇒ 现在"发到哪个站"存在**它自己的表**里 `(info_hash, site)`。
+        #
+        #   ★ `cover_url` 也一并落在这里（**每站一份**）：`_crabpt_cover()` 传进来的
+        #     是 Lsky 的链，与乌托邦那份 picgo 的链**互不影响**。
+        db.site_publish_set(t["info_hash"], db.SITE_CRABPT, tid,
+                            cover_url=crabpt_cover or None)
+        # ★ `status` / `reason` 仍走 `save_task`：它们是**本地处理状态**（与站点无关），
+        #   而 `flip_status.py` 的分类判据依赖 `status`。
+        #   ★ 不用 `set_site_id` —— 那会顺手写乌托邦那两列（就是上面刚修掉的 bug）。
+        db.save_task(info_hash=t["info_hash"], status="PUBLISHED",
+                     reason=f"crabpt_published_id:{tid}")
+        db.mark_synced(t["info_hash"])
+        print("    ℹ️  未做（已知缺口，见 PLAN-crabpt.md 附录 D.5）："
+              "technical_info 留空 · 日韩拆不出")
 
-    _crabpt_readback(client, tid, fields)
-    print("\n★ 下一步（人工）：打开详情页逐字段复核，"
-          "并**顺便把 `takeedit.php?id=%s` 采下来** ——" % tid)
-    print("  那条编辑页是先前采集计划里**唯一**拿不到、"
-          "而现在已经可达的东西（先得自己发过一条）。")
-    print("★ 它同时是回填 `PLAN-crabpt.md` 附录 C.6 的依据。")
+        # ★★ 回加做种（2026-10-02 接线）—— 用**蟹黄堡服务端**那份 .torrent，
+        #   做种路径沿用**乌托邦那条**。逐条理由见 `readd_to_qb_crabpt` 的 docstring。
+        #   ★ 放在 `_crabpt_readback` **之前**：先让做种这件事**有着落**，
+        #     再做字段回读（回读失败不影响发布，但做种失败要尽早可见）。
+        #   ★ 失败**不算阶段失败**（不 `sys.exit`）—— 见该函数 docstring ⑤。
+        if not args.no_readd:
+            readd_to_qb_crabpt(qb, client, t["info_hash"], tid)
+
+        _crabpt_readback(client, tid, fields)
+        print("\n★ 下一步（人工）：打开详情页逐字段复核，"
+              "并**顺便把 `takeedit.php?id=%s` 采下来** ——" % tid)
+        print("  那条编辑页是先前采集计划里**唯一**拿不到、"
+              "而现在已经可达的东西（先得自己发过一条）。")
+        print("★ 它同时是回填 `PLAN-crabpt.md` 附录 C.6 的依据。")
+
+    # ---- 退出码分层（★ 与乌托邦 `main()` 末尾那段**同形**，见 ERR-PUBLISH-03）----
+    if site_down:
+        print("↩️  以非 0 退出：蟹黄堡站点侧/无法判定（已中止本轮），让 daemon 的退避生效")
+        sys.exit(1)
+    if rejected and ok == 0:
+        # ★ 系统性护栏（同 #21）：整轮一条都没成、且全是坏种子 ⇒ **不像**正常损耗，
+        #   更像站点改版/判据误伤（ERR-META-01）⇒ 非 0 让它暴露 + 退避。
+        print(f"↩️  以非 0 退出：{rejected} 条被拒、**无一成功** —— 疑似系统性故障"
+              f"（站点改版/判据误伤），不是「恰好都是坏种子」")
+        sys.exit(1)
+    if rejected:
+        print(f"ℹ️  退出码 0：{rejected} 条坏种子已标 FAILED 出队（队列已推进），"
+              f"其余 {ok} 条成功 ⇒ **不**触发退避")
     return
 
 
@@ -1829,16 +1961,23 @@ def main():
         #     —— 坏种子跳过(REJECT→标FAILED→continue) / 站点崩停止(SITE_DOWN→break)。
         #     它**静默失效**：简化回"统一 continue"照样绿，而坏种子又开始堵队列。
         ok5, _ = selftest_publish_failure_classification()
-        # ★ 五条判据**都要**跑（`and` 而不是 `or`）—— 它们是**独立**的失效模式：
+        # ★★ 第 6 条（2026-10-04 加，#23）：**蟹黄堡** `run_crabpt` 的失败分级结构。
+        #   ★ 独立失效模式：与第 5 条**同族但不同函数** —— 蟹黄堡是**另一条**发布路
+        #     （转种队列、`ORDER BY updated_at` 确定性队首、`UNKNOWN:` 单列）。
+        #     第 5 条**不会**覆盖它（那条只扫 `main`）。简化回"任何失败 sys.exit"
+        #     照样绿，而一条坏种子又把**转种队列**永久卡住（比乌托邦更糟）。
+        ok6, _ = selftest_crabpt_failure_classification()
+        # ★ 六条判据**都要**跑（`and` 而不是 `or`）—— 它们是**独立**的失效模式：
         #   ① 碰了乌托邦的列（"发一条污染四个判据"）
         #   ② 队列取错（"静默多发、不可撤销"）
         #   ③ ★ 队列口径与**解释口径**分叉（"工具告诉你它在队列里、实际不发"
         #      —— 2026-09-28 实测，`--only` 报文与实际筛选互相矛盾）
         #   ④ ★ 回加路里名字用在了绑定之前（"发布成功却永不做种"，`ERR-PUBLISH-02`）
         #   ⑤ ★ 失败不再分级 ⇒ 坏种子堵死队列（#21 复发，静默）
+        #   ⑥ ★ 蟹黄堡那条路同样不再分级 ⇒ 坏种子堵死**转种**队列（#23 复发，静默）
         #   ★ 用 `or` 的话，一条报红时另一条**根本没跑**，而"没跑"与"通过"
         #     在输出上应当长得不一样（`ERR-META-14`：兜底不许冒充真结果）。
-        ok = ok1 and ok2 and ok3 and ok4 and ok5
+        ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6
         # ★★ 必须 `sys.exit`，**不能 `return`** —— `main()` 是被
         #   `if __name__ == "__main__": main()` 调的，那个写法的返回值**会被丢掉**
         #   ⇒ 退出码恒为 0 ⇒ **自检报红也没人看得见**（阴性对照实测踩到这一条）。

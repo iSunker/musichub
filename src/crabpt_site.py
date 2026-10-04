@@ -62,7 +62,7 @@ import opencd
 #     （`ERR-META-03`），而它们**恰恰是排错时唯一能看的东西**。
 #   ★ 方向是单向的（crabpt_site → musopia），不会成环：
 #     `musopia.py` 不 import 本文件，也不 import publish。
-from musopia import SiteError, UA, _extract_error
+from musopia import SiteError, UA, _extract_error, _dump_takeupload
 
 # ==================== 分类 id ====================
 # ★ 音乐 = 408（实测）。★ 必须与 config 同源，不手抄（ERR-META-03）。
@@ -846,23 +846,47 @@ class CrabptClient:
         if tid:
             return tid, "ok"
 
-        # ---- 没拿到 id：先判断这是"坏"还是"可能成了但没读到" ----
-        if r.status_code >= 400:
-            err = _extract_error(r.text or "")
-            return None, (err or f"HTTP {r.status_code}（★ 5xx 也可能发生在"
-                                 f"提交**之后**，请务必去站点核对是否已建）")
+        # ★★ 失败支一律落盘（对称 #19 / 2026-10-04 的 #23）——否则每次排查都要**重发**
+        #   （= 真发种，不可逆）。★ 后缀用 `crabpt-takeupload`：与乌托邦那份**分开**，
+        #   否则转种场景（同一条种子在两站都发）两站失败页会**互相覆盖**（见
+        #   `musopia._dump_takeupload` 的 `kind` 说明）。
+        _dump_takeupload(r.text or "", torrent_path, kind="crabpt-takeupload")
 
-        err = _extract_error(r.text or "")
+        # ---- 分类（#23）：判据由**机器可读前缀**承载，供 `run_crabpt` 分流 ----
+        #   ★★ 三类的处置**相反**，逐条说明（尤其第 3 类与乌托邦**语义相反**）：
+        #     ① `SITE_DOWN:` 站点/凭据侧（HTTP≥400 / 退回登录页）⇒ 调用方**停 + 退避**。
+        #     ② `REJECT:`   站点**明确**拒了内容 ⇒ 调用方**标 FAILED 出队 + 继续下一条**。
+        #        ★ 但见下"盲区"：蟹黄堡 markup 与乌托邦不同，`_extract_error` 大概率
+        #          抠不出蟹黄堡的真错误 ⇒ 本前缀**极少**触发（只在真的抠到错误文字时）。
+        #     ③ `UNKNOWN:`  HTTP 200 + 无 id + 无报错 ⇒ **与乌托邦的空壳页**同为"没文字"，
+        #        但**处置相反**：乌托邦那份**确实没发上去**（判 REJECT 出队）；
+        #        蟹黄堡这份**可能是真发成功了**（本函数 `allow_redirects=True`，
+        #        id 只是没读到）⇒ **不许**当 REJECT（否则漏发/发重），
+        #        判 UNKNOWN ⇒ 调用方**停 + 非 0 + 要人上站点核对**，**不推进队列**。
+        #   ★ 盲区（已实测，`opencdhtml/crabpt-upload-2026-10-04.html`）：蟹黄堡页面 markup
+        #     与乌托邦不同（无 `h1/h2`；`#outer table td.text` 命中的是 `nav_block` 导航块）。
+        #     `_extract_error` 有"<300 字且含 错误/Error/失败"的护栏 ⇒ 对导航块返回 `''`
+        #     （**不会伪造错误**，已验证）。但**真错误页若不用那些 selector 就抠不出来**
+        #     ⇒ 会落进 UNKNOWN（安全侧）。落盘的价值正在这里：下次真失败后据实加宽判据。
+        body = r.text or ""
+        if r.status_code >= 400:
+            return None, (f"SITE_DOWN: HTTP {r.status_code}（★ 5xx 也可能发生在"
+                          f"提交**之后**，请务必去站点核对是否已建）")
+        if "takelogin.php" in body or "login.php?returnto" in body:
+            return None, "SITE_DOWN: 页面退回登录页（Cookie 已失效，请更新 .env）"
+
+        err = _extract_error(body)
         if err:
-            return None, err
+            return None, f"REJECT: {err}"
 
         # ★ 到这里：HTTP 200、页面上没有报错、也没有 details 链接。
         #   这正是 `ERR-SITE-01` 那个"看着正常"的形状 ⇒ **不许说成功**，
         #   但也**不许说失败**（说了失败就会有人重试 ⇒ 发重）。
-        return None, (f"★ 无法判定：HTTP {r.status_code}，既没拿到 details 链接 "
-                      f"也没读出报错（最终 URL {r.url!r}，{len(r.text or '')} 字节）。"
+        #   ⇒ 归 `UNKNOWN:`（调用方停 + 非 0，不推进队列）。
+        return None, (f"UNKNOWN: HTTP {r.status_code}，既没拿到 details 链接 "
+                      f"也没读出报错（最终 URL {r.url!r}，{len(body)} 字节）。"
                       f"⇒ 请**立刻去站点确认这条种子建了没有**，"
-                      f"**不要重跑**（发布不可逆）。")
+                      f"**不要重跑**（发布不可逆）。响应已落盘 `raw_html/*-crabpt-takeupload.html`。")
 
 
 # ==================== 自检（纯离线：零请求、零写库） ====================

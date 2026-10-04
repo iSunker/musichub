@@ -1468,6 +1468,42 @@ TRANSFERABLE_WHERE = (
     " AND transfer_rule = 'ALLOW'"
 )
 
+# ── ★★★ 蟹黄堡**发布**队列口径（2026-10-04 加，#23）──────────────────────────
+#
+#   ★ 为什么必须**另立**常量、不能直接改 `TRANSFERABLE_WHERE`：
+#     `run.py --selftest` ⑦e-2 把 `TRANSFERABLE_WHERE` 的尾巴**逐字**钉成
+#     `"AND transfer_rule = 'ALLOW'"` —— 往里追加 `status != 'FAILED'` 会**当场红**。
+#     （⑦e-2 不是刁难：它防的是"有人在闸门④ 那一层偷偷加条件而不报"。）
+#   ⇒ 于是按本仓库既有的"分叉常量"手法（同 `QUEEN_PUBLISHED_WHERE`）另立一份。
+#
+#   ★★ 为什么**不**复用 `status` 的语义、而要新口径（这才是本常量的存在理由）：
+#     乌托邦的发布队列 `PENDING_PUBLISH_WHERE` **首条件就是 `status='SUCCESS'`**
+#     ⇒ 一旦某条被标 `status='FAILED'`，它**立刻出队**（这是 #21 的关键机制）。
+#     但 `TRANSFERABLE_WHERE` **完全不看 `status`** ⇒ 对蟹黄堡"标 FAILED 出队"
+#     **不成立**（标了它下一轮还在队首，`ORDER BY updated_at` 又让它**总被先选中**
+#     ⇒ 一条坏种子把整条转种队列**永久卡住**，`run_crabpt` 每周期重试同一条）。
+#     ⇒ `CRABPT_QUEUE_WHERE = TRANSFERABLE_WHERE + " AND (status IS NULL OR status != 'FAILED')"`，
+#       让"被确证拒掉的种子"从**发布**队列消失（但它仍是 tasks 里的行，可查、可人工翻案）。
+#
+#   ★★ 为什么是 `(status IS NULL OR status != 'FAILED')` 而不是更短的
+#     `status != 'FAILED'`：**SQL 的三值逻辑**——`NULL != 'FAILED'` 求值为
+#     `NULL`（不是 `TRUE`）⇒ 会把 `status` 为空的行**一并排掉**。而"空 status"
+#     的语义是"还没标过"（**不是**"被拒了"）⇒ 必须与 Python 侧
+#     `(status or '').strip() == 'FAILED'`（`is_transferable_to` 里那条）**等价**。
+#     ★ 这不是理论洁癖：`selftest_crabpt_explain_same_source` 的 fixture 行**没有**
+#       `status` 列值 ⇒ 写成 `status != 'FAILED'` 会让队列排除它、而解释口径放行它
+#       ——两条判据对同一行给出相反答案，**正是那条自检要防的形状**（实测当场报红）。
+#   ★ 逐字写全（**不**引用 `TRANSFERABLE_WHERE`）—— 理由同上面那段：4 处工具靠
+#     `ast.literal_eval` 静态抽常量（`run.py` ⑦e-3）；引用拼接会让它们在**运行时**才炸。
+#     ★ 前缀漂移风险由 ⑦e 兜住：它断言本常量必须以 `TRANSFERABLE_WHERE` **逐字开头**。
+#   ★★ 与 `is_transferable_to()` **必须同源**（选行 / 计数 / 给人看的解释三者口径一致）——
+#     否则重现 2026-09-28 那次"工具说在队列里、实际不会发"的分叉事故（`selftest_crabpt_*`）。
+CRABPT_QUEUE_WHERE = (
+    "site_status = 'EXISTS' AND site_torrent_id IS NOT NULL AND site_torrent_id != ''"
+    " AND transfer_rule = 'ALLOW'"
+    " AND (status IS NULL OR status != 'FAILED')"
+)
+
 
 def is_transferable_to(info_hash, site=SITE_CRABPT):
     """★ **转种判据**：这条能不能从**别的**站转去 `site`。
@@ -1549,6 +1585,21 @@ def is_transferable_to(info_hash, site=SITE_CRABPT):
                            "—— 上游明令**不许再分发**")
         return False, (f"transfer_rule={rule!r} ⇒ 闸门④ 拦下（只有 'ALLOW' 放行）"
                        f"{'（规则为空：没标过）' if not (rule or '').strip() else ''}")
+    # ★★★ 闸门⑤（`CRABPT_QUEUE_WHERE` 的尾巴，2026-10-04 #23）——
+    #   ★ 与 `transferable_to()` 的 SQL 里 `AND (status IS NULL OR status != 'FAILED')`
+    #     **等价**：`get_status()` 对**不存在/NULL** 返 `None` ⇒ `None or ""` ⇒ `""`
+    #     ⇒ `!= "FAILED"` ⇒ **放行**，与 SQL 的 `status IS NULL` 那一支**同判**；
+    #     `""` / `"SUCCESS"` / `"PUBLISHED"` ⇒ 放行；只有**恰好** `"FAILED"` ⇒ 拦。
+    #     ★ 归一化（`.strip()`）是为了与 SQL 里那种"列可能带空格"的写坏数据一致 ——
+    #       两站同一个纪律（见 `transfer_rule` 那段"归一化必须在一处"的说明）。
+    #   ★ 为什么它必须在这里也判：本函数是"给人看的解释"，**必须**与实际选行
+    #     同源 —— 否则会出现"解释器说在队列里、队列实际不选它"的分叉
+    #     （2026-09-28 事故，见本函数 docstring 开头）。
+    #   ★ 报文讲清"是被发布拒了、不是不能转"（`ERR-META-14`：别让两种原因
+    #     压成一句）—— `FAILED` 是**本地的发布结果**，与上游的转载规则无关。
+    if (get_status(info_hash) or "").strip() == "FAILED":
+        return False, ("本地已把这条标 `status='FAILED'`（发布被站点明确拒）⇒ "
+                       "已从蟹黄堡发布队列出队（#23）；如需重发先人工把它改回")
     dst_status = site_status_of(info_hash, site)
     if dst_status is not None:
         # ★★ 这里**必须**区分"记录在但 id 空"（写坏了）与"正常已发"，
@@ -1563,7 +1614,8 @@ def is_transferable_to(info_hash, site=SITE_CRABPT):
 
 
 def transferable_to(site=SITE_CRABPT):
-    """★ 转种队列：**有源（乌托邦已上站）∧ 过闸门④（`ALLOW`）∧ 目标站没有**的行。
+    """★ 转种队列：**有源（乌托邦已上站）∧ 过闸门④（`ALLOW`）∧ 目标站没有** ∧
+    **没被标 `FAILED` 出队**的行。
 
     ★ 返回**完整 task 行**（`TASK_FIELDS`），因为调用方（`publish.py`）
       接着要用它渲染表单 —— 只给 hash 会逼调用方再查一次，
@@ -1571,13 +1623,20 @@ def transferable_to(site=SITE_CRABPT):
 
     ★ 排序：`updated_at` 升序（与 `get_published()` 同口径 —— 老的先转，
       不因为新行插队而永远轮不到）。
+      ★★ 注意这条排序与 `status != 'FAILED'` 的**组合**才是 #23 的要点：
+        没有 `status` 这层，一条坏种子会**恒在队首**（确定性最老优先）而被每周期重试。
 
-    ★★★ 口径 = `TRANSFERABLE_WHERE`，**不是** `CROSS_SITE_DEDUP_WHERE`
-      （2026-09-28 修）。差别只有一条：`transfer_rule = 'ALLOW'`。
-      ★ 为什么这条差别**必须有**（实测，不是推理）：见 `TRANSFERABLE_WHERE`
-        上面那段 —— `15972`（`EXISTS` + `DENY`）原先会被选进队列、
-        被搬到蟹黄堡，而那是**不可逆**的。
-      ★ 为什么**不能**内联这条 WHERE（手写进本函数）：手抄必然与常量漂移，
+    ★★★ 口径 = `CRABPT_QUEUE_WHERE`（2026-10-04 起）。它的前缀 = `TRANSFERABLE_WHERE`
+      （**不是** `CROSS_SITE_DEDUP_WHERE`，2026-09-28 修）。差别逐条：
+      ① 相对 `CROSS_SITE_DEDUP_WHERE`：多一条 `transfer_rule = 'ALLOW'`。
+         ★ 为什么这条差别**必须有**（实测，不是推理）：见 `TRANSFERABLE_WHERE`
+           上面那段 —— `15972`（`EXISTS` + `DENY`）原先会被选进队列、
+           被搬到蟹黄堡，而那是**不可逆**的。
+      ② 相对 `TRANSFERABLE_WHERE`：多一条 `status != 'FAILED'`（#23）。
+         ★ 为什么**必须有**：`run_crabpt` 对"被站点明确拒"的种子标 `status='FAILED'`，
+           指望它出队；而转种口径**原先不看 `status`** ⇒ 标了不出队 ⇒ 队列永久卡住。
+           详见 `CRABPT_QUEUE_WHERE` 上面那段。
+      ★ 为什么**不能**内联这些 WHERE（手写进本函数）：手抄必然与常量漂移，
         那正是 `ERR-META-03` 的形状。⇒ 一律引用常量。
       ★ 为什么**不能**并进 `CROSS_SITE_DEDUP_WHERE`：会把 `publish.py` 里
         那条"应当恒为空"的差集断言变成**恒空**（检测器静默失效）。
@@ -1587,7 +1646,7 @@ def transferable_to(site=SITE_CRABPT):
     cur = conn.cursor()
     cur.execute(
         f"SELECT {TASK_FIELDS} FROM tasks "
-        f" WHERE {TRANSFERABLE_WHERE} "
+        f" WHERE {CRABPT_QUEUE_WHERE} "
         f"   AND info_hash NOT IN "
         f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?) "
         f" ORDER BY updated_at",
@@ -1600,17 +1659,20 @@ def transferable_to(site=SITE_CRABPT):
 
 def count_transferable_to(site=SITE_CRABPT):
     """★ 转种队列的**计数**。★★ 必须与 `transferable_to()` 用**同一个**
-    `TRANSFERABLE_WHERE` 字符串 —— 理由逐字同 `count_stale()` 那段：
+    `CRABPT_QUEUE_WHERE` 字符串 —— 理由逐字同 `count_stale()` 那段：
     一旦探针（计数）和实际筛选漂移，就会变成"探针说有活 → 一条都选不出来 →
     探针还说有活"的**静默空转**，不报任何错。
     ★★★ 2026-09-28：这里原先写的是 `CROSS_SITE_DEDUP_WHERE` —— 那正是
       "探针与实际筛选**口径不同**"的形态（探针数 28，实际该发 27）。
       现在两处**同一个常量**，且该常量就是实际筛选用的那一个。
+    ★★ 2026-10-04（#23）：常量从 `TRANSFERABLE_WHERE` 换成 `CRABPT_QUEUE_WHERE`
+      （多了 `status != 'FAILED'`）—— 与 `transferable_to()` **同一步改**，
+      否则又正好构成上面警告的那个"计数 28 / 实发 27"漂移。
     """
     conn = connect()
     n = conn.execute(
         f"SELECT COUNT(*) FROM tasks "
-        f" WHERE {TRANSFERABLE_WHERE} "
+        f" WHERE {CRABPT_QUEUE_WHERE} "
         f"   AND info_hash NOT IN "
         f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?)",
         (str(site),),
