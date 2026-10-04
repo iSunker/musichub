@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "offline": {
-    "generated_at": "2026-10-04T00:11:54Z",
+    "generated_at": "2026-10-04T00:29:19Z",
     "generator": "tools/gen_counts.py",
     "selftests": {
       "descr.py --selftest": {
@@ -201,7 +201,7 @@
       ".scratch/mut/work/publish.py": 1778,
       ".scratch/verify_cprime.py": 88,
       "CLAUDE.md": 112,
-      "ERRATA.md": 640,
+      "ERRATA.md": 645,
       "PLAN-crabpt.md": 891,
       "README.md": 938,
       "SESSION-NOTES.md": 4924,
@@ -284,7 +284,7 @@
       "x/HANDOFF-20260926.md": 390
     },
     "errata": {
-      "count": 111,
+      "count": 112,
       "ids": [
         "ERR-DATA-01",
         "ERR-DATA-02",
@@ -307,6 +307,7 @@
         "ERR-DOCKER-09",
         "ERR-DOCKER-10",
         "ERR-DOCKER-11",
+        "ERR-DOCKER-12",
         "ERR-ENV-01",
         "ERR-ENV-02",
         "ERR-ENV-03",
@@ -401,36 +402,36 @@
     }
   },
   "online": {
-    "generated_at": "2026-10-04T00:12:01Z",
+    "generated_at": "2026-10-04T00:29:25Z",
     "reachable": true,
     "source_host": "\\\\iSunker-DS423\\docker_ssd\\opencd2others\\data",
     "heartbeat": {
-      "alive": false,
-      "content_epoch": 1791072387,
-      "age_s": 333.4275014400482
+      "alive": true,
+      "content_epoch": 1791073738,
+      "age_s": 27.035052061080933
     },
     "stages": {
       "scan": {
-        "last_run": 1791070585.6651921,
-        "age_s": 2135.597996234894,
+        "last_run": 1791073086.5574398,
+        "age_s": 679.0047388076782,
         "interval_s": 1800,
-        "overdue": true,
+        "overdue": false,
         "disabled": false,
         "last_ok": true,
         "no_progress": null
       },
       "publish": {
-        "last_run": 1791069063.9092877,
-        "age_s": 3657.3539006710052,
+        "last_run": 1791073420.4295828,
+        "age_s": 345.1325957775116,
         "interval_s": 1800,
-        "overdue": true,
+        "overdue": false,
         "disabled": false,
         "last_ok": false,
         "no_progress": null
       },
       "sync": {
         "last_run": 1791031232.584512,
-        "age_s": 41488.678676366806,
+        "age_s": 42532.97766661644,
         "interval_s": 86400,
         "overdue": false,
         "disabled": false,
@@ -439,7 +440,7 @@
       },
       "covers": {
         "last_run": 1791054276.1431825,
-        "age_s": 18445.120005846024,
+        "age_s": 19489.418996095657,
         "interval_s": 21600,
         "overdue": false,
         "disabled": false,
@@ -448,7 +449,7 @@
       },
       "edit": {
         "last_run": 1791054323.7813177,
-        "age_s": 18397.481870651245,
+        "age_s": 19441.78086090088,
         "interval_s": 21600,
         "overdue": false,
         "disabled": false,
@@ -456,8 +457,8 @@
         "no_progress": true
       },
       "crawl": {
-        "last_run": 1791070617.2036064,
-        "age_s": 2104.0595819950104,
+        "last_run": 1791073191.6636949,
+        "age_s": 573.8984837532043,
         "interval_s": 1800,
         "overdue": null,
         "disabled": true,
@@ -466,12 +467,12 @@
       }
     },
     "db": {
-      "total": 1514,
+      "total": 1515,
       "exists": 57,
       "stale": 3,
-      "no_log_file": 974,
+      "no_log_file": 975,
       "success": 480,
-      "max_updated_at": "2026-10-04 00:11:52"
+      "max_updated_at": "2026-10-04 00:17:33"
     },
     "skipped_reason": null
   }

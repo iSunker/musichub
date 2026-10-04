@@ -74,17 +74,43 @@ echo "→ 构建 ${IMAGE_NAME}:latest  (sha tag: ${SHA})"
 #
 # ★ `--push` 与 `--load` 互斥：`--load`（打进本地 image store）会丢掉多 tag，
 #   且我们本来就要推。SKIP_PUSH=1 时才改 `--load` 以便本地验证。
-if [[ "${SKIP_PUSH:-0}" == "1" ]]; then
-  echo "  （SKIP_PUSH=1：只在本机构建，不推）"
-  docker buildx build --platform linux/amd64 \
-    --provenance=false --sbom=false \
-    -t "${IMAGE_NAME}:latest" \
-    --load "$SRC"
+#
+# ★★ 2026-10-04 重要修正：**默认改用经典 `docker build` + `docker push`**，
+#   不再默认走 buildx。原因（实测踩坑）：
+#     Docker Desktop 的 `OverrideProxyHTTP/HTTPS`（settings-store.json）只作用于
+#     **dockerd**（`docker pull` 会走代理，实测 `docker pull alpine` 成功）；
+#     但 **buildx 的 buildkit worker 是 containerd executor、跑在独立网络命名空间**，
+#     它**不读**这个代理 ⇒ `buildx --push` 直连 registry-1.docker.io，撞上被污染
+#     的 DNS 应答（157.240.6.35，Facebook 段），报 `failed to fetch oauth token`。
+#   经典路径的 push 由 **dockerd** 完成 ⇒ 走已配好的代理，与 `docker pull` 同一条网络。
+#   ★ 何时仍要用 buildx：`USE_BUILDX=1`（例如需要多平台/缓存导出）。那时须自行
+#     给 buildkit 配代理（`docker buildx create --driver-opt env.HTTP_PROXY=...`）。
+if [[ "${USE_BUILDX:-0}" == "1" ]]; then
+  # --platform linux/amd64：NAS 是 x86_64（实测 `uname -m`），本机也是 x86_64
+  #   ⇒ 同架构、无需 QEMU。显式写出来是**防止**在别的架构机器上构建出 NAS 跑不了的镜像。
+  # --provenance=false --sbom=false：本机 buildx 默认会产 attestation manifest
+  #   （provenance + SBOM），在 manifest list 里多出 `unknown/unknown` 平台项。
+  #   NAS 是 Docker 24.0.2（较旧），对这类 OCI attestation 索引有兼容问题。
+  echo "  （USE_BUILDX=1：走 buildx）"
+  if [[ "${SKIP_PUSH:-0}" == "1" ]]; then
+    docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
+      -t "${IMAGE_NAME}:latest" --load "$SRC"
+  else
+    docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
+      "${TAGS[@]}" --push "$SRC"
+  fi
 else
-  docker buildx build --platform linux/amd64 \
-    --provenance=false --sbom=false \
-    "${TAGS[@]}" \
-    --push "$SRC"
+  # 经典路径（默认）：build 由 dockerd 做，push 也由 dockerd 做 ⇒ 走 Docker Desktop 代理。
+  #   ★ `--platform linux/amd64` 对经典 builder 也有效（daemon 支持时）。
+  echo "  （经典 docker build + push；如需 buildx 加 USE_BUILDX=1）"
+  docker build --platform linux/amd64 "${TAGS[@]}" "$SRC"
+  if [[ "${SKIP_PUSH:-0}" == "1" ]]; then
+    echo "  （SKIP_PUSH=1：已构建，不推）"
+  else
+    docker push "${IMAGE_NAME}:latest"
+    docker push "${IMAGE_NAME}:${SHA}"
+    [[ -n "$EXTRA_TAG" ]] && docker push "${IMAGE_NAME}:${EXTRA_TAG}"
+  fi
 fi
 
 # ---------- ④ 交付信息 ----------

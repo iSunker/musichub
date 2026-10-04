@@ -494,6 +494,11 @@
 |---|---|
 | **"本机读不到生产配置"⇒ 任何**硬编码的副本**都必然是过期值；而拿过期副本判"该不该动"会给出**看着精确的错结论** | `tools/nas_health.py` 的 `INTERVALS` 硬编码 `"publish": 1800`，而 NAS 真值 `PUBLISH_INTERVAL=5400`。★ 病根**不是"忘了改"**：本机**读不到 NAS 的 `.env`**（deploy.sh 的 NEVER 名单，`ERR-ENV-02`）⇒ 那张表**必然是副本**，它**迟早**会漂 —— 而漂了**不报错**，只是把「★ 超过周期」这条判据按错的比例算（实测 publish 会凭空报到 3 小时）。★ 更深一层：源码 `env_int("PUBLISH_INTERVAL", 1800)` 里那个 `1800` 只是**默认值**，真实生效值在 `.env` ⇒ **"把代码默认值当成部署真值"**是这张表的原始病根（表的注释还写着"判据来源是源码"，看着很有依据）。⇒ 修法：**判据来源换成本机真正拿得到的那个** —— 容器自己落的 `daemon_env.json` 快照（`daemon.ENV_SNAPSHOT_KEYS` 2026-09-27 补上 `RUN_ON_START` + 全部 `*_INTERVAL`），硬编码表**降级为兜底**，且**每次运行都印出数据来源**；快照与兜底不等时**报出来**、不静默取一个。★ 一般化：**判据不可用时，正确的动作是"如实说判不了"，不是"退到一份过期副本"** —— 后者会让整份报告带上一个看不见的系统性偏差（`ERR-META-01`：判据失效比不检测更危险） |
 
+### ERR-DOCKER-12
+| 教训 | 根因 |
+|---|---|
+| **`buildx --push` 与 `docker pull` 走的是\*\*两套网络\*\*—— Docker Desktop 的代理只配给 `dockerd`，buildkit worker 不继承它** | 本机 Docker Desktop `settings-store.json` 里配了 `OverrideProxyHTTP/HTTPS`（实测 `docker pull alpine` 走代理成功 ⇒ **daemon 侧网络通**），但 `docker buildx build --push` 在**最后写 tag 时**报 `failed to fetch oauth token: dial tcp 157.240.6.35:443` —— 那个 IP 正是被 DNS 污染（指向 Facebook 段）的 `auth.docker.io`。★ 根因：buildx 的 **buildkit worker 是 containerd executor、跑在独立网络命名空间**，它**不读** daemon 的代理配置 ⇒ 直连 registry ⇒ 撞污染 IP。★ 修法：**默认改走经典 `docker build` + `docker push`**（push 由 `dockerd` 完成，与 `docker pull` 同一条网络）；需要 buildx 时才显式给 buildkit 配代理（`docker buildx create --driver-opt env.HTTP_PROXY=…`）。★★ 旁证：`--provenance=false --sbom=false` **只**能去掉 attestation 层、**去不掉**这个网络问题；第一次失败的 buildx 已经在远端留下了带 `unknown/unknown` 的 manifest index，而它**并不**阻碍 NAS（Docker 24.0.2）拉取 —— 实测 NAS `docker pull` 正确选中 `amd64` 项、跳过 attestation，所以"attestation 会让旧 Docker 拉不了"是**未证实的担忧**，不是事实。★ 一般化：**"某个代理/配置生效了"要问"对\*\*哪一层\*\*生效"** —— dockerd / buildkitd / 容器内网络是三个不同的网络栈，配一个不等于配全部 |
+
 ### ERR-DOCKER-11
 | 教训 | 根因 |
 |---|---|
