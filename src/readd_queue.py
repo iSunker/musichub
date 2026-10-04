@@ -140,6 +140,18 @@ def enqueue(torrent_bytes, save_path, category, delay_min, note=""):
         "torrent_b64": b64,
         # ★ 试了几次：到点 add 失败时 +1（见 daemon drain）。超过上限就放弃并报警。
         "attempts": 0,
+        # ★★ 2026-10-04（#24）：回加失败后**退避重试**用的字段。
+        #   `next_retry_at` = 下次可以再试的 epoch；**0/缺失 = 立即可试**
+        #   ⇒ **老条目天然兼容**（盘上已有的条目没有这个键，一律当 0 读，见 `pop_due`）。
+        #   ★ 为什么加它：原先失败的条目被 daemon 线程**每 30s** 重试一次，一条**永久性**
+        #     失败（如 qB 对已存在种子的 `Conflict409Error`）会一路刷到 `READD_GIVE_UP`
+        #     （≈2 天）⇒ 日志被这条刷屏、还白敲 qB（2026-10-04 现场：某条 `attempts=39`）。
+        #     ⇒ 失败后写 `next_retry_at`，`pop_due` 只在**到期**时才把它取出。
+        #   ★ 不 bump `QUEUE_VERSION`：**加字段是兼容变更**；bump 会让 `load_queue`
+        #     把整队**丢弃**（见上面 81 行），那才是灾难。
+        "next_retry_at": 0.0,
+        # ★ 首次失败的时刻（epoch），只用于日志/告警里算"卡了多久"。None = 从没失败过。
+        "first_failed_at": None,
     }
 
     q = load_queue()
@@ -166,13 +178,23 @@ def pop_due(now=None):
       取出后要去 qB 做 I/O，可能失败。若"取出即删"，一次网络抖动就**丢**了
       这条待办（种子已上站、却永远不回加 ⇒ 静默不做种）。
       ⇒ 先取出、I/O 成功后再 `ack` 删；失败则原样留在盘上，下轮重试。
+
+    ★★ 2026-10-04（#24）：「到点」现在是**两个都到点** ——
+      `due <= now` **且** `next_retry_at <= now`。
+      · `next_retry_at` = 上次失败后设的退避截止（见 `enqueue` 的字段说明与
+        `daemon._drain_pending_readds` 的失败支）。
+      · ★ 用 `it.get("next_retry_at") or 0` 兜底 ⇒ **缺这个键的老条目当 0 = 立即可试**
+        （向后兼容；否则盘上已有的条目会被永远挡住）。
+      ⇒ 首次回加（从没失败过）不受影响：`next_retry_at` 是 0。
     """
     if now is None:
         now = _now()
     q = load_queue()
     due, rest = [], []
     for it in q["items"]:
-        (due if it.get("due", 0) <= now else rest).append(it)
+        ready = (it.get("due", 0) <= now
+                 and (it.get("next_retry_at") or 0) <= now)
+        (due if ready else rest).append(it)
     return due, rest
 
 

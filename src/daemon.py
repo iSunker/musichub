@@ -718,7 +718,97 @@ def _pending(stage):
 #   即使"别的容器抢先加了"（已知干扰），这里再 add 一次也无害 ⇒ 不额外检测。
 #   见 `readd_queue.py` 模块 docstring 的"已知干扰"。
 READD_MAX_ATTEMPTS = 20          # 每轮最多处理几条（别让一次排空卡住主循环）
-READD_GIVE_UP = 96               # 一条试了这么多次还失败 ⇒ 放弃并报警（≈2 天）
+# ★ 一条试了这么多次还失败 ⇒ 放弃并报警。
+#   ★ 2026-10-04（#24）：加了退避后**到达它的时间不再是"≈2 天"**——
+#     退避封顶 `READD_RETRY_CAP`（6h）后，走完 96 次要很多天。⇒ 这里**不再写死天数**
+#     （那是个会变的量；CLAUDE.md §5：会变的数别写进注释）。
+READD_GIVE_UP = 96
+
+# ★★ 2026-10-04（#24）：`Conflict409Error` 是否判为"已回加成功"。
+#   默认 True（见 `_drain_pending_readds` 里那段长注释的论证：`torrents/add` 对
+#   已在库的种子返回 409）。★ 留一个**逃生门**：万一 409 在本部署里其实是别的
+#   含义，`READD_CONFLICT_IS_SUCCESS=false` 立刻退回"当失败重试"（不改代码、重建容器即可）。
+READD_CONFLICT_IS_SUCCESS = env_bool("READD_CONFLICT_IS_SUCCESS", True)
+
+# ★★ 2026-10-04（#24）：回加失败 → **退避重试**（不再每 30s 刷）。
+#   背景（现场实测）：一条**永久性**失败（qB `torrents/add` 对**已在库**的种子
+#   返回 `Conflict409Error`）被当成"网络抖动"每 30s 重试，刷到 `READD_GIVE_UP`
+#   （≈2 天）才停 ⇒ 日志被这条刷屏（唯一滚动的东西）、还白敲 qB。
+#   ⇒ 失败后按指数退避写 `next_retry_at`（在 `readd_queue.json`），下一次只在
+#     **到期**时才试。⇒ 日志回到"只在状态变化时打印"（见 `_readd_should_log`）。
+#   ★ 上限与主循环阶段退避（`MAX_BACKOFF`）同口径 = 6h。
+READD_RETRY_BASE = env_int("READD_RETRY_BASE", 300)      # 首次失败后最短重试间隔（秒）=5min
+READD_RETRY_CAP = env_int("READD_RETRY_CAP", 21600)      # 退避上限（秒）=6h
+
+
+def _readd_backoff(attempts):
+    """第 `attempts` 次失败后，下次重试要等多少秒。★ 纯函数 ⇒ 可单测。
+
+    5min → 10 → 20 → 40 → 80 → … 封顶 `READD_RETRY_CAP`（6h）。
+    ★ `max(0, attempts-1)` 兜住 attempts<=0（不该发生，但纯函数别炸）。
+    """
+    return min(READD_RETRY_BASE * (2 ** max(0, attempts - 1)), READD_RETRY_CAP)
+
+
+# ★ 里程碑：这些 attempts 值上打一行（斐波那契式稀疏递增）——
+#   首次必打（1），之后越拉越开，直到触顶/放弃。
+READD_LOG_AT = (1, 2, 3, 5, 8, 13, 21, 34, 55, 89)
+
+
+def _readd_should_log(attempts):
+    """这次失败要不要打日志（**去刷屏**的核心判据）。★ 纯函数 ⇒ 可单测。
+
+    · 首次（1）必打；
+    · 里程碑（`READD_LOG_AT`）打；
+    · 退避**触顶**那一次打（`_readd_backoff` 到达上限，之后间隔不再变，属"状态"）；
+    · **其余一律静默** —— `next_retry_at` 已在盘上表达"在等"，同主循环
+      "跳过不 log" 的哲学（见 `daemon.py` 主循环里 947 行那段注释）。
+    """
+    if attempts <= 1:
+        return True
+    if attempts in READD_LOG_AT:
+        return True
+    # 触顶：这一次的退避已是上限、且上一次还没到上限（正好越过界）
+    return (_readd_backoff(attempts) >= READD_RETRY_CAP
+            and _readd_backoff(attempts - 1) < READD_RETRY_CAP)
+
+
+# ★★ 2026-10-04（#24）：**存活摘要行** —— 主循环每 `ALIVE_LOG_EVERY` 秒打**一行**。
+#
+#   起因（现场实测）：所有阶段"未到期"时主循环**故意不打印**（见 stage 循环里
+#   1019 行那段注释）⇒ 日志里唯一滚动的东西是那条 `[readd]` 重试刷屏，
+#   用户 tail 日志时**误判**"容器在反复重启 / daemon 死了"。实测 `RestartCount=0`、
+#   `daemon_state.json.last_skip_at` 每轮都刷新 ⇒ daemon 明明活着，只是**没有存活信号**。
+#
+#   ⇒ 每 `ALIVE_LOG_EVERY`（默认 600s=10min）打**一行**：各阶段的"到期/跳过/上次结果"
+#     （跳过=距上次 xx s < 周期 yy s；跑过=上次 OK + 耗时）。
+#     · **一行**（不是每阶段一行、不是每 tick 一行）⇒ 10min 一行 = 24 行/天，
+#       不会淹没日志，却能让 `tail` 一眼确认"daemon 活着 + 各阶段在什么状态"。
+#     · ★ 这是**人读**的存活信号；**机器读**的存活信号仍是 `beat()` 写的心跳文件
+#       （`healthcheck.py` 只看它）—— 两回事，别混。
+ALIVE_LOG_EVERY = env_int("ALIVE_LOG_EVERY", 600)        # 存活行间隔（秒）
+
+
+def _alive_line(state, stages, now):
+    """拼一行存活摘要。★ 纯函数 ⇒ 可单测（断言含每个阶段名 + 状态）。
+
+    形如：`[存活] 阶段: scan 跳过(距上次 610s<1800s) · publish 上次OK(3.4s) · …`
+    """
+    parts = []
+    for stage in stages:
+        name = stage["name"]
+        st = state.get(name) or {}
+        last = st.get("last_run") or 0
+        if st.get("skip_reason"):
+            parts.append(f"{name} 跳过({st['skip_reason']})")
+        elif last:
+            ok = "OK" if st.get("last_ok") else "FAIL"
+            took = st.get("last_took")
+            took_s = f"{took:.1f}s" if isinstance(took, (int, float)) else "?"
+            parts.append(f"{name} 上次{ok}({took_s})")
+        else:
+            parts.append(f"{name} 未跑过")
+    return "[存活] " + " · ".join(parts)
 
 
 def _drain_pending_readds():
@@ -764,15 +854,48 @@ def _drain_pending_readds():
             done.append(it)
             log(f"✅ [readd] 延迟到点，已回加 qB（{note}）")
         except Exception as e:                                  # noqa: BLE001
+            # ★★★ 2026-10-04（#24）：`Conflict409Error` = qB **已有**该种子 ⇒
+            #   回加**目的已达成**，当**成功**处理（移除 + 记一行），**绝不重试**。
+            #
+            #   ★ 为什么 409 = 成功：qBittorrent WebAPI `torrents/add` 对
+            #     **已在库**的 torrent 返回 **HTTP 409 Conflict**。而本文件
+            #     （717 行）与 `publish.py:409` 两处注释本就声明"`torrents_add`
+            #     对已在 qB 的 infohash 安全（qB 忽略重复）"——409 **正是这句话的
+            #     可观测形态**。⇒ 判成成功与既有契约一致。
+            #   ★ 现场起因：一条永久 409 被当"网络抖动"每 30s 重试（attempts→39），
+            #     刷屏 + 白敲 qB。见 ERR-PUBLISH-05。
+            #
+            #   ★ 判据用**类名**而非 import 具体异常类：本仓库 `qb_client.py` 立了
+            #     规矩「库只在 `build()` 函数体内 import」（ERR-QB-09 族，为了让自检
+            #     注入假库）⇒ 这里**不能** `from qbittorrentapi import Conflict409Error`。
+            #     类名判据（`type(e).__name__`）稳定且不依赖 import 时点。
+            if type(e).__name__ == "Conflict409Error" and READD_CONFLICT_IS_SUCCESS:
+                done.append(it)                                 # 从队列移除（已就绪）
+                # ★ 用 `ℹ️`（不是 `✅`）：409 = "qB 里已有这条 infohash"，
+                #   但**没核实**它在 qB 里的 `state` 是不是 `missingFiles`
+                #   （见 ERR-PUBLISH-03 那次"已上站却没做种"的事故）⇒ 不宣称"成功"，
+                #   只说"视为已回加、出队"。要更硬的判据得回查 `torrents_info`（本轮不做）。
+                log(f"ℹ️  [readd] {note} qB 返回 409（重复）= 视为已回加，移出队列"
+                    f"（★ 未核实 state）")
+                continue
             it["attempts"] = it.get("attempts", 0) + 1
+            if it.get("first_failed_at") is None:
+                it["first_failed_at"] = time.time()
             if it["attempts"] >= READD_GIVE_UP:
                 log(f"❌ [readd] {note} 连续 {it['attempts']} 次回加失败，**放弃**"
                     f"（种子已上站、不会做种，需人工介入）: {type(e).__name__}: {e}")
                 done.append(it)                                 # 从队列移除（放弃）
             else:
+                # ★ 退避：写 `next_retry_at` ⇒ `pop_due` 只在**到期**时才再取出它
+                #   （不再每 30s 重试）。见 `readd_queue.enqueue` 的字段说明。
+                backoff = _readd_backoff(it["attempts"])
+                it["next_retry_at"] = time.time() + backoff
                 failed.append(it)
-                log(f"⚠️  [readd] {note} 回加失败（第 {it['attempts']} 次），下轮重试: "
-                    f"{type(e).__name__}: {e}")
+                # ★ 只在**状态变化**时打印（首次 / 里程碑 / 触顶）——
+                #   否则一条永久失败的条目会把日志刷满（这正是本轮的起因）。
+                if _readd_should_log(it["attempts"]):
+                    log(f"⚠️  [readd] {note} 回加失败（第 {it['attempts']} 次，"
+                        f"{int(backoff)}s 后再试）: {type(e).__name__}: {e}")
 
     # 没在本轮处理的（超过 READD_MAX_ATTEMPTS 的）原样留下
     leftover = due[READD_MAX_ATTEMPTS:]
@@ -888,6 +1011,9 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
     tick = env_int("SCHED_TICK", 30) if tick is None else tick
     stage_timeout = env_int("STAGE_TIMEOUT", 3600) if stage_timeout is None else stage_timeout
     fails = {s["name"]: 0 for s in stages}
+    # ★★ 2026-10-04（#24）：上次打"存活摘要行"的时刻（见 `_alive_line`）。
+    #   ★ 初值 0 ⇒ 启动后**第一轮就**打一行（让人一启动就能看到存活行，不必等 10min）。
+    last_alive_log = 0.0
 
     # ★★★ 启动延迟回加**独立线程**（2026-10-04）——必须在主循环之前起，
     #   这样它一开始就能排空队列，且不受随后任何长 stage（scan/crawl）阻塞。
@@ -1006,6 +1132,15 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
         #   这里再存一次是幂等的（内容相同），不会写坏。
         if skipped:
             save_state(state)
+
+        # ★★ 2026-10-04（#24）：**存活摘要行** —— 每 `ALIVE_LOG_EVERY` 秒打一行。
+        #   ★ 为什么放在这里（循环末尾、所有阶段处理之后）：这一刻 `state` 里
+        #     每个阶段的 `last_skip_at`/`last_ok` 都已是最新 ⇒ 摘要才准。
+        #   ★ 只在**到点**时打（10min 一行），不是每 tick —— 既给了存活信号，
+        #     又不会像原先那条 readd 重试那样把日志刷屏。见 `_alive_line` 的注释。
+        if now - last_alive_log >= ALIVE_LOG_EVERY:
+            log(_alive_line(state, stages, now))
+            last_alive_log = now
 
         # ★ 延迟回加队列排空已移到本轮**开头**（见 `skipped = False` 之后那段注释）：
         #   原在这里（stage 循环之后）⇒ 被 crawl 等长阻塞 stage 拖住。

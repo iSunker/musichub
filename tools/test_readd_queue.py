@@ -166,6 +166,65 @@ def test_version_mismatch_safe():
     check("版本不符当空", q["items"] == [], "★猜了旧格式 ⇒ 可能读出错的东西")
 
 
+# ---------------------------------------------------------------------------
+# ★★ 2026-10-04（#24）：退避字段 `next_retry_at` 的判据
+# ---------------------------------------------------------------------------
+
+def test_enqueue_has_retry_fields():
+    print("[新字段] enqueue 落下 next_retry_at=0 / first_failed_at=None")
+    _reset()
+    RQ.enqueue(b"a", "/a", "X", 15)
+    it = RQ.load_queue()["items"][0]
+    check("next_retry_at 存在且为 0", it.get("next_retry_at") == 0.0,
+          "★缺 next_retry_at ⇒ 老代码路径读 it.get(...) or 0 才能兜住；写侧必须给值")
+    check("first_failed_at 存在且为 None", "first_failed_at" in it and it["first_failed_at"] is None,
+          "first_failed_at 没初始化")
+
+
+def test_pop_due_respects_next_retry():
+    print("[退避] 带 next_retry_at（未来）⇒ 即使 due 已过也不选出")
+    import time
+    now = time.time()
+    _reset()
+    with open(RQ.QUEUE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"version": 1, "items": [
+            # due 已过、但退避到未来 ⇒ **不该**被选出
+            {"infohash": "backoff", "due": now - 10, "next_retry_at": now + 3600,
+             "attempts": 3, "note": "n"},
+        ]}, f)
+    due, rest = RQ.pop_due(now=now)
+    check("退避未到 ⇒ 不选出", len(due) == 0 and len(rest) == 1,
+          "★next_retry_at 未到却被选出 ⇒ 退避失效，又变回每 30s 重试刷屏")
+    # 退避到点（把 now 推到未来）⇒ 该选出
+    due2, _ = RQ.pop_due(now=now + 7200)
+    check("退避到 ⇒ 选出", len(due2) == 1, "退避到点了却没选出")
+
+
+def test_pop_due_backcompat_missing_field():
+    print("[向后兼容] 老条目**没有** next_retry_at ⇒ 只看 due（负向对照）")
+    import time
+    now = time.time()
+    _reset()
+    # ★ 这就是生产盘上那条 attempts=39 的条目形状：**没有** next_retry_at。
+    with open(RQ.QUEUE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"version": 1, "items": [
+            {"infohash": "old", "due": now - 10, "attempts": 39, "note": "n"},
+        ]}, f)
+    due, _ = RQ.pop_due(now=now)
+    check("缺字段的老条目仍被选出", len(due) == 1,
+          "★缺 next_retry_at 被永远挡住 ⇒ 生产上那条坏条目永远出不了队"
+          "（反例：把判据写成 it['next_retry_at'] 而非 .get(...) or 0）")
+    # 且 due 在未来的老条目**不该**被选出（确保没把判据退化成"永远选出"）
+    _reset()
+    with open(RQ.QUEUE_FILE, "w", encoding="utf-8") as f:
+        json.dump({"version": 1, "items": [
+            {"infohash": "old2", "due": now + 3600, "attempts": 0, "note": "n"},
+        ]}, f)
+    due2, _ = RQ.pop_due(now=now)
+    check("缺字段 + due 未到 ⇒ 仍不选出", len(due2) == 0,
+          "★判据被写成了永远选出（把 due 那半也丢了）")
+
+
 def main():
     test_roundtrip()
     test_dedup()
@@ -174,6 +233,9 @@ def main():
     test_ack_removes_done()
     test_corrupt_file_safe()
     test_version_mismatch_safe()
+    test_enqueue_has_retry_fields()
+    test_pop_due_respects_next_retry()
+    test_pop_due_backcompat_missing_field()
     print()
     if FAILS:
         print(f"❌ {len(FAILS)} 项失败：{FAILS}")
