@@ -36,7 +36,7 @@ qBittorrent(:3020, 分类 opencd)
 | **改页面渲染**（标题 / 副标题 / 简介 / 日志 / 曲目） | **页面内容渲染** ← 发布和编辑共用一处，改这里两边同时生效 |
 | **批量改已发布的 250+ 个页面** | **编辑已发布页面** + **更新路线** |
 | 改完代码怎么测 | **改完代码怎么测（Docker）** |
-| **把代码推到 NAS 生产** | **构建与部署（本机构建 → GHCR → NAS pull）** |
+| **把代码推到 NAS 生产** | **构建与部署（本机构建 → Docker Hub → NAS pull）** |
 | 我卡住了（页面没图 / 记录被跳过 / 容器 unhealthy） | **排障** |
 | 搞清调度为什么是单容器 | **为什么是单容器 + 自研调度** |
 | **下一步该做什么** | **当前状态与下一步** |
@@ -74,9 +74,9 @@ opencd2others/                      # NAS 部署目录（compose 就放这里，
    └─ raw_html/                     # 皇后详情页落盘（解析层重放用）
 ```
 
-> ★★ **2026-10-06 起：构建已移到本机**（`bash build-push.sh` → 推 GHCR → NAS 只 `pull`）。
+> ★★ **2026-10-06 起：构建已移到本机**（`bash build-push.sh` → 推 Docker Hub → NAS 只 `pull`）。
 > ⇒ 生产端**不再有** `Dockerfile` / `.dockerignore` / 27 个 `.py` / `tools/`。
-> 镜像从 `ghcr.io/isunker/opencd2others:latest` 拉；`docker compose up` 不再需要 `--build`。
+> 镜像从 `isunker/opencd2others:latest` 拉；`docker compose up` 不再需要 `--build`。
 > 理由：NAS 顶层曾摊着 27 个 `.py`（构建上下文）＋ NAS 出网受限（实测 `registry-1.docker.io`
 > 不可达）⇒ 在 NAS 上构建本就脆弱；本机构建又快又稳，且镜像按 git-sha 打 tag ⇒ **可回滚**。
 
@@ -86,7 +86,7 @@ opencd2others/                      # NAS 部署目录（compose 就放这里，
 ├─ src/                             # ★ 全部源码 .py（本机构建时 COPY src/*.py ./ 进镜像；不落 NAS）
 │                                   #   ★ 镜像内仍是 /app 平铺 ⇒ 容器内的相对 import / 相对 cmd 不受影响
 ├─ Dockerfile / .dockerignore        # ★ 构建定义（只在本机 —— 构建上下文 = 本仓库）
-├─ build-push.sh                     # ★ 本机构建 + 推 GHCR（取代旧的 deploy.sh 同步）
+├─ build-push.sh                     # ★ 本机构建 + 推 Docker Hub（取代旧的 deploy.sh 同步）
 ├─ deploy.sh                         # ⚠️ 已弃用，只保留 NEVER 名单与教训（见文件头）
 ├─ tools/                           # 开发工具：readd.py（回加）/ nas_health.py 巡检 /
 │                                   #   gen_counts.py 生成真值 / build-preflight.sh 构建自检 /
@@ -156,7 +156,7 @@ opencd2others/                      # NAS 部署目录（compose 就放这里，
 
 ## 部署步骤（分阶段，每步可独立验证）
 
-> 前置：NAS 部署目录准备好 compose + `.env` + `data/`（本机构建推 GHCR，见「构建与部署」）。
+> 前置：NAS 部署目录准备好 compose + `.env` + `data/`（本机构建推 Docker Hub，见「构建与部署」）。
 > 本文档举例用 `/volume2/docker_ssd/opencd2others`。首次部署：`cp .env.example .env`，
 > 然后填 `.env`：至少 `QB_PASS`、`MUSOPIA_COOKIE`、`MUSOPIA_PASSKEY`、`PICGO_API_KEY`。
 > **这四个缺失时 `config.py` 会直接终止程序**（不留默认值，见「安全」）。
@@ -210,7 +210,7 @@ docker compose up -d --remove-orphans musopia      # ★ 只点名 musopia，别
 > 会把 compose 文件里**所有**服务一起拉起 —— 包括 `profiles: [tools]` 的一次性
 > `tools` / `once`（它们本是「按需 `run --rm`」的，被 `up` 拉起就成了常驻）。
 > 所以重建常驻容器**一律**写成 `docker compose up -d musopia`。
-> ★ 先 `pull`：镜像在上一步由本机 `build-push.sh` 推到 GHCR，NAS 不 `pull` 拿不到新的。
+> ★ 先 `pull`：镜像在上一步由本机 `build-push.sh` 推到 Docker Hub，NAS 不 `pull` 拿不到新的。
 
 日常新种子流程：`run.py` → `publish.py`（Phase 5 的 daemon 会自动做）。
 
@@ -225,7 +225,7 @@ docker compose up -d --remove-orphans musopia      # ★ 只点名 musopia，别
 | 站点 ID 回填了 | `check_db.py` | 不再有大量 `site_torrent_id` 为空的记录 |
 | 编辑不误伤 | `update_metadata.py 14611 --apply --verify` | 回读校验通过；站点上 `medium/codec/team/tags` **没变** |
 | 容器活着 | `docker compose ps` | `healthy` |
-| 本机镜像已推 GHCR | `docker buildx imagetools inspect ghcr.io/isunker/opencd2others:latest`（本机跑） | 有 amd64 manifest |
+| 本机镜像已推 Docker Hub | `docker buildx imagetools inspect isunker/opencd2others:latest`（本机跑） | 有 amd64 manifest |
 | NAS 跑的是新镜像 | `docker inspect opencd2musopia --format '{{.Image}}'` | 与上面 digest 一致 |
 
 ---
@@ -403,7 +403,7 @@ docker compose ps                 # 看 healthy 状态
 「本机 build + push → NAS pull」：
 
 ```bash
-# ① 本机：构建 + 推 GHCR（会先跑 tools/build-preflight.sh 自检）
+# ① 本机：构建 + 推 Docker Hub（会先跑 tools/build-preflight.sh 自检）
 bash build-push.sh
 
 # ② NAS：拉新镜像 + 重建常驻容器
@@ -427,7 +427,7 @@ docker compose up -d --build      # ❌ 生产端已无 build: 定义，会直�
 
 > **★ 顺序也有讲究**：`pull` 必须跑在**任何** `--profile tools run` **之前**。
 > 三个 service（`musopia` / `tools` / `once`）共用同一个镜像
-> `ghcr.io/isunker/opencd2others:latest`（compose 里 `x-common` 锚点定的），而
+> `isunker/opencd2others:latest`（compose 里 `x-common` 锚点定的），而
 > `docker compose run` **不会自动 pull**（旧模型里是"只在镜像不存在时才 build"）——
 > 镜像没先 `pull` 就直接 `run --rm tools python run.py --recheck`，跑的是**旧代码**，
 > 会白跑一遍还看不出问题（`--recheck` 静默完成，只是结果没变）。
@@ -666,14 +666,14 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 
 ---
 
-## 构建与部署（本机构建 → GHCR → NAS `pull`）
+## 构建与部署（本机构建 → Docker Hub → NAS `pull`）
 
 **2026-10-06 起，构建在本机做**，NAS 只负责拉镜像 + 起容器。旧 `deploy.sh`（SMB 白名单
 同步）**已弃用** —— 生产端不再需要源码，没有"要同步的文件"了。
 
 ### 本机
 ```bash
-bash build-push.sh                 # 构建 + 推 ghcr.io/isunker/opencd2others:latest 与 :<git-sha>
+bash build-push.sh                 # 构建 + 推 isunker/opencd2others:latest 与 :<git-sha>
 bash build-push.sh v1.2            # 额外打一个自定义 tag
 SKIP_PUSH=1 bash build-push.sh     # 只本机构建、不推（本地验证）
 ```
@@ -702,7 +702,7 @@ cd /volume2/docker_ssd/opencd2others
 - ★ **验证跑的是新镜像**（别用"push 过"推"NAS 上生效了"）：
   ```bash
   docker inspect opencd2musopia --format '{{.Image}}'
-  docker buildx imagetools inspect ghcr.io/isunker/opencd2others:latest   # 本机跑，比对 digest
+  docker buildx imagetools inspect isunker/opencd2others:latest   # 本机跑，比对 digest
   ```
 - ★ **回滚**：compose 里 `image:` 换成 `:<上一个 git-sha>` tag 再 `pull && up -d`。
 

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "offline": {
-    "generated_at": "2026-10-03T23:54:52Z",
+    "generated_at": "2026-10-04T00:11:54Z",
     "generator": "tools/gen_counts.py",
     "selftests": {
       "descr.py --selftest": {
@@ -188,7 +188,7 @@
       "dockerfile_copy_py_missing": []
     },
     "line_counts": {
-      ".claude/RULES.md": 124,
+      ".claude/RULES.md": 125,
       ".scratch/mut/db_mut1.py": 1613,
       ".scratch/mut/errata_head.md": 448,
       ".scratch/mut/matrix.py": 98,
@@ -401,27 +401,27 @@
     }
   },
   "online": {
-    "generated_at": "2026-10-03T23:54:59Z",
+    "generated_at": "2026-10-04T00:12:01Z",
     "reachable": true,
     "source_host": "\\\\iSunker-DS423\\docker_ssd\\opencd2others\\data",
     "heartbeat": {
-      "alive": true,
-      "content_epoch": 1791071697,
-      "age_s": 1.581873893737793
+      "alive": false,
+      "content_epoch": 1791072387,
+      "age_s": 333.4275014400482
     },
     "stages": {
       "scan": {
         "last_run": 1791070585.6651921,
-        "age_s": 1113.4694428443909,
+        "age_s": 2135.597996234894,
         "interval_s": 1800,
-        "overdue": false,
+        "overdue": true,
         "disabled": false,
         "last_ok": true,
         "no_progress": null
       },
       "publish": {
         "last_run": 1791069063.9092877,
-        "age_s": 2635.2253472805023,
+        "age_s": 3657.3539006710052,
         "interval_s": 1800,
         "overdue": true,
         "disabled": false,
@@ -430,7 +430,7 @@
       },
       "sync": {
         "last_run": 1791031232.584512,
-        "age_s": 40466.5501229763,
+        "age_s": 41488.678676366806,
         "interval_s": 86400,
         "overdue": false,
         "disabled": false,
@@ -439,7 +439,7 @@
       },
       "covers": {
         "last_run": 1791054276.1431825,
-        "age_s": 17422.99145245552,
+        "age_s": 18445.120005846024,
         "interval_s": 21600,
         "overdue": false,
         "disabled": false,
@@ -448,7 +448,7 @@
       },
       "edit": {
         "last_run": 1791054323.7813177,
-        "age_s": 17375.353317260742,
+        "age_s": 18397.481870651245,
         "interval_s": 21600,
         "overdue": false,
         "disabled": false,
@@ -457,7 +457,7 @@
       },
       "crawl": {
         "last_run": 1791070617.2036064,
-        "age_s": 1081.9310286045074,
+        "age_s": 2104.0595819950104,
         "interval_s": 1800,
         "overdue": null,
         "disabled": true,
@@ -466,12 +466,12 @@
       }
     },
     "db": {
-      "total": 1511,
+      "total": 1514,
       "exists": 57,
       "stale": 3,
-      "no_log_file": 971,
+      "no_log_file": 974,
       "success": 480,
-      "max_updated_at": "2026-10-03 23:11:41"
+      "max_updated_at": "2026-10-04 00:11:52"
     },
     "skipped_reason": null
   }

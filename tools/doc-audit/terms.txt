@@ -10,7 +10,7 @@ iSunker-DS423
 D:\Projects\opencd2others\zhuanzhong
 
 # ---- 容器与镜像 ----
-ghcr.io/isunker/opencd2others
+isunker/opencd2others
 musopia_tools
 musopia_once
 network_mode

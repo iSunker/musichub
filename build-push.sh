@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 # =====================================================================
-# 本机构建 + 推送镜像到 GHCR（取代旧 deploy.sh 的"同步 .py 到 NAS"职责）
+# 本机构建 + 推送镜像到 Docker Hub（取代旧 deploy.sh 的"同步 .py 到 NAS"职责）
 #
 # 为什么改成这样（2026-10-06）：
 #   旧模型：本机 `deploy.sh` 经 SMB 把 27 个 .py 同步到 NAS → **NAS 上**
 #           `docker compose up -d --build`。
 #     · NAS 顶层因此摊着 27 个 .py + tools/ + Dockerfile（构建上下文），难看、易丢；
-#     · NAS 出网受限（实测 `registry-1.docker.io` 不可达）⇒ NAS 上构建拉基础镜像本就脆弱；
+#     · NAS 出网受限（实测 `registry-1.docker.io` 直连不可达）⇒ NAS 上构建拉基础镜像本就脆弱；
 #     · 实测踩过 ERR-DOCKER-09（COPY 吃进 SMB 缓存里的旧文件）—— 根因**只在 NAS 构建时**存在。
-#   新模型：**本机** build → push GHCR → NAS 只 `docker compose pull && up -d`。
+#   新模型：**本机** build → push Docker Hub → NAS 只 `docker compose pull && up -d`。
 #     · NAS 顶层只剩 compose 定义类文件 + data/；
 #     · 构建在有完整 Docker 的本机跑，快且稳；
 #     · 镜像按 git sha 打 tag ⇒ 部署**可回滚**（旧模型只有一个会被就地覆盖的 latest）。
+#
+# ★ 为什么是 Docker Hub（`isunker/opencd2others`，公开库）而不是 GHCR：
+#   本机 Docker Desktop 已配代理（settings-store.json → 192.168.0.7:7894），
+#   实测 `docker pull alpine` 走代理成功 ⇒ 本机对 Docker Hub 可达；
+#   NAS 侧 docker 也已配好代理，能直接 `pull`。公开库 ⇒ NAS **无需 login**。
 #
 # 用法:
 #   bash build-push.sh                 # 构建 + 推 :latest 与 :<git-sha>
@@ -20,15 +25,15 @@
 #   SKIP_PUSH=1 bash build-push.sh     # 只在本机构建（不推），用于本地验证
 #
 # 前置（一次性）:
-#   echo "$GHCR_PAT" | docker login ghcr.io -u iSunker --password-stdin
-#   （PAT 需要 read:packages + write:packages；NAS 端也要登一次，见 README）
+#   docker login -u isunker            # 交互式输入密码 / Access Token（本机 Docker Desktop）
+#   （公开库：NAS 端**不需要** login 就能 pull）
 # =====================================================================
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$SELF_DIR"                                  # 本脚本在仓库根
 
-IMAGE_NAME="ghcr.io/isunker/opencd2others"
+IMAGE_NAME="isunker/opencd2others"
 EXTRA_TAG="${1:-}"
 
 # ---------- 前置检查 ----------
@@ -102,7 +107,7 @@ cat <<'MSG'
     "跑了但没生效"）。
   ★ 验证跑的是新镜像（别用"push 过"推"NAS 上生效了"）：
       /usr/local/bin/docker inspect opencd2musopia --format '{{.Image}}'
-    与 `docker buildx imagetools inspect ghcr.io/isunker/opencd2others:latest` 的 digest 对比。
+    与 `docker buildx imagetools inspect isunker/opencd2others:latest` 的 digest 对比。
   ★ 回滚：把 compose 里的 image 换成 :<上一个 git-sha> tag 再 up -d；
     或 `docker compose pull` 后 `up -d` 指旧 tag。sha tag 是这次改造带来的净收益。
 MSG

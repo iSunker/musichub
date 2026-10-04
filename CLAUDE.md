@@ -27,7 +27,7 @@
     `output_torrents/` / `covers/` / `raw_html/`）。compose 里是 `${STATE_DIR:-./data}:/data`。
   - **不再有** `Dockerfile` / `.dockerignore` / 27 个 `.py` / `tools/` —— 构建已移到本机。
 - **生产端不留 git**：`.git` 只在本机。
-- **代码上生产 = 本机构建 + 推 GHCR + NAS `pull`**，见 §3。
+- **代码上生产 = 本机构建 + 推 Docker Hub + NAS `pull`**，见 §3。
 
 > ★ 生产端目录**不是** git 仓库，**不要**在生产端跑任何 git 命令。
 > ★ 也**不要**在生产端 create/编辑 `.py` —— 那里根本没有 `.py` 了（构建已移到本机）。
@@ -45,15 +45,15 @@
     `.env.example` 里的新键，**必须手工**加到 NAS 那份 `.env`（`ERR-ENV-02`）。
 - `data.db` 是**只读**（`PRAGMA query_only=1`）；**不要** `cp` 生产库到本机当事实源。
 - 单容器：`docker compose up -d` **不带服务名**会带起别的服务 ⇒ 只做
-  `docker compose up -d musopia`（**不再有 `--build`**，镜像从 GHCR 拉）。
+  `docker compose up -d musopia`（**不再有 `--build`**，镜像从 Docker Hub 拉）。
 
 ---
 
 ## 3. 部署与构建纪律
 
-- **布署 = 本机构建 → 推 GHCR → NAS `pull`**（2026-10-06 起）：
+- **布署 = 本机构建 → 推 Docker Hub → NAS `pull`**（2026-10-06 起）：
   1. 本机：`bash build-push.sh`（会先跑 `tools/build-preflight.sh` 自检 COPY 源/行尾，
-     再 buildx 推 `ghcr.io/isunker/opencd2others:latest` + `:<git-sha>`）。
+     再 buildx 推 `isunker/opencd2others:latest` + `:<git-sha>`；公开库）。
   2. NAS：`cd <compose目录> && /usr/local/bin/docker compose pull && \
      /usr/local/bin/docker compose up -d --remove-orphans musopia`（**只 musopia**）。
   - ★ `restart` 跑的是旧镜像，无效；`up -d` 不带 `--build`（没 `build:` 了，只能 pull）。
@@ -61,7 +61,7 @@
   `docker compose run` **不会**自动 pull，会用本地旧镜像（症状同 `ERR-DOCKER-01`）。
 - 验证跑的是**新镜像**（别用"push 过"推"NAS 上生效了"，`ERR-DOCKER-09` 同族）：
   `docker inspect opencd2musopia --format '{{.Image}}'` 与
-  `docker buildx imagetools inspect ghcr.io/isunker/opencd2others:latest` 的 digest 对比。
+  `docker buildx imagetools inspect isunker/opencd2others:latest` 的 digest 对比。
 - **回滚**：compose 里 `image:` 换成 `:<上一个 git-sha>` tag 再 `pull && up -d`
   （sha tag 是本机构建带来的净收益，旧模型只有一个会被就地覆盖的 `latest`）。
 - 验证**镜像里**那份：`docker exec opencd2musopia python <模块> --selftest`。

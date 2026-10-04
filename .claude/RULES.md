@@ -9,7 +9,7 @@
 ### A.1 与 `data/` 平级的（容器定义类，上生产）
 `docker-compose.yml` · `.env` · `.env.example` · `README.md`
 > ★ 2026-10-06：**`Dockerfile` / `.dockerignore` / 27 个 `.py` / `tools/` 不再上生产** ——
-> 构建已移到本机（`bash build-push.sh` → 推 GHCR → NAS `pull`）。生产端只需要
+> 构建已移到本机（`bash build-push.sh` → 推 Docker Hub → NAS `pull`）。生产端只需要
 > "一份 compose + 真凭据 `.env` + 状态 `data/`"就能把镜像跑起来。
 
 ### A.2 进 `data/` 的（容器状态与产物，生产端**只在**这里）
@@ -40,15 +40,16 @@ output_torrents/  covers/  raw_html/
 
 ---
 
-## B. 本机构建 → GHCR → NAS `pull`（旧 `deploy.sh` 已弃用）
+## B. 本机构建 → Docker Hub → NAS `pull`（旧 `deploy.sh` 已弃用）
 
 - 构建入口 = **`bash build-push.sh`**：先跑 `tools/build-preflight.sh`，再
   `docker buildx build --platform linux/amd64 --provenance=false --sbom=false`，
-  推 `ghcr.io/isunker/opencd2others:latest` + `:<git-sha>`。
+  推 `isunker/opencd2others:latest` + `:<git-sha>`。
   - ★ `--provenance=false --sbom=false`：NAS 是 Docker 24.0.2，对 buildx 默认产的
     attestation manifest 有兼容问题（会在 manifest list 里多出 `unknown/unknown`）。
   - ★ `--platform linux/amd64`：NAS 是 x86_64；显式写出防在别的架构机器上构建出跑不了的镜像。
-- 前置（一次性）：本机与 NAS 各 `docker login ghcr.io`（private 镜像）。
+- 前置（一次性）：本机 `docker login -u isunker`（公开库 ⇒ NAS 端**不需要** login）。
+  - ★ Docker Hub 公开库：NAS 只需在其 docker 上配好出网代理即可 `pull`。
 - `NEVER=(...)`（在旧 `deploy.sh` 里，`bash deploy.sh --list-never` 可打印）是
   "生产独有、绝不进镜像"的断言：`.env` + 全部 `data/` 状态。
 - ★ 改了 `Dockerfile` 的 `COPY` 行 / 加了新模块 ⇒ `tools/build-preflight.sh` 会查
@@ -71,7 +72,7 @@ python src/run.py --selftest             # 主自检（含 ⑧ 接线断言）
 python tools/gen_counts.py               # 重生成 counts.json
 python src/opencd.py parse --selftest    # 合并后：模块自检（子命令分布见 README）
 
-bash build-push.sh                       # 本机构建 + 推 GHCR（含前置自检）
+bash build-push.sh                       # 本机构建 + 推 Docker Hub（含前置自检）
 SKIP_PUSH=1 bash build-push.sh           # 只本机构建、不推（本地验证）
 bash tools/build-preflight.sh            # 只跑构建前置自检
 ```
@@ -119,6 +120,6 @@ cd /volume2/docker_ssd/opencd2others
 - [ ] 相关模块 `--selftest` ✅（数量与改动前一致，或**有意**变更并已在注释里说明）
 - [ ] 改了计数相关 ⇒ `python tools/gen_counts.py` 已重跑
 - [ ] 改了 `Dockerfile` 的 `COPY` 行 / 加了新模块 ⇒ `bash tools/build-preflight.sh` 通过
-- [ ] 要上线 ⇒ `bash build-push.sh`（本机构建 + 推 GHCR），NAS 侧 `pull && up -d`
+- [ ] 要上线 ⇒ `bash build-push.sh`（本机构建 + 推 Docker Hub），NAS 侧 `pull && up -d`
 - [ ] 文档同步：`README.md`（行为）/ `ERRATA.md`（教训）/ `SESSION-NOTES.md`（追加）
 - [ ] 没有把凭据 / `data/` 状态 / 备份垃圾带到生产端或 git

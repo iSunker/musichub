@@ -26,13 +26,14 @@ name: opencd2musopia
 #   daemon.py 串行调度天然规避了这两个问题。
 
 x-common: &common
-  # ★★ 2026-10-06：构建**移到本机**（`bash build-push.sh` → 推 GHCR），NAS 只 `pull` + `up -d`。
+  # ★★ 2026-10-06：构建**移到本机**（`bash build-push.sh` → 推 Docker Hub），NAS 只 `pull` + `up -d`。
   #   原先这里是 `build: {context: ., dockerfile: Dockerfile}` —— 那要求 NAS 上
   #   有一份完整的构建上下文（27 个 .py + tools/ + Dockerfile），且 NAS 出网受限
-  #   （实测 `registry-1.docker.io` 不可达）⇒ 构建脆弱。详见 README「部署与构建」。
+  #   （实测 `registry-1.docker.io` 直连不可达，需走代理）⇒ 构建脆弱。详见 README「部署与构建」。
   #   ★ 删掉 build: 之后，NAS 顶层不再需要 .py / tools/ / Dockerfile / .dockerignore。
   #   ★ `.dockerignore` 仍留在**本机**（本机构建的上下文 = 本仓库，凭据排除照旧生效）。
-  image: ghcr.io/isunker/opencd2others:latest
+  #   ★ 公开库 ⇒ NAS 拉取**无需 login**。
+  image: isunker/opencd2others:latest
   # ★ pull_policy: always —— 否则 `up -d` 在本地已有同名 tag 时**不会**去拉新镜像，
   #   于是"push 了但 NAS 跑的是旧的"（症状同 ERR-DOCKER-01）。部署脚本也会显式先 pull。
   pull_policy: always
