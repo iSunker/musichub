@@ -536,7 +536,22 @@ def _dump_takeupload(html, torrent_path=None, kind="takeupload"):
 
 
 def _extract_error(body):
-    """NexusPHP 出错时通常渲染一个 '错误' 页面，把提示抠出来方便排查。"""
+    """NexusPHP 出错时通常渲染一个 '错误' 页面，把提示抠出来方便排查。
+
+    ★★ 2026-10-04（`ERR-SITE-10`）：**加读 `<title>`**。
+      实测乌托邦对某些种子回的是 **HTTP 200 + `<title>…上传失败！…</title>`** 的页面，
+      **正文**（`#outer`）只有导航/账号栏/全站Free横幅、**零错误文本** ⇒ 老实现的
+      四个选择器（`#outer table td.text` / `td.embedded` / `h2` / `h1`）**全部落空**，
+      于是被上层兜底判成"未拿到重定向 ID…（**空壳**失败页）"。⇒ 把"**有名字的失败**"
+      （标题就写着「上传失败」）降级成"**无名空壳**"，白让排查的人以为"站点什么都不说"。
+
+    ★ 判据的**保守之处**（为什么不做成"标题有字就返回"）：只在标题里含**失败/错误**
+      关键词时才取它 —— 否则蟹黄堡那种正常表单页标题（`蟹黄堡 :: 发布`）也会被误当错误。
+      ⇒ 返回的是**标题里的失败字样**（仍拿不到"为什么失败"，但至少不再谎报"空壳"）。
+    ★ 负面副作用已评估：蟹黄堡路径（`crabpt_site.py`）对"HTTP 200 + 无 details 链接"
+      的判据是 **`UNKNOWN`**（**可能真发成功了**，不许当 REJECT）。其**正常**页面标题
+      （`蟹黄堡 :: 发布`，实测）**不含**这些关键词 ⇒ 本改动**不会**把蟹黄堡误判成 REJECT。
+    """
     if not body:
         return ""
     soup = BeautifulSoup(body, "html.parser")
@@ -546,6 +561,11 @@ def _extract_error(body):
             txt = el.get_text(" ", strip=True)
             if txt and len(txt) < 300 and ("错误" in txt or "Error" in txt or "失败" in txt):
                 return txt
+    # ★ 兜底读 `<title>`：只在这里**确定是失败页**时才返回（见 docstring 的保守判据）
+    if soup.title:
+        t = soup.title.get_text(" ", strip=True)
+        if t and len(t) < 300 and ("上传失败" in t or "错误" in t or "Error" in t or "失败" in t):
+            return t
     m = re.search(r"(?:错误|Error)[：:]\s*([^<\n]{4,200})", body)
     return m.group(1).strip() if m else ""
 
