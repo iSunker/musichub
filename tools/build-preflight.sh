@@ -123,11 +123,14 @@ fi
 # ⑧/⑧b 那套判据要 dummy env 才能 import config，这里不重复它的活，
 # 只把"构建前先绿一遍"作为可选步骤（默认关，因为 build-push 会单独提示）。
 if [[ "${PREFLIGHT_SELFTEST:-0}" == "1" ]]; then
-  echo "→ 跑 run.py --selftest（PREFLIGHT_SELFTEST=1）"
-  ( cd "$SRC" && \
-    QB_PASS=x MUSOPIA_COOKIE=x MUSOPIA_PASSKEY=x PICGO_API_KEY=x OPENCD_COOKIE=x \
+  # ★ 入口在 `src/`（2026-10-04 起源码已移进 src/）。★ 不要 `cd "$SRC"` 再跑
+  #   `python run.py` —— 那样会在**仓库根**找 run.py，报 `can't open file`。
+  #   直接跑 `python "$SRC/src/run.py"`：脚本目录（= src/）会自动进 sys.path，
+  #   满足 `run.py` 顶部的裸 `import config`（见 ERR-META-* 的 src/ 迁移记录）。
+  echo "→ 跑 src/run.py --selftest（PREFLIGHT_SELFTEST=1）"
+  QB_PASS=x MUSOPIA_COOKIE=x MUSOPIA_PASSKEY=x PICGO_API_KEY=x OPENCD_COOKIE=x \
     DATA_DIR="$SRC/.scratch/selftest-data" \
-    python run.py --selftest )
+    python "$SRC/src/run.py" --selftest
 fi
 
 if [[ "$fail" -ne 0 ]]; then
