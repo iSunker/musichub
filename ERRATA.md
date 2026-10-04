@@ -494,6 +494,11 @@
 |---|---|
 | **"本机读不到生产配置"⇒ 任何**硬编码的副本**都必然是过期值；而拿过期副本判"该不该动"会给出**看着精确的错结论** | `tools/nas_health.py` 的 `INTERVALS` 硬编码 `"publish": 1800`，而 NAS 真值 `PUBLISH_INTERVAL=5400`。★ 病根**不是"忘了改"**：本机**读不到 NAS 的 `.env`**（deploy.sh 的 NEVER 名单，`ERR-ENV-02`）⇒ 那张表**必然是副本**，它**迟早**会漂 —— 而漂了**不报错**，只是把「★ 超过周期」这条判据按错的比例算（实测 publish 会凭空报到 3 小时）。★ 更深一层：源码 `env_int("PUBLISH_INTERVAL", 1800)` 里那个 `1800` 只是**默认值**，真实生效值在 `.env` ⇒ **"把代码默认值当成部署真值"**是这张表的原始病根（表的注释还写着"判据来源是源码"，看着很有依据）。⇒ 修法：**判据来源换成本机真正拿得到的那个** —— 容器自己落的 `daemon_env.json` 快照（`daemon.ENV_SNAPSHOT_KEYS` 2026-09-27 补上 `RUN_ON_START` + 全部 `*_INTERVAL`），硬编码表**降级为兜底**，且**每次运行都印出数据来源**；快照与兜底不等时**报出来**、不静默取一个。★ 一般化：**判据不可用时，正确的动作是"如实说判不了"，不是"退到一份过期副本"** —— 后者会让整份报告带上一个看不见的系统性偏差（`ERR-META-01`：判据失效比不检测更危险） |
 
+### ERR-DOCKER-13
+| 教训 | 根因 |
+|---|---|
+| **NAS 上 `docker pull :latest` 会静默拉到\*\*旧镜像\*\*——因为它的 `registry-mirrors` 缓存了 `latest` 这个\*\*可变 tag\*\*；改用\*\*不可变 tag（git-sha）或 digest\*\* 才绕过** | 2026-10-04 实测：本机 `docker push` 报 `latest` = `sha256:3bdf027d…`（15 分钟前推的），NAS `pull :latest` 却回 `Status: Image is up to date` 并给出**一小时前**的 `sha256:9328622a…` ⇒ `compose up -d --force-recreate` 起的**仍是旧镜像**（`img=bf74df6b…`），而**所有命令都报成功**。★ 根因：NAS `/etc/docker/daemon.json` 配了 `registry-mirrors`（`docker.m.daocloud.io` / `hub-mirror.c.163.com` / `mirror.ccs.tencentyun.com` 等）—— 国内镜像站**对 `latest` 这类可变 tag 有缓存滞回**（实测滞后约 1 小时），于是"Hub 上是新的、镜像站说 up to date"。★★ **同一个 NAS 上，`pull :<git-sha>` 与 `pull @sha256:…` 都立刻拿到新镜像**（不可变引用绕过 tag 缓存）—— 这就是修法，也是本次"本机推 sha tag"这个设计的**意外回报**。★ 判据链：① **别用"pull 成功/up to date"证明"跑的是新代码"**（与 `ERR-DOCKER-11` 同族：跨机器动作要回读被作用物）—— 要 `docker inspect <c> --format '{{.Image}}'` 对比 Hub 的 digest；② **部署改点名 sha tag**（`image: isunker/opencd2others:<sha>`），别靠 `latest`；③ 该 NAS 的 `registry-mirrors`/`proxies` 是**已配好的既有事实**（用户配的），不要删/改它，绕开即可。★ 一般化：**"可变引用 + 中间缓存"= 静默陈旧**；跨机器交付一律钉不可变版本（`ERR-ENV-03`/`ERR-DOCKER-01` 的同一族） |
+
 ### ERR-DOCKER-12
 | 教训 | 根因 |
 |---|---|

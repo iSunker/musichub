@@ -118,22 +118,28 @@ echo ""
 echo "✓ 构建完成：${IMAGE_NAME}"
 echo "  tags: latest${EXTRA_TAG:+ · $EXTRA_TAG} · ${SHA}"
 echo ""
-cat <<'MSG'
+cat <<MSG
 ────────────────────────────────────────────────────────────
 接下来在 **NAS 上**执行（本机 → NAS 走 SSH，见 README「部署与构建」）：
 
   ssh -p 36688 -i "C:/Users/艾森克/.ssh/id_ed25519" iSunker@192.168.0.7
   cd /volume2/docker_ssd/opencd2others
+  # ★★ 部署**点名本次 sha tag**（不是 latest！）—— NAS 有 registry-mirrors，
+  #    它缓存 latest 这个**可变 tag**（实测滞后约 1 小时）⇒ pull latest 会静默
+  #    拿到旧镜像（命令却回 Status: Image is up to date），而所有命令都报成功。
+  #    不可变引用（:<sha> / @sha256:…）**绕过** 镜像站的 tag 缓存（ERR-DOCKER-13）。
+  sed -i 's#image: ${IMAGE_NAME}:.*#image: ${IMAGE_NAME}:${SHA}#' docker-compose.yml
   /usr/local/bin/docker compose pull
-  /usr/local/bin/docker compose up -d --remove-orphans musopia
+  /usr/local/bin/docker compose up -d --force-recreate --remove-orphans musopia
   /usr/local/bin/docker compose logs --tail=60 opencd2musopia
 
-  ★ 顺序纪律：`pull` 必须在**任何** `--profile tools run` **之前** ——
-    `docker compose run` **不会**自动 pull，会用本地旧镜像（症状同 ERR-DOCKER-01：
+  ★ 顺序纪律：\`pull\` 必须在**任何** \`--profile tools run\` **之前** ——
+    \`docker compose run\` **不会**自动 pull，会用本地旧镜像（症状同 ERR-DOCKER-01：
     "跑了但没生效"）。
-  ★ 验证跑的是新镜像（别用"push 过"推"NAS 上生效了"）：
+  ★★ 验证跑的是新镜像（**别用"pull 成功 / up to date"推"NAS 上生效了"** —— 镜像站
+     会把 latest 报成 up-to-date；见 ERR-DOCKER-13）：
       /usr/local/bin/docker inspect opencd2musopia --format '{{.Image}}'
-    与 `docker buildx imagetools inspect isunker/opencd2others:latest` 的 digest 对比。
-  ★ 回滚：把 compose 里的 image 换成 :<上一个 git-sha> tag 再 up -d；
-    或 `docker compose pull` 后 `up -d` 指旧 tag。sha tag 是这次改造带来的净收益。
+    必须等于本机刚 push 的 image id（本机：docker image inspect ${IMAGE_NAME}:${SHA} --format '{{.Id}}'）。
+  ★ 回滚：把 compose 里的 image 换回上一个 git-sha tag 再 up -d。
+    sha tag 是这次改造带来的净收益（部署一律点名它）。
 MSG

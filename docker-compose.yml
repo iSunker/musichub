@@ -33,6 +33,11 @@ x-common: &common
   #   ★ 删掉 build: 之后，NAS 顶层不再需要 .py / tools/ / Dockerfile / .dockerignore。
   #   ★ `.dockerignore` 仍留在**本机**（本机构建的上下文 = 本仓库，凭据排除照旧生效）。
   #   ★ 公开库 ⇒ NAS 拉取**无需 login**。
+  #   ★★ 2026-10-04（ERR-DOCKER-13）：**部署时把这里改成 `:<git-sha>` tag**，别留 `latest`。
+  #      NAS 的 `registry-mirrors` 会**缓存 `latest` 这个可变 tag**（实测滞后约 1 小时）
+  #      ⇒ `compose pull` 静默拿到旧镜像、还回 "Image is up to date"（看着全成功）。
+  #      不可变引用（`:<sha>` / `@sha256:…`）绕过镜像站 tag 缓存 ⇒ 立刻拿到新镜像。
+  #      ★ 本机 `build-push.sh` 会 push `:latest` + `:<git-sha>`；部署点名后者。
   image: isunker/opencd2others:latest
   # ★ pull_policy: always —— 否则 `up -d` 在本地已有同名 tag 时**不会**去拉新镜像，
   #   于是"push 了但 NAS 跑的是旧的"（症状同 ERR-DOCKER-01）。部署脚本也会显式先 pull。
