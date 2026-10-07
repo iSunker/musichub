@@ -442,11 +442,26 @@ def readd_to_qb(qb, client, info_hash, torrent_id):
                         target_category=config.PUBLISH_CATEGORY,
                         dry_run=(config.HANDOFF_DRY_RUN == "true"))
                     print(f"    🔀 handoff 复制: {_why}")
+                    # ★★★ #134 定论：**数据没就位 ⇒ 绝不回加 3040**。
+                    #   原先这里**丢弃** `_ok` ⇒ 复制失败/半截也照推 ⇒ qB 去
+                    #   `/downloads/<专辑>` 找不到文件 ⇒ progress=0 变下载（实测踩到）。
+                    #   现在据返回值否决：种子已上站（不可逆、改不了），但**能否做种**
+                    #   取决于数据在位；宁可不回加（下一轮可补救），也不推一条假下载。
+                    if not _ok:
+                        print(f"    ❌ handoff 未就位 ⇒ **跳过回加 3040**（避免变成下载）："
+                              f"{_why}")
+                        return
                 else:
                     print("    ⚠️  handoff：拿不到 3020 上的 content_path，"
                           "跳过复制（本条大概率不会做种）")
+                    # ★ 拿不到源路径 ⇒ 无法复制 ⇒ 数据必然不在发种区 ⇒ 同样拒绝回加。
+                    print("    ❌ 无法定位源成品 ⇒ **跳过回加 3040**（避免变成下载）")
+                    return
             except Exception as _e:                              # noqa: BLE001
-                print(f"    ⚠️  handoff 复制失败（不影响发布本身）: {type(_e).__name__}: {_e}")
+                # ★ 复制/核对**抛异常** ⇒ 数据状态未知 ⇒ 保守拒绝回加（宁可漏做种，不可推假下载）。
+                print(f"    ❌ handoff 复制/核对异常 ⇒ **跳过回加 3040**（避免变成下载）: "
+                      f"{type(_e).__name__}: {_e}")
+                return
         else:
             orig = qb.torrents_info(torrent_hashes=info_hash)
             if not orig:
@@ -515,13 +530,23 @@ def readd_to_qb(qb, client, info_hash, torrent_id):
                       f"按 infohash {new_hash[:12]}… 查 state）")
             else:
                 t = got[0]
-                ok = t.state != "missingFiles"
+                # ★★★ #134 定论：判据从 `state != "missingFiles"` **收紧**。
+                #   原先只挡 `missingFiles`，而"变下载"那一族（`stalledDL`/`downloading`/
+                #   `metaDL`/`stoppedDL`/`pausedDL`/`allocating`/`checkingDL`）**都不是**
+                #   `missingFiles` ⇒ 复核**把一条正在下载的假种当成功**（实测：`☆ac8.13f`
+                #   `progress=0 state=stalledDL`，复核却打 ✅）。
+                #   ⇒ 现在明确：**progress<1 或 state 属下载族 ⇒ 报红**（"不会做种"）。
+                _dl_states = {"stalledDL", "downloading", "metaDL", "stoppedDL",
+                              "pausedDL", "allocating", "checkingDL", "forcedDL",
+                              "queuedDL", "missingFiles", "error", "unknown"}
+                prog = float(getattr(t, "progress", 0) or 0)
+                ok = (t.state not in _dl_states) and prog >= 1.0
                 mark = "✅" if ok else "★★"
-                print(f"    {mark} 回加复核：state={t.state}  "
+                print(f"    {mark} 回加复核：state={t.state} progress={prog:.3f} "
                       f"content_path={t.content_path!r}")
                 if not ok:
-                    print("        ★★ 文件没对上 ⇒ **这条种子不会做种**（已上站，不可逆）。"
-                          "见 readd_to_qb 的 docstring。")
+                    print("        ★★ 未在做种（下载族/进度<1）⇒ **这条种子不会做种**"
+                          "（已上站，不可逆）。见 readd_to_qb 的 docstring。")
         except Exception as e:                              # noqa: BLE001
             print(f"    ⚠️  回加复核失败（不影响发布本身）: {type(e).__name__}: {e}")
     except Exception as e:
@@ -632,10 +657,21 @@ def readd_to_qb_crabpt(qb, client, info_hash, torrent_id):
                         target_category=config.CRABPT_PUBLISH_CATEGORY,
                         dry_run=(config.HANDOFF_DRY_RUN == "true"))
                     print(f"    🔀 handoff 复制: {_why}")
+                    # ★★★ #134 定论（同乌托邦路）：数据没就位 ⇒ **绝不回加 3040**。
+                    #   实测病根：蟹黄堡这条 `☆ac8.13f` 在 SSD 发种区**根本没目录**，
+                    #   却被推上 3040 变 `stalledDL`（10 leechers）—— 就是因为这里丢弃了 `_ok`。
+                    if not _ok:
+                        print(f"    ❌ handoff 未就位 ⇒ **跳过回加 3040**（避免变成下载）："
+                              f"{_why}")
+                        return
                 else:
                     print("    ⚠️  handoff：拿不到 3020 上的 content_path，跳过复制")
+                    print("    ❌ 无法定位源成品 ⇒ **跳过回加 3040**（避免变成下载）")
+                    return
             except Exception as _e:                              # noqa: BLE001
-                print(f"    ⚠️  handoff 复制失败（不影响发布本身）: {type(_e).__name__}: {_e}")
+                print(f"    ❌ handoff 复制/核对异常 ⇒ **跳过回加 3040**（避免变成下载）: "
+                      f"{type(_e).__name__}: {_e}")
+                return
         else:
             # ① 做种路径：**乌托邦那条**（= 皇后原种 infohash）的 save_path
             orig = qb.torrents_info(torrent_hashes=info_hash)
@@ -692,11 +728,18 @@ def readd_to_qb_crabpt(qb, client, info_hash, torrent_id):
                       f"（按 infohash {new_hash[:12]}… 查 state）")
             else:
                 t = got[0]
-                ok = t.state != "missingFiles"
+                # ★★★ #134 定论（同乌托邦路）：判据从 `state != "missingFiles"` **收紧**，
+                #   下载族/进度<1 一律报红（原先把 `stalledDL progress=0` 当成功）。
+                _dl_states = {"stalledDL", "downloading", "metaDL", "stoppedDL",
+                              "pausedDL", "allocating", "checkingDL", "forcedDL",
+                              "queuedDL", "missingFiles", "error", "unknown"}
+                prog = float(getattr(t, "progress", 0) or 0)
+                ok = (t.state not in _dl_states) and prog >= 1.0
                 mark = "✅" if ok else "★★"
-                print(f"    {mark} 回加复核：state={t.state}  content_path={t.content_path!r}")
+                print(f"    {mark} 回加复核：state={t.state} progress={prog:.3f} "
+                      f"content_path={t.content_path!r}")
                 if not ok:
-                    print("        ★★ 文件没对上 ⇒ **这条蟹黄堡种子不会做种**"
+                    print("        ★★ 未在做种（下载族/进度<1）⇒ **这条蟹黄堡种子不会做种**"
                           "（已上站，不可逆）。见 readd_to_qb_crabpt 的 docstring。")
         except Exception as e:                              # noqa: BLE001
             print(f"    ⚠️  回加复核失败（不影响发布本身）: {type(e).__name__}: {e}")

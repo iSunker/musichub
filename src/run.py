@@ -914,6 +914,106 @@ def selftest():
                     ok[0] = False
                     detail.append(f"✗ ⑨f `{_want}` 在 daemon.py 里**没有定义** "
                                   f"（接线会 NameError）")
+
+        # ── ⑨h ★★★ #134：数据没就位 ⇒ 绝不回加 3040（两个实测种的病根）──
+        #   ★★ 为什么必须有（本条的全部价值 = **阴性对照**）：
+        #     实测踩到：SSD 发种区**没有** `☆ac8.13f` 目录，任务却推上 3040 变 `stalledDL`；
+        #     `Beyond` 复制与回加并发 ⇒ qB 在**半截数据**上校验 ⇒ progress=1.4% 变下载。
+        #     根因是 `begin_handoff_for_task` 不核对复制结果、调用方丢弃返回值。
+        #   ⇒ 判据：`verify_publish_area_complete` 必须能**逐字节**判"没到位"，
+        #     且 `begin_handoff_for_task` 在**复制不完整**时必须返回 False（拒回加）。
+        _tmp3 = _tf.mkdtemp(prefix="handoff-134-selftest-")
+        _pub_root3 = os.path.join(_tmp3, "publish")
+        _saved_pub3 = _ho.config.PUBLISH_CONTAINER_DIR
+        _saved_handoff3 = _ho.config.ENABLE_HANDOFF
+        _saved_dry3 = _ho.config.HANDOFF_DRY_RUN
+        try:
+            _ho.config.PUBLISH_CONTAINER_DIR = _pub_root3
+            _ho.config.ENABLE_HANDOFF = "true"
+            # ★ 关 dry-run：本节的判据是"复制不完整必须拒回加"，走的是**真实分组逻辑**
+            #   （dry-run 下不落盘、不核对，属另一条分支）。
+            _ho.config.HANDOFF_DRY_RUN = "false"
+            # 源成品（HDD 侧）：两文件
+            _src = os.path.join(_tmp3, "hdd", "AlbumX")
+            os.makedirs(_src)
+            with open(os.path.join(_src, "a.wav"), "wb") as _f:
+                _f.write(b"A" * 1000)
+            with open(os.path.join(_src, "b.cue"), "wb") as _f:
+                _f.write(b"B" * 50)
+
+            # ① 发种区**空**（= `☆ac8.13f` 的实况）⇒ 必须判"未到位"
+            _okc, _whyc = _ho.verify_publish_area_complete(_src, "AlbumX")
+            chk("⑨h 发种区无目录·判未就位（阴性对照）", _okc, False)
+
+            # ② 发种区**半截**（只拷了 1 个文件 / 字节不符）⇒ 必须判"未到位"
+            _dst = os.path.join(_pub_root3, "AlbumX")
+            os.makedirs(_dst)
+            with open(os.path.join(_dst, "a.wav"), "wb") as _f:
+                _f.write(b"A" * 500)                 # ★ 半截：只有 500/1000
+            _okc, _whyc = _ho.verify_publish_area_complete(_src, "AlbumX")
+            chk("⑨h 发种区半截(a.wav 500/1000)·判未就位（阴性对照）", _okc, False)
+
+            # ③ 发种区**完整**（两文件、字节全对）⇒ 判"已就位"
+            with open(os.path.join(_dst, "a.wav"), "wb") as _f:
+                _f.write(b"A" * 1000)
+            with open(os.path.join(_dst, "b.cue"), "wb") as _f:
+                _f.write(b"B" * 50)
+            _okc, _whyc = _ho.verify_publish_area_complete(_src, "AlbumX")
+            chk("⑨h 发种区完整·判已就位", _okc, True)
+
+            # ④ ★★ 关键闸门：复制**不完整**时 `begin_handoff_for_task` 必须返回 False
+            #   —— 这是让 publish 侧"拒绝回加"的依据。
+            #   构造：源存在但发种区被清空 ⇒ 复制会重做……故直接测"源不存在"这一必然失败态。
+            _okb, _whyb = _ho.begin_handoff_for_task(
+                os.path.join(_tmp3, "hdd", "NoSuchAlbum"), "NoSuchAlbum", "feedbeef",
+                source_category="Musopia", target_category="Musopia")
+            chk("⑨h 源不存在·begin_handoff 返回 False（拒回加，阴性对照）", _okb, False)
+
+            # ⑤ 源存在但**只填半截**且已存在（幂等跳过复制）⇒ 核对不过 ⇒ 必须 False
+            _src2 = os.path.join(_tmp3, "hdd", "AlbumY")
+            os.makedirs(_src2)
+            with open(os.path.join(_src2, "x.flac"), "wb") as _f:
+                _f.write(b"X" * 4096)
+            _dst2 = os.path.join(_pub_root3, "AlbumY")
+            os.makedirs(_dst2)
+            with open(os.path.join(_dst2, "x.flac"), "wb") as _f:
+                _f.write(b"X" * 1024)                 # 半截：目录非空 ⇒ copytree 跳过
+            _okb, _whyb = _ho.begin_handoff_for_task(
+                _src2, "AlbumY", "cafebabe",
+                source_category="Musopia", target_category="Musopia")
+            chk("⑨h 半截副本(目录非空,幂等跳过)·begin_handoff 返回 False（阴性对照）",
+                _okb, False)
+        finally:
+            _ho.config.PUBLISH_CONTAINER_DIR = _saved_pub3
+            _ho.config.ENABLE_HANDOFF = _saved_handoff3
+            _ho.config.HANDOFF_DRY_RUN = _saved_dry3
+            _sh.rmtree(_tmp3, ignore_errors=True)
+
+        # ── ⑨i ★★★ #134：回加复核判据必须能对"下载中"报红 ──
+        #   ★★ 为什么：原判据 `state != "missingFiles"` 把 `stalledDL/progress=0`
+        #     （实测的 `☆ac8.13f`）当**成功** ⇒ 静默不做种（`ERR-META-01` 形状）。
+        #   ★ 判据 = **旧的坏写法必须消失**（回归护栏：谁把它改回去就报红）+
+        #     两条路径都接了下载族判断（乌托邦 + 蟹黄堡）。
+        import pathlib as _pl9i
+        _pub_py = _pl9i.Path(__file__).resolve().parent / "publish.py"
+        _pub_src = _pub_py.read_text(encoding="utf-8") if _pub_py.exists() else ""
+        if not _pub_src:
+            ok[0] = False
+            detail.append(f"✗ ⑨i 找不到 publish.py（{_pub_py}）⇒ 判据没测到东西（ERR-META-14）")
+        # 旧坏写法：把"非 missingFiles"当成功（本条回归护栏的核心）
+        if 'ok = t.state != "missingFiles"' in _pub_src:
+            ok[0] = False
+            detail.append("✗ ⑨i publish.py 回加复核**仍是旧判据**"
+                          "（`ok = t.state != \"missingFiles\"`）⇒ 会放过 stalledDL（#134）")
+        # 下载族判据必须两条路径都有（乌托邦 + 蟹黄堡）
+        if _pub_src.count("_dl_states = {") < 2:
+            ok[0] = False
+            detail.append(f"✗ ⑨i 下载族判据 `_dl_states = {{` 出现 "
+                          f"{_pub_src.count('_dl_states = {')} 处（应 ≥2：乌托邦+蟹黄堡两条路）")
+        # progress 门槛必须接上
+        if _pub_src.count("and prog >= 1.0") < 2:
+            ok[0] = False
+            detail.append("✗ ⑨i 回加复核缺少 `progress >= 1.0` 门槛（应两条路径都有）")
     except Exception as e:                                        # noqa: BLE001
         ok[0] = False
         detail.append(f"✗ ⑨ 交棒自检执行失败: {type(e).__name__}: {e}")

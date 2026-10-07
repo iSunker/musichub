@@ -9,7 +9,64 @@
 
 ---
 
-## 2026-10-05（续 13）—— #40 部署上线（合并后代码上 NAS）+ README 危险示例标注
+## 2026-10-07（续 91）—— #134：两个种"文件没传完就被推上 3040 ⇒ 变下载"的根因与修复
+
+> 用户报：`crabpt/details.php?id=217789`、`musopia/details.php?id=20625` 这两个种
+> **在文件传输前就被推到 3040**，导致没做种、没发种、**变成下载**。排查 + 修复 + 重建镜像。
+
+### A. 根因（NAS 实测坐实，**不是推测**）
+
+3040 上两条的实况（`/api/v2/torrents/info`，按 `comment` 字段对上站点 id）：
+
+| 站 | id | 3040 任务 | state | progress | 关键证据 |
+|---|---|---|---|---|---|
+| Musopia | 20625 | `2025.Beyond.真的Beyond II …` | `stoppedDL` | 0.014 | SSD 副本 16:05 **正在拷**（wav mtime 16:12），qB 在同目录**边下边写** |
+| CrabPT | 217789 | `☆ac8.13f` | `stalledDL` | **0** | **SSD 发种区根本没有这个目录**（源 12 文件仍在 HDD `/volume1/video/music/☆ac8.13f`）；10 leechers 真在从本机下载 |
+
+**三处代码缺陷**（见 `ERR-PUBLISH-06`）：
+1. `handoff.begin_handoff_for_task` 复制后**不核对**就返回 True；
+2. `publish.py` 两个回加点**丢弃** `_ok`，照样 `torrents_add(save_path=/downloads)`；
+3. 回加复核判据 `state != "missingFiles"` **放过**下载族（`stalledDL/stoppedDL` 都不是 missingFiles）⇒ 假种被打上 `Musopia`/`CrabPT` 分类 ⇒ **命中交棒白名单** ⇒ 交棒线程会把它当本项目种，够 3 天就"零拷贝交棒"到 3020（二次伤害）。
+
+### B. 修复（三道闸门 + 判据收紧）
+
+- `handoff.verify_publish_area_complete(src, album)`：新增，**逐字节**核对（文件数+总字节），不只看"目录非空"（挡不住"只拷了头几个"）。
+- `handoff.begin_handoff_for_task`：复制不完整 / 源不存在 ⇒ **返回 False**；`enqueue` 增记 `src_path`/`album` 供交棒前复核。
+- `publish.py`（乌托邦 + 蟹黄堡两路）：`_ok=False`、拿不到源 path、或复制抛异常 ⇒ **一律 `return` 跳过回加**（宁可漏做种，不可推假下载）。
+- `handoff.process_one`：交棒前**第四道闸门**——复核 SSD 副本仍在位。
+- `publish.py` 两处回加复核：判据从 `state != "missingFiles"` **收紧**为"不在下载族 **且** progress ≥ 1.0"。
+
+### C. 自检（含阴性对照，已实测能报红）
+
+`python src/run.py --selftest` 新增 ⑨h / ⑨i：
+- ⑨h：发种区**空** / **半截** / **完整** 三态 + `begin_handoff_for_task` 在源缺失、半截副本两态必须返回 False。
+- ⑨i：回归护栏——若 `publish.py` 出现旧写法 `ok = t.state != "missingFiles"` 或缺 `progress >= 1.0` ⇒ **报红**（实测把代码改坏后确实报红 2 项）。
+
+### D. 部署（实测完成）
+
+- 本机 `SKIP_PUSH=1 bash build-push.sh` 构建成功，tag `6628b1c-dirty`（config id `63ebcd9a…`）。
+- **走直传**（免 Docker Hub 登录；NAS 的 `scp` 子系统被关 ⇒ 用 `ssh` 管道传 tar.gz，sha256 比对一致）：
+  `docker save | gzip` → NAS `docker load` → compose 点名 sha tag → `up -d --force-recreate musopia`。
+- **compose 改动**：`pull_policy` 从硬编码 `always` 改为 `${PULL_POLICY:-missing}`。
+  原因：`always` 对**直传**路径**必然报错**（registry 上没有该 sha tag ⇒ `Head .../manifests/…: EOF`）；
+  Hub 路线仍在 `.env` 设 `PULL_POLICY=always`。`image:` 仍点名不可变 sha tag（ERR-DOCKER-13 铁律不变）。
+- **验证**：容器 `Up (healthy)`，`docker inspect … {{.Image}}` = `63ebcd9a…`（= load 的镜像）；
+  容器内 `python run.py --selftest` **通过**（目标环境判据）；`grep` 确认镜像里含
+  `handoff.verify_publish_area_complete` 与 publish 的"跳过回加 3040"分支；
+  启动日志 `ENABLE_HANDOFF=true（dry_run=false）`、handoff 线程已起。
+- 已清理 NAS 上的 `imgtransfer-*.tar.gz` 与 compose 备份。
+
+### E. 遗留（下一步要做，**未做**）
+
+- 3040 上那两条**已被污染的旧任务**仍在：`Beyond`(20625) `stoppedDL` 1.4%、
+  `☆ac8.13f`(217789) `stalledDL` 0。修复只保证**此后**不再产生这类假种，
+  **不会**自动修好这两条 ⇒ 需人工：删 3040 任务（`deleteFiles=false`）→ 确认 SSD 副本
+  已在位（`☆ac8.13f` 需先复制）→ 重新按新逻辑回加/校验。
+- 注意：这两条任务带着 `Musopia`/`CrabPT` 分类 ⇒ **命中交棒白名单**，交棒线程可能会
+  在它们"够 3 天"后把它们当本项目种推走（`☆ac8.13f` 已 `added_on` 较早）。
+  ⇒ 建议先删掉这两条，避免被交棒线程误处理。
+
+
 
 > 承「续 12」。compact 后继续。本机复核 + 修复 + 部署完成。
 

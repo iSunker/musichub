@@ -425,6 +425,40 @@ docker compose up -d --build      # ❌ 生产端已无 build: 定义，会直�
 
 `restart` 后看不到新行为、日志里没有新输出，**九成是这个原因**（或忘了 push / 忘了 pull）。
 
+### ★ 备用部署路线：**直传镜像**（免 Docker Hub 登录）
+
+Hub 路线要本机 `docker login` 一次。**不想登录**时可直传（本机 `save` → NAS `load`）——
+它同时**绕开镜像站的 `latest` tag 缓存滞后**（`ERR-DOCKER-13`），是 Hub 挂掉时的兜底。
+
+```bash
+# ① 本机：构建（不推），并打包成 tar.gz
+SKIP_PUSH=1 bash build-push.sh                     # 产出 tag isunker/opencd2others:<sha>-dirty
+docker save isunker/opencd2others:<sha>-dirty | gzip -1 > /tmp/img.tar.gz
+
+# ② 传到 NAS（★ NAS 的 scp 子系统被关，用 ssh 管道）
+cat /tmp/img.tar.gz | ssh -p 36688 -i "<私钥>" iSunker@192.168.0.7 \
+  "cat > /volume2/docker_ssd/opencd2others/img.tar.gz"
+
+# ③ NAS：载入 + 部署
+cd /volume2/docker_ssd/opencd2others
+gunzip -c img.tar.gz | /usr/local/bin/docker load      # Loaded image: …:<sha>-dirty
+cp docker-compose.yml docker-compose.yml.bak
+sed -i 's#image: isunker/opencd2others:.*#image: isunker/opencd2others:<sha>-dirty#' docker-compose.yml
+# ★ 直传时 pull_policy 必须不是 always，否则 compose 会去 registry 拉这个本地才有的 sha
+#   ⇒ 在 .env 里设 PULL_POLICY=missing（或删掉该行用默认），见 docker-compose.yml 注释。
+/usr/local/bin/docker compose up -d --force-recreate --remove-orphans musopia
+rm -f img.tar.gz
+```
+
+> **★ 判据（别信命令返 "完成"）**：容器真跑的是新镜像 ⇒
+> `docker inspect opencd2musopia --format '{{.Image}}'` 应等于 `docker load` 打出的
+> image id，**且** `docker exec opencd2musopia python run.py --selftest` 通过
+> （后者是**目标环境**的判据，见 `ERR-META-14`：本机全绿≠容器里绿）。
+> ★ `docker save` 后本机 `docker image inspect … --format '{{.Id}}'` 报的是
+> **RepoDigest**（manifest digest），与 `docker load` 报的 config image id **不同**
+> —— 别拿这两个数字比"一致"。
+
+
 > **★ 顺序也有讲究**：`pull` 必须跑在**任何** `--profile tools run` **之前**。
 > 三个 service（`musopia` / `tools` / `once`）共用同一个镜像
 > `isunker/opencd2others:latest`（compose 里 `x-common` 锚点定的），而

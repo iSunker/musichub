@@ -39,9 +39,16 @@ x-common: &common
   #      不可变引用（`:<sha>` / `@sha256:…`）绕过镜像站 tag 缓存 ⇒ 立刻拿到新镜像。
   #      ★ 本机 `build-push.sh` 会 push `:latest` + `:<git-sha>`；部署点名后者。
   image: isunker/opencd2others:latest
-  # ★ pull_policy: always —— 否则 `up -d` 在本地已有同名 tag 时**不会**去拉新镜像，
-  #   于是"push 了但 NAS 跑的是旧的"（症状同 ERR-DOCKER-01）。部署脚本也会显式先 pull。
-  pull_policy: always
+  # ★★ pull_policy 可配置（2026-10-07 #134 直传部署）：
+  #   · 需要**走 Docker Hub**（`build-push.sh` 推 → NAS `pull`）⇒ 在 `.env` 里设
+  #     `PULL_POLICY=always`（必须总是拉，否则本地已有同名 tag 时 `up -d` 不会去拉，
+  #     症状同 ERR-DOCKER-01："push 了但 NAS 跑的是旧的"）。
+  #   · 走**直传**（本机 `docker save` → NAS `docker load`，免登录、绕开镜像站 tag 缓存）
+  #     ⇒ 留默认 `missing`（本地已有该 sha tag 就直接用，**不去 registry 拉**）。
+  #     旧的硬编码 `always` 会让直传路径**必然报错**（registry 上根本没这个 sha tag
+  #     ⇒ `Head .../manifests/<sha>: EOF`）。
+  #   ★ 部署点名**不可变 sha tag** 仍是铁律（ERR-DOCKER-13）——两种策略都遵守。
+  pull_policy: ${PULL_POLICY:-missing}
   env_file: .env
   environment: &common-env
     # 状态目录统一指向 /data（下面 bind mount 过来的宿主机目录）

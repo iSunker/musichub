@@ -93,13 +93,15 @@ def save_queue(q):
 
 
 def enqueue(info_hash, name, save_path, target_save_path, note="", state="PENDING",
-            category="", target_category=""):
+            category="", target_category="", src_path="", album=""):
     """把一条待交棒的种写进队列。**幂等**（同 infohash 已在 ⇒ 直接返回 True）。
 
     ★ 本步**不复制数据** —— 复制是发种前的事（见 `copy_to_publish_area`），
       交棒本身是零拷贝。这里只记"这条种到了 3020 该落在哪个 save_path"。
     ★★ `category` = 该种在 **3040** 上的分类（隔离判据的来源，见 `is_own_project`）；
       `target_category` = 交棒到 **3020** 后打哪个分类（★ 只能是白名单之一）。
+    ★ `src_path`/`album` = 成品 HDD 源与专辑名；交棒前用它复核"SSD 副本还在不在"
+      （`verify_publish_area_complete`，#134）。★ 加字段是**兼容变更**，不 bump 版本。
     """
     item = {
         "infohash": info_hash,
@@ -108,6 +110,8 @@ def enqueue(info_hash, name, save_path, target_save_path, note="", state="PENDIN
         "target_save_path": target_save_path,  # 3020 上的路径（HDD 原文件）
         "category": category,                   # ★ 3040 上的分类（隔离判据）
         "target_category": target_category,     # ★ 3020 上要打的分类（白名单之一）
+        "src_path": src_path,                   # ★ HDD 源（复核 SSD 副本用）
+        "album": album,                         # ★ 专辑名（复核 SSD 副本用）
         "note": note,
         "state": state,                         # PENDING / PUBLISHING / ROUTING /
                                                 # HANDOFF_ADDED / HANDOFF_RECHECK /
@@ -216,6 +220,58 @@ def copy_to_publish_area(src_path, album_name, dry_run=True):
     return dst
 
 
+def _dir_total_bytes(path):
+    """递归求目录（或单文件）的字节总数；出错/不存在 ⇒ 返回 -1（当作"算不出来"）。"""
+    try:
+        if os.path.isfile(path):
+            return os.path.getsize(path)
+        if not os.path.isdir(path):
+            return -1
+        total = 0
+        for root, _dirs, files in os.walk(path):
+            for fn in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, fn))
+                except OSError:
+                    return -1
+        return total
+    except OSError:
+        return -1
+
+
+def verify_publish_area_complete(src_path, album_name):
+    """★★★ 判据：`src_path`(HDD 源) 是否**逐字节**已复制到发种区 `<PUBLISH_CONTAINER_DIR>/<专辑>`。
+
+    ★★ 为什么必须有这一步（2026-10-07 #134 实测踩到，**这就是那两个种的病根**）：
+      原先 `begin_handoff_for_task` 复制完就 `return True`，**从不核对**复制结果；
+      调用方（`publish.py`）又**丢弃**了它的返回值 ⇒ 复制**失败/半截**时照样把任务
+      推进 3040 ⇒ qB 去 `<save_path>/<album>` 找不到文件 ⇒ **progress=0 变下载**
+      （实测：`☆ac8.13f` 在 SSD 发种区**根本没有目录**，3040 上却是 `stalledDL`、10 leechers）。
+    ★ 判据 = **文件数相同 且 总字节相同**（而非只看"目录存在/非空"）——
+      "非空"挡不住"只拷了头几个文件"，而正是那种半截状态让 qB 校验失败变下载。
+    ★ 返回 `(是否完整, 说明)`。`src_path` 不存在 ⇒ `(False, …)`（**绝不当成"没得比"而放行**）。
+    """
+    if not os.path.exists(src_path):
+        return False, f"源成品不存在: {src_path}"
+    if not os.path.isdir(src_path):
+        # 单文件源：比文件字节
+        dst_file = os.path.join(publish_target_dir(album_name), os.path.basename(src_path))
+        src_sz, dst_sz = _dir_total_bytes(src_path), _dir_total_bytes(dst_file)
+        if src_sz >= 0 and src_sz == dst_sz:
+            return True, f"单文件已就位（{src_sz} 字节）"
+        return False, f"单文件未就位（源 {src_sz} / 发种区 {dst_sz} 字节）"
+    dst = publish_target_dir(album_name)
+    if not os.path.isdir(dst):
+        return False, f"发种区目录不存在: {dst}"
+    src_bytes, dst_bytes = _dir_total_bytes(src_path), _dir_total_bytes(dst)
+    if src_bytes < 0 or dst_bytes < 0:
+        return False, f"无法统计字节（源 {src_bytes} / 发种区 {dst_bytes}）"
+    if src_bytes != dst_bytes:
+        return False, (f"字节不符（源 {src_bytes} / 发种区 {dst_bytes}，"
+                       f"差 {src_bytes - dst_bytes}）⇒ 复制未完成")
+    return True, f"已逐字节就位（{src_bytes} 字节）"
+
+
 def begin_handoff_for_task(src_path, album_name, info_hash, task=None,
                            source_category="", target_category="",
                            dry_run=None):
@@ -223,12 +279,19 @@ def begin_handoff_for_task(src_path, album_name, info_hash, task=None,
 
     这一步把用户要的「数据复制要由本项目代码自动化完成」接进发布流：
         ① 复制 `src_path`(HDD 原文件) → `<PUBLISH_CONTAINER_DIR>/<专辑>`（3040 看得见）；
-        ② 把这条种写进交棒队列，记下 3040 分类 / 3020 目标分类 / 目标 save_path。
+        ② **★ 核对复制确实完整**（`verify_publish_area_complete`，逐字节）；
+        ③ 把这条种写进交棒队列，记下 3040 分类 / 3020 目标分类 / 目标 save_path。
 
     ★★ 只在 `ENABLE_HANDOFF=true` 时做（**默认关** ⇒ 老行为一字不改，ERR-ENV-02）。
     ★★ 幂等：已在队列（同 infohash）⇒ 直接返回（不重复复制/入队）。
     ★ `task` 是 publish 侧的 task dict（可选，用于备注名）。
-    ★ 返回 `(成功, 说明)`。**绝不 raise**（发布主流程不能被它带崩）。
+    ★★★ 返回 `(成功, 说明)`。**成功 = 数据确已就位**（复制完成 + 逐字节核对通过）。
+      ⇒ 调用方（`publish.py`）**必须**据返回值决定要不要回加：
+        `False` ⇒ **绝不能**把任务推进 3040（否则必变下载，见 `verify_publish_area_complete`）。
+      ★ 原先本函数"复制没抛异常就返回 True"、调用方又丢弃返回值 ⇒ 半截/失败也照推
+        （#134 实测的病根）。
+    ★ `dry_run=True` ⇒ 只报"要复制什么到哪"，**不落盘也不核对**（返回 True，别在演练里误拦）。
+    ★ **绝不 raise**（发布主流程不能被它带崩）。
     """
     if str(config.ENABLE_HANDOFF).strip().lower() not in ("1", "true", "yes", "y", "on"):
         return False, "ENABLE_HANDOFF 未开（跳过复制+入队）"
@@ -237,6 +300,13 @@ def begin_handoff_for_task(src_path, album_name, info_hash, task=None,
         ssd_dir = copy_to_publish_area(src_path, album_name, dry_run=dry)
     except Exception as e:                                        # noqa: BLE001
         return False, f"复制到发种区失败: {type(e).__name__}: {e}"
+    if dry:
+        # ★ dry-run 不落盘 ⇒ 无可核对；如实说明，返回 True 以免演练里假拦（闸门才是有意义的演练对象）。
+        return True, f"[dry-run] 将复制 {src_path} → {ssd_dir} 并入队（未核对）"
+    # ★★ 关键闸门：数据没逐字节就位 ⇒ 不返回成功（调用方据此**拒绝回加**）。
+    ok_copy, why_copy = verify_publish_area_complete(src_path, album_name)
+    if not ok_copy:
+        return False, f"发种区数据未就位，拒绝回加: {why_copy}"
     # ★ 目标 save_path = 3020 的父目录（HDD 原文件所在）= config.HANDOFF_TARGET_SAVE_ROOT
     target_save = config.HANDOFF_TARGET_SAVE_ROOT
     # ★ 目标分类：默认沿用来源分类（乌托邦→Musopia / 蟹黄堡→CrabPT），须在白名单内。
@@ -244,8 +314,9 @@ def begin_handoff_for_task(src_path, album_name, info_hash, task=None,
     name = (task or {}).get("formatted_title") or album_name
     ok = enqueue(info_hash, name, ssd_dir, target_save,
                  note="auto from publish", category=source_category,
-                 target_category=tcat)
-    return ok, f"已复制到 {ssd_dir} 并入队（3040分类={source_category or '∅'}→3020分类={tcat}）"
+                 target_category=tcat, src_path=src_path, album=album_name)
+    return ok, (f"已复制到 {ssd_dir} 并**逐字节核对通过**并入队"
+                f"（3040分类={source_category or '∅'}→3020分类={tcat}）")
 
 
 # ==================== 交棒判据（步③ 的触发）====================
@@ -512,6 +583,21 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
     try:
         # ---- 交棒（零拷贝；含隔离闸门）----
         if item.get("state") in ("PENDING", "HANDOFF_ADDED"):
+            # ★★★ #134 第四道闸门：交棒前**确认 SSD 副本还在**。
+            #   ★ 为什么：队列条目可能在"数据其实没到位/已被清"的情况下残留（例如某轮
+            #     复制失败仍入了队、或人工清过盘）。此时交棒到 3020 会 add 一条**没有
+            #     文件的种** ⇒ 3020 也变下载。⇒ 宁可判失败（可重试/人工介入），
+            #     也不推一条假种。★ dry-run 下跳过（演练不落盘、无副本可言）。
+            if not dry_run:
+                ssd_ok, ssd_why = verify_publish_area_complete(
+                    item.get("src_path") or "", item.get("album") or "")
+                if not ssd_ok and ssd_dir:
+                    # 兜底：老条目没有 src_path/album ⇒ 退化为"目录存在且非空"。
+                    if not (os.path.isdir(ssd_dir) and os.listdir(ssd_dir)):
+                        update_item(info_hash, state="FAILED",
+                                    last_error=f"发种区副本不在位，拒交棒: {ssd_why}",
+                                    first_failed_at=item.get("first_failed_at") or _now())
+                        return "FAILED"
             ok, why = handoff_to_3020(qb_src, qb_dst, info_hash, target, dry_run=dry_run,
                                      target_category=target_cat or None)
             if not ok:
