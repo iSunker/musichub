@@ -39,13 +39,14 @@
 - **修法**：⑨h 里把 `_ho.QUEUE_FILE` 重定向到临时目录、跑完恢复（`_saved_qf3`）。**本机已验**：自检后真队列为空。
 - ★ 教训：自检**绝不许**有真副作用（`ERR-META-14`）。已加进本轮改动。
 
-### E. 未做 / 待续（compact 后接）
-- **B2（进行中）**：`handoff.record_missing_data()` —— 复制没跑成/抛异常时写**追加式账本** `data/handoff_missing_data.jsonl`，让"漏做种"不再静默（已在 `handoff.py` 写好函数，**尚未接线进 `publish.py` 的跳过点**，**尚未加自检**）。
-- **C1**：提交本轮改动（自检隔离 + record_missing_data + publish 接线）。
-- **C2**：补 ERRATA（新条目）+ 本节点已在；构建镜像 + 部署 NAS + 验证。
-- 待办细节见 TaskList（#10 完成、#11 B2 进行中、#12 C1、#13 C2）。
+### E. B2 / C1 / C2 —— 本轮**已全部完成**（compact 后接续做完）
+- **B2（已完成）**：`handoff.record_missing_data(info_hash, album, site, reason)` → 追加式账本 `data/handoff_missing_data.jsonl`（让"漏做种"不再静默）；`publish.py` 两站**各 3 个跳过点共 6 处**全部接线入账（未就位 / 拿不到源 / 复制抛异常）；`run.py` 自检 **⑨j** 钉住（≥6 处、两站各 ≥3、`handoff.py` 必须有该函数）。本机 selftest 通过 + **阴性对照**（删掉接线 ⇒ ⑨j 报红 3 项）。
+- **C1（已完成）**：提交 `abf8f62`（feat：账本 + 自检副作用隔离）。
+- **C2（已完成）**：提交 `922aad9`（docs：ERRATA 新增 `ERR-PUBLISH-07`「存在≠完成」/ `ERR-PUBLISH-08`「跳过必须入账、账落磁盘」/ `ERR-META-48`「自检不许真副作用」；`counts.json` 重生成 ERR=123）。**构建镜像 `isunker/opencd2others:922aad9` 并部署 NAS**。
+- **部署验证（按内容，不按"pull 成功"）**：NAS compose 点名 `:922aad9`；NAS 侧该 tag 的 **RepoDigest = `sha256:59b52cab…` = 本机 push 的 digest**；容器 `.Image`（config ID `77d23783…`）≠ 该 id 属**正常**（manifest digest ≠ config Image ID）；**容器内 grep** `def record_missing_data`=1、`record_missing_data(`=6 ⇒ 新代码**确在跑**；**容器内 selftest 通过**；容器 `Up healthy`；daemon 线程（readd + handoff）正常起。
+- **回归核查**：3040 上 6 条本项目种（Musopia 3 + CrabPT 3）**全部 `progress=1.000`**，5 条修复种未被重部署打回。
 
-### F. 清理（本轮已做）
+### G. 清理（本轮已做）
 - 本机：清空 `.scratch/`、旧镜像 19→1（只留 `5b278ee`）。
 - NAS `opencd2others/`：删 `.env.bak-*`、`docker-compose.yml.bak-*`、旧落点 `publish_data/`、`@eaDir/`、`rollback-92g/`；镜像 13→1；同步 `.env.example`/`README.md`（compose 保留 NAS 的 sha pin 未覆盖）。NAS 部署目录现为标准 5 项 + `data/`。
 
