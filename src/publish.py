@@ -325,6 +325,35 @@ def explain_key_reason(why):
 #        · `--auto` 声明无人值守 ⇒ 校验第二把钥匙（**没有它 ⇒ 保险被关**）
 
 
+def _resolve_opencd_content_path(info_hash):
+    """查 **3020(opencd)** 上这条种（按 DB 原种 infohash）的 `content_path`。
+
+    ★ 用途（#92-f1/#133）：handoff 要把成品从 HDD 复制到 3040 发种区，得先知道
+      "HDD 上的专辑目录在哪"。**权威来源 = 3020 上那条仍在做种的皇后原种**
+      —— 它的 `content_path` 就是 `/volume1/video/music/<专辑>`（= 3020 的 `/downloads/<专辑>`）。
+    ★ 只在 `ENABLE_HANDOFF` 开启时才被调用。连不上/查不到 ⇒ 返回 ""（调用方跳过复制）。
+    ★ **绝不 raise**（回加主流程不能被它带崩）。
+    """
+    try:
+        import types
+        import qb_client
+        cfg3020 = types.SimpleNamespace(
+            QB_HOST=os.getenv("QB_HOST_OPENCD", "http://127.0.0.1:3020"),
+            QB_USER=getattr(config, "QB_USER", "admin"),
+            QB_PASS=getattr(config, "QB_PASS", ""),
+            QB_API_KEY=getattr(config, "QB_API_KEY", ""),
+        )
+        qb3020 = qb_client.build(cfg3020)
+        got = qb3020.torrents_info(torrent_hashes=info_hash)
+        if not got:
+            print(f"    ⚠️  handoff：3020 上找不到原种 {info_hash[:12]}… ⇒ 无法定位 HDD 目录")
+            return ""
+        return str(getattr(got[0], "content_path", "") or "")
+    except Exception as e:                                        # noqa: BLE001
+        print(f"    ⚠️  handoff：连 3020 查 content_path 失败: {type(e).__name__}: {e}")
+        return ""
+
+
 def readd_to_qb(qb, client, info_hash, torrent_id):
     """把站点上的新种子下载回来加进 qB，做种路径沿用原种子的。
 
@@ -380,16 +409,48 @@ def readd_to_qb(qb, client, info_hash, torrent_id):
         print("    ⚠️  回加跳过：本次没有可用的 qB 连接（启动时未连上，见上方警告）")
         return
     try:
-        orig = qb.torrents_info(torrent_hashes=info_hash)
-        if not orig:
-            print("    ⚠️  qB 里找不到原始种子，无法确定做种路径，跳过回加")
-            return
-        save_path = orig[0].save_path
-
+        # ★★★ #92-f1/#133（2026-10-07）：**回加 3040 的 save_path 语义订正**。
+        #   老写法：`orig = qb.torrents_info(info_hash)` + `save_path = orig[0].save_path`
+        #     —— 那是拿 **3040 上已有该 infohash** 的种取路径；但 3040 上挂的会是
+        #     **站点 .torrent**（infohash ≠ DB 原种），⇒ `orig` 查空 ⇒ 跳过回加。
+        #   新写法：数据由 handoff 复制到 **3040 的 `/downloads/<专辑>`**（见下方 hook），
+        #     所以 `save_path` **固定给父目录** `config.PUBLISH_SAVE_ROOT`（= `/downloads`）。
+        #   ★ 父目录语义实测（NAS-92 §2）：给专辑目录 ⇒ qB 去找 `<专辑>/<专辑>/…` ⇒ 进度 0。
+        #   ★★ 仅在 `ENABLE_HANDOFF` 开启时用新语义（复制由本项目代码做）；
+        #     关闭时**回退**老行为（保 `orig[0].save_path`）⇒ 不改上线前的既有路径。
         content = client.download_torrent(torrent_id)
         if not content:
             print("    ❌ 从站点下载种子文件失败，跳过回加")
             return
+
+        _handoff_on = str(getattr(config, "ENABLE_HANDOFF", "false")).strip().lower() in (
+            "1", "true", "yes", "y", "on")
+        if _handoff_on:
+            # ★ 复制成品 HDD→3040 发种区 + 入队（用户要求：复制/删除由本项目代码自动化）。
+            #   源 = 3020 上这条种的 content_path（= HDD `/volume1/video/music/<专辑>`）。
+            save_path = config.PUBLISH_SAVE_ROOT
+            try:
+                import handoff
+                src = _resolve_opencd_content_path(info_hash)
+                album = os.path.basename(str(src).rstrip("/\\")) if src else ""
+                if src and album:
+                    _ok, _why = handoff.begin_handoff_for_task(
+                        src, album, info_hash, task=None,
+                        source_category=config.PUBLISH_CATEGORY,
+                        target_category=config.PUBLISH_CATEGORY,
+                        dry_run=(config.HANDOFF_DRY_RUN == "true"))
+                    print(f"    🔀 handoff 复制: {_why}")
+                else:
+                    print("    ⚠️  handoff：拿不到 3020 上的 content_path，"
+                          "跳过复制（本条大概率不会做种）")
+            except Exception as _e:                              # noqa: BLE001
+                print(f"    ⚠️  handoff 复制失败（不影响发布本身）: {type(_e).__name__}: {_e}")
+        else:
+            orig = qb.torrents_info(torrent_hashes=info_hash)
+            if not orig:
+                print("    ⚠️  qB 里找不到原始种子，无法确定做种路径，跳过回加")
+                return
+            save_path = orig[0].save_path
 
         # ★★ 参数**只有这三个**：save_path / is_paused / category。
         #   ★ 别加 layout（见 docstring）、别加 is_skip_checking（见 docstring）。
@@ -471,11 +532,34 @@ def connect_qb():
     ★ 从 `main()` 里那段**原样**抽出来（乌托邦与蟹黄堡两条路共用同一份）。
       ★ 不静默吞异常：连不上要打印，否则"没做回加"与"回加成功"在日志里
         长得一样（`readd_to_qb` 的纪律）。
+
+    ★★★ 2026-10-06（#49）：连之前先过 **qB readiness 闸门**（`qb_client.wait_qb_ready`，
+      与 `daemon` 那条延迟回加**同一个**实现）。
+      · **为什么**：`SEED_DELAY_MIN=0`（默认）时发布成功后**立即**回加，而开机后 qB
+        要几十秒才起来 ⇒ `build()` 撞 `SSLError port=3020`（`ERR-QB-08` 形状：**连接尝试
+        本身**在故障期就是噪音/推手）。#7 只给**延迟回加**那条路加了闸门，这条**没加** ⇒ 本补。
+      · **为什么闸门放这、不放 `readd_to_qb()`**：`qb` 是**传进来**的，`readd_to_qb` 只拿到一个
+        可能为 `None` 的连接 —— 它**无法**"重连"。而 `qb_client.build()` 是**唯一构造点**
+        （`ERR-QB-08`），本函数正是它的**唯一入口** ⇒ 在这里等就绪，`readd_to_qb` 的 docstring
+        与 `qb=None` 分支**一字不动**（那里"本次没有可用的 qB 连接"仍成立，只是**更少**发生了）。
+      · **失败语义不变**：等不到就绪 ⇒ 超时返回 False ⇒ **跳过本次回加**、连 `build()` 都
+        不试（少一次注定失败的连接）⇒ 返回 `None` ⇒ `readd_to_qb` 打印"本次没有可用的 qB 连接"。
+        **绝不 raise**（回加失败是本地问题，不能让"已发上站"的这条看着像失败 —— 见 `readd_to_qb`）。
+      · **旋钮**：复用 `QB_READY_TIMEOUT`/`QB_READY_INTERVAL`（`config` 里由 `daemon.py`
+        一套 `env_int` 导入；本模块多用两个旋钮、**不新造方言**）。
+      · **`--no-readd` 不受影响**：那样根本不会调本函数。
     """
     try:
         # ★★ 唯一构造点 `qb_client.build`（`ERR-QB-08`）：优先 API Key，回退账号密码。
         #   ★ 失败契约不变：`build()` 连不上会抛 ⇒ 仍由本 try 收、打印、返回 None。
         import qb_client
+        if not qb_client.wait_qb_ready(
+                config.QB_HOST,
+                timeout=getattr(config, "QB_READY_TIMEOUT", 120),
+                interval=getattr(config, "QB_READY_INTERVAL", 5),
+                log=lambda m: print(f"    {m}")):
+            print("⚠️  回加跳过：qB 在就绪等待窗口内没起来（不改任何状态；下轮/下次再试）")
+            return None
         qb = qb_client.build(config)
         return qb
     except Exception as e:                                  # noqa: BLE001
@@ -519,18 +603,44 @@ def readd_to_qb_crabpt(qb, client, info_hash, torrent_id):
         print("    ⚠️  回加跳过：本次没有可用的 qB 连接（启动时未连上，见上方警告）")
         return
     try:
-        # ① 做种路径：**乌托邦那条**（= 皇后原种 infohash）的 save_path
-        orig = qb.torrents_info(torrent_hashes=info_hash)
-        if not orig:
-            print("    ⚠️  qB 里找不到**乌托邦**那条原始种子，无法确定做种路径，跳过回加")
-            return
-        save_path = orig[0].save_path
-
         # ② 种子字节：**蟹黄堡服务端**那份（带蟹黄堡 announce）
         content = client.download_torrent(torrent_id)
         if not content:
             print("    ❌ 从蟹黄堡下载种子文件失败，跳过回加")
             return
+
+        # ① 做种路径（★★ #92-f1/#133 订正，同 `readd_to_qb`）：
+        #   开启 handoff 时，数据已复制到 **3040 的 `/downloads/<专辑>`**，
+        #   `save_path` 固定给**父目录** `config.PUBLISH_SAVE_ROOT`（= `/downloads`）。
+        #   ★ 蟹黄堡与乌托邦**共用同一份专辑数据**（同一 infohash 的原种），
+        #     所以复制这一步若乌托邦路已做过 ⇒ 这里幂等跳过（copy_to_publish_area 幂等）。
+        #   ★ 关闭 handoff ⇒ 回退老行为（取 3040 上 orig 的 save_path）。
+        _handoff_on = str(getattr(config, "ENABLE_HANDOFF", "false")).strip().lower() in (
+            "1", "true", "yes", "y", "on")
+        if _handoff_on:
+            save_path = config.PUBLISH_SAVE_ROOT
+            try:
+                import handoff
+                src = _resolve_opencd_content_path(info_hash)
+                album = os.path.basename(str(src).rstrip("/\\")) if src else ""
+                if src and album:
+                    _ok, _why = handoff.begin_handoff_for_task(
+                        src, album, info_hash, task=None,
+                        source_category=config.CRABPT_PUBLISH_CATEGORY,
+                        target_category=config.CRABPT_PUBLISH_CATEGORY,
+                        dry_run=(config.HANDOFF_DRY_RUN == "true"))
+                    print(f"    🔀 handoff 复制: {_why}")
+                else:
+                    print("    ⚠️  handoff：拿不到 3020 上的 content_path，跳过复制")
+            except Exception as _e:                              # noqa: BLE001
+                print(f"    ⚠️  handoff 复制失败（不影响发布本身）: {type(_e).__name__}: {_e}")
+        else:
+            # ① 做种路径：**乌托邦那条**（= 皇后原种 infohash）的 save_path
+            orig = qb.torrents_info(torrent_hashes=info_hash)
+            if not orig:
+                print("    ⚠️  qB 里找不到**乌托邦**那条原始种子，无法确定做种路径，跳过回加")
+                return
+            save_path = orig[0].save_path
 
         # ③ 参数只有这三个（见 docstring ①③）
         #

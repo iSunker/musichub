@@ -32,13 +32,16 @@ def require_env(key: str) -> str:
 
 # ==================== qBittorrent ====================
 # ★ 兜底默认值与 compose 保持一致：`docker-compose.yml` 用的是
-#   `QB_HOST=${QB_HOST:-http://127.0.0.1:3020}`，且该 service 是 `network_mode: "host"`。
+#   `QB_HOST=${QB_HOST:-http://127.0.0.1:3040}`，且该 service 是 `network_mode: "host"`。
+#   ★★ 2026-10-07（#92）：默认从 3020(opencd) 改为 **3040(publish，发种专用实例)**。
+#     发种（readd_to_qb / readd_to_qb_crabpt）改走 SSD 上的发种实例；两条路共用本值
+#     （唯一构造点 qb_client.build）。★ 回滚：改回 `http://127.0.0.1:3020`。
 #   ★★ 不要改回 `host.docker.internal` —— **host 网络下没有那条特殊 DNS 记录**
 #      （compose 里紧挨着的注释也是这么写的），它只在 bridge 网络里存在。
 #   这里这个值平时用不到（compose 总会把 QB_HOST 传进来），但一旦有人不经 compose
 #   直接 `python run.py`，旧的 `host.docker.internal` 会给出一个**看起来像配置问题、
 #   其实是"这条域名根本不存在"**的报错。改成与 compose 同形，错了也错得一致。
-QB_HOST = os.getenv("QB_HOST", "http://127.0.0.1:3020")
+QB_HOST = os.getenv("QB_HOST", "http://127.0.0.1:3040")
 QB_USER = os.getenv("QB_USER", "admin")
 QB_PASS = require_env("QB_PASS")
 
@@ -163,6 +166,80 @@ LSKY_PASSWORD = os.getenv("LSKY_PASSWORD", "")
 #   ★ 留空 = 由 `assets` 在用到时按 `DATA_DIR` 拼默认路径。
 LSKY_TOKEN_FILE = os.getenv("LSKY_TOKEN_FILE", "")
 
+# ==================== ★★ 发种交棒（#92 新流程，2026-10-07 加）====================
+#
+# ★ 流程（用户 2026-10-07 定稿）：成品从 HDD 复制到 SSD 发种区 → 3040(:3040) 发种做种
+#   → 满足「出种≥N 或 做种≥D 天」→ 把种子任务交棒到 3020（零拷贝）→ 清 SSD 副本。
+#   ★ HDD 原数据**全程不动**；SSD 那份只是"发种用的一次性副本"。
+#
+# ★ 这些键**都只控制本项目动作**（复制/心跳判据/交棒/清盘），不改变对外发布行为，
+#   所以缺省值必须中性：**默认全关**（环境变量没配 ⇒ 新流程不接管，老行为一字不改）。
+#   ★ 理由同 SEED_DELAY_MIN：新行为属于**行为变更**，要开必须显式在 `.env` 加行
+#     （ERR-ENV-02：缺键时默认值必须中性）。本机也读不到 NAS 的 .env。
+
+# ---- 总开关 + 演练开关 ----
+# ENABLE_HANDOFF=true 才会让 daemon 起交棒线程（默认 false = 完全不动）。
+ENABLE_HANDOFF = os.getenv("ENABLE_HANDOFF", "false")
+# HANDOFF_DRY_RUN=true ⇒ 只**判定 + 记日志**，不真复制/不真交棒/不真删（默认 true）。
+# ★ 默认 true（不写）与 DRY_RUN 相反方向：发种区这一串动作有**不可逆**的一步（删 SSD），
+#   默认必须落在"只看不做"那一侧。
+HANDOFF_DRY_RUN = os.getenv("HANDOFF_DRY_RUN", "true")
+
+# ---- 路径（容器内）----
+# ★★ 发种成品区（SSD）—— 2026-10-07（#133/#92-f1）**落点订正**：
+#   ★ 这里（容器内路径）是 `/publish`，但**真正要紧的是它的宿主侧**：compose 现在把
+#     **宿主 3040 的 Download 目录**（`${PUBLISH_DIR}`，
+#     默认 `/volume2/docker_ssd/qbittorrent-publish/Download`）挂到这里。
+#   ★ 原先宿主侧是 `opencd2others/publish_data`（本项目**自己**的子目录）⇒ 复制过去的东西
+#     **3040 根本看不到**（3040 的 `/downloads` 是**另一个**宿主目录），这就是三条种补救时
+#     不得不**手工 cp** 的原因（见 NAS-92f 定稿文档 §1）。
+#   ★ 订正后：复制到这里 = 直接写进 3040 的 `/downloads`；3040 加种时 `save_path=/downloads`
+#     （**父目录**语义，数据在 `/downloads/<专辑>/`）。
+#   ★★ 铁律：本目录下**只**放"发种用的一次性副本"，落点是 `<本目录>/<专辑>/` 一层子目录。
+#     "清 SSD"只删 `PUBLISH_CONTAINER_DIR/<专辑>` 这一个子目录，**绝不**删本目录本身
+#     —— 它的宿主侧现在**就是 3040 的下载根**，删它等于清空 3040（见 `_safe_rmtree` 多重护栏）。
+PUBLISH_CONTAINER_DIR = os.getenv("PUBLISH_CONTAINER_DIR", "/publish")
+# ★★ 3040(publish) 的做种落地根 —— 回加 3040 时 `save_path` 给**这个父目录**。
+#   ★ 父目录语义（NAS-92 §2 实测）：qB 找文件 = `<save_path>/<info.name>/**<相对路径>**`。
+#     数据复制到 `<PUBLISH_CONTAINER_DIR>/<专辑>`（= 此根的宿主侧 = 3040 的 /downloads/<专辑>），
+#     所以 save_path 必须给**父目录**（= 3040 的 `/downloads`），给专辑目录 ⇒ 找不到 ⇒ 进度 0。
+#   ★ 3040 的 `/downloads` 容器内路径 = `/downloads`（与 3020 同名，但宿主不同）。
+PUBLISH_SAVE_ROOT = os.getenv("PUBLISH_SAVE_ROOT", "/downloads")
+# 3020(opencd) 的做种落地根（= 容器外 /volume1/video/music，3020 的 /downloads）。
+# ★ 交棒时给 3020 的 `save_path` 用；本项目容器**不需要**挂到它（零拷贝：3020 自己看得见）。
+HANDOFF_TARGET_SAVE_ROOT = os.getenv("HANDOFF_TARGET_SAVE_ROOT", "/downloads")
+
+# ---- ★★★ 隔离白名单：只有"本项目的音乐种"才走本流程（用户 2026-10-07 指令）----
+# ★ 用户原话：「**仅限本项目的音乐种子**才移动到 3040 交接做种啊，这个 3020qb 我可能还要
+#   发其他种子的」⇒ 本流程**绝不许误碰** 3020 上用户手发的（非本项目）种。
+# ★★ 判据（用户已拍板）= **3040 上的分类命中本白名单**：
+#   3040 是**本项目专用的发种实例**，其分类即"来源"。凡 3040 上 `category` ∈ 本集合
+#   ⇒ 认定为本项目种 ⇒ 才允许 复制/交棒/清盘。
+# ★ 落地三道闸门（见 handoff.py）：入队前 / 交棒前 / 清盘前各过一遍。
+# ★ 值 = 两个发布站各自的分类（与下方 PUBLISH_CATEGORY / CRABPT_PUBLISH_CATEGORY 同源）。
+HANDOFF_OWN_CATEGORIES = [
+    c.strip() for c in os.getenv(
+        "HANDOFF_OWN_CATEGORIES",
+        f"{os.getenv('PUBLISH_CATEGORY', 'Musopia')},"
+        f"{os.getenv('CRABPT_PUBLISH_CATEGORY', 'CrabPT')}",
+    ).split(",") if c.strip()
+]
+
+# ---- 交棒判据（二选一满足即交棒）----
+# ★ 判据一：**出种 ≥ N 个**。★ 口径 = qB `num_complete`（swarm 里做种者数）**减去自己**，
+#   即"别人也开始做种了"这件事发生了几次 ⇒ 判 `num_complete - 1 >= N`。
+#   ★ 为什么要减自己：`num_complete` 把**本机这个做种者**也算进去 ⇒ 直接拿它比 3 会把
+#     "只有自己在做种(=1)"读成"出种 3"。★ 见 handoff.py::judge 的注释（含阴性对照）。
+HANDOFF_SEEDERS_MIN = int(os.getenv("HANDOFF_SEEDERS_MIN", "3") or "3")
+# ★ 判据二：**做种 ≥ D 天**。从 qB 的 `added_on` 起算（那是种加进 3040 的时刻，≈发种成功）。
+HANDOFF_SEED_DAYS = float(os.getenv("HANDOFF_SEED_DAYS", "3") or "3")
+
+# ---- 线程节拍 ----
+# 交棒线程自跑间隔（秒）。默认 300（5min）—— 交棒是"慢判断"，不需要高频。
+HANDOFF_THREAD_TICK = int(os.getenv("HANDOFF_THREAD_TICK", "300") or "300")
+# 每轮最多处理几条（别让一次排空卡住线程）。
+HANDOFF_MAX_PER_ROUND = int(os.getenv("HANDOFF_MAX_PER_ROUND", "5") or "5")
+
 # ==================== 状态与产物存储 ====================
 # 统一挂载点：`docker-compose.yml` 里所有 service 都把**同一个 bind mount**
 # 挂到这里 —— 形如 `${STATE_DIR:-.}:/data`（默认就是 compose 文件所在目录本身）。
@@ -188,4 +265,9 @@ def print_runtime_info():
     #   是启动自检最该看清的一格（`ERR-QB-08`）。
     print(f"🔑 QB_API_KEY          = {'已配置（走 API Key）' if QB_API_KEY else '未配置（回退账号密码）'}")
     print(f"🌐 MUSOPIA_URL         = {MUSOPIA_URL}")
+    # ★★ 发种交棒的关键路径/开关 —— 排"复制到哪 / 3040 看不看得见"一类问题时最该看清。
+    print(f"🔀 ENABLE_HANDOFF      = {ENABLE_HANDOFF}（dry_run={HANDOFF_DRY_RUN}）")
+    print(f"🔀 PUBLISH 区(3040可见) = {PUBLISH_CONTAINER_DIR}")
+    print(f"🔀 交棒目标 save_path   = {HANDOFF_TARGET_SAVE_ROOT}")
+    print(f"🔀 本项目种白名单(分类) = {HANDOFF_OWN_CATEGORIES}")
     print("=" * 50)

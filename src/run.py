@@ -713,6 +713,211 @@ def selftest():
             "（或 `import opencd as P` 等，保留原别名，调用体不动）。\n"
             "     ★ 不改成 opencd ⇒ 运行到那一步才 `ModuleNotFoundError`。")
 
+    # ★★★ ⑨（2026-10-07 加，#92 发种交棒）：**交棒判据 + 清盘护栏**的离线判据。
+    #
+    #   ★ 为什么必须有（`ERR-META-01`：失效的检测比不检测更危险）：
+    #     `handoff.judge()` 的"出种≥N"口径**极易差一**（num_complete 含自己），
+    #     而 `_safe_rmtree()` 的护栏一旦失效就是**删错目录**（`rm` 的边界是本流程
+    #     唯一的不可逆动作）。这两点都不能靠"我读过代码"担保 ⇒ 落成可跑的判据。
+    #
+    #   ★★ 全部**纯本地**：`judge` / `pick_handoff_candidates` / `_safe_rmtree` 都是
+    #     纯函数或只碰临时目录，不连 qB、不连库、不发请求。用一个临时 DATA_DIR + 临时
+    #     PUBLISH 根来试 `_safe_rmtree`，试完清掉（不碰真实 `/publish`）。
+    try:
+        import tempfile as _tf
+        import shutil as _sh
+        import handoff as _ho
+
+        # ── ⑨a 判据口径：**必须减掉自己**（num_complete 含本机做种者）──
+        #   阴性对照：'只有自己做种'(num_complete=1) 必须**不**交棒。
+        _NOW = 1_700_000_000.0
+        _fresh = _NOW                                  # added_on = 现在 ⇒ 做种 0 天
+        _old = _NOW - 4 * 86400                        # 做种 4 天 ⇒ 天数够
+
+        # num_complete=1（只有自己）⇒ others=0 ⇒ 不够，且天数 0 ⇒ False（阴性对照）
+        _r, _w = _ho.judge(1, _fresh, now=_NOW, seeders_min=3, seed_days=3)
+        chk("⑨a 只自己做种(num_complete=1)·不交棒", _r, False)
+        # num_complete=3（自己+2）⇒ others=2 < 3 ⇒ 不够（**这正是差一的坑**）
+        _r, _w = _ho.judge(3, _fresh, now=_NOW, seeders_min=3, seed_days=3)
+        chk("⑨a 自己+2(num_complete=3)·出种2<3·不交棒", _r, False)
+        # num_complete=4（自己+3）⇒ others=3 ⇒ 够
+        _r, _w = _ho.judge(4, _fresh, now=_NOW, seeders_min=3, seed_days=3)
+        chk("⑨a 自己+3(num_complete=4)·出种3≥3·交棒", _r, True)
+        # 天数够（4 天）但出种不够 ⇒ 仍然交棒（二选一）
+        _r, _w = _ho.judge(1, _old, now=_NOW, seeders_min=3, seed_days=3)
+        chk("⑨a 做种4天(出种不够)·天数够·交棒", _r, True)
+        # 都不够 ⇒ False
+        _r, _w = _ho.judge(2, _fresh, now=_NOW, seeders_min=3, seed_days=3)
+        chk("⑨a 出种1<3 且 0天<3天·不交棒", _r, False)
+        # added_on 缺失/坏值不许抛（走天数=0 分支）
+        try:
+            _r, _w = _ho.judge(1, None, now=_NOW, seeders_min=3, seed_days=3)
+            chk("⑨a added_on=None·不抛且不交棒", _r, False)
+        except Exception as _e:                                   # noqa: BLE001
+            ok[0] = False
+            detail.append(f"✗ ⑨a judge(added_on=None) 抛了异常: {type(_e).__name__}: {_e}")
+
+        # ── ⑨b pick_handoff_candidates：只挑 progress=1 的，且判据口径一致 ──
+        _ts = [
+            {"hash": "aa", "progress": 1.0, "num_complete": 4, "added_on": _fresh},   # 够
+            {"hash": "bb", "progress": 0.5, "num_complete": 9, "added_on": _old},     # 未下完 ⇒ 跳过
+            {"hash": "cc", "progress": 1.0, "num_complete": 1, "added_on": _fresh},   # 不够
+        ]
+        _picked = _ho.pick_handoff_candidates(_ts, now=_NOW, seeders_min=3, seed_days=3)
+        chk("⑨b 只挑够格的 1 条", len(_picked), 1)
+        chk("⑨b 挑中的是 aa", _ho._torrent_field(_picked[0][0], "hash"), "aa")
+
+        # ── ⑨c `_safe_rmtree` 护栏：**只许删 PUBLISH 根之下** ──
+        #   ★★ 阴性对照（本条的**全部价值**）：给一个**根之外**的目录，
+        #     `_safe_rmtree` 必须**拒删**且目录还在。否则"护栏"是假的。
+        _tmp = _tf.mkdtemp(prefix="handoff-selftest-")
+        _pub_root = os.path.join(_tmp, "publish")
+        _outside = os.path.join(_tmp, "source_do_not_touch")
+        os.makedirs(os.path.join(_pub_root, "albumA"))
+        os.makedirs(_outside)
+        with open(os.path.join(_outside, "keep.txt"), "w", encoding="utf-8") as _f:
+            _f.write("original")
+        _saved_pub = _ho.config.PUBLISH_CONTAINER_DIR
+        try:
+            _ho.config.PUBLISH_CONTAINER_DIR = _pub_root
+            # ① 根之下的合法子目录 ⇒ 删掉
+            _ok_sub = _ho._safe_rmtree(os.path.join(_pub_root, "albumA"))
+            chk("⑨c 根之下子目录·删成功", _ok_sub, True)
+            chk("⑨c 根之下子目录·真的没了",
+                os.path.exists(os.path.join(_pub_root, "albumA")), False)
+            # ② 根本身 ⇒ **拒**删（否则会清空整个发种区）
+            _ok_root = _ho._safe_rmtree(_pub_root)
+            chk("⑨c 发种区根本身·拒删", _ok_root, False)
+            chk("⑨c 发种区根还在", os.path.isdir(_pub_root), True)
+            # ③ 根**之外**的目录（阴性对照）⇒ **拒**删、文件原封不动
+            _ok_out = _ho._safe_rmtree(_outside)
+            chk("⑨c 根之外的目录·拒删（阴性对照）", _ok_out, False)
+            chk("⑨c 根之外的目录·文件还在（没被误删）",
+                os.path.exists(os.path.join(_outside, "keep.txt")), True)
+        finally:
+            _ho.config.PUBLISH_CONTAINER_DIR = _saved_pub
+            _sh.rmtree(_tmp, ignore_errors=True)
+
+        # ── ⑨d publish_target_dir 防 `..` 逃逸 ──
+        _saved_pub2 = _ho.config.PUBLISH_CONTAINER_DIR
+        try:
+            _ho.config.PUBLISH_CONTAINER_DIR = _pub_root if os.path.isdir(_pub_root) else _tmp
+            _root_pub = _ho.config.PUBLISH_CONTAINER_DIR
+            _tgt = _ho.publish_target_dir("../../etc")
+            chk("⑨d `..` 逃逸被 basename 挡住",
+                _tgt, os.path.join(_root_pub, "etc"))
+            _raised = False
+            try:
+                _ho.publish_target_dir("..")
+            except ValueError:
+                _raised = True
+            chk("⑨d 专辑名='..' 直接拒（抛 ValueError）", _raised, True)
+        finally:
+            _ho.config.PUBLISH_CONTAINER_DIR = _saved_pub2
+            _sh.rmtree(_tmp, ignore_errors=True)
+
+        # ── ⑨e 队列幂等（同 infohash 不重复入队）——用临时 DATA_DIR ──
+        _saved_data = _ho.config.DATA_DIR
+        _saved_qf = _ho.QUEUE_FILE
+        _tmp2 = _tf.mkdtemp(prefix="handoff-queue-selftest-")
+        try:
+            _ho.config.DATA_DIR = _tmp2
+            _ho.QUEUE_FILE = os.path.join(_tmp2, "handoff_queue.json")
+            _ho.enqueue("deadbeef", "n", "/publish/n", "/downloads/n", note="t")
+            _ho.enqueue("deadbeef", "n", "/publish/n", "/downloads/n", note="t")  # 幂等
+            chk("⑨e 同 infohash 入队两次·队列里只 1 条",
+                len(_ho.items_by_state()), 1)
+            _ho.update_item("deadbeef", state="HANDOFF_ADDED")
+            chk("⑨e 状态推进生效",
+                _ho.items_by_state("HANDOFF_ADDED")[0]["state"], "HANDOFF_ADDED")
+            _ho.remove_item("deadbeef")
+            chk("⑨e 移除后队列空", len(_ho.items_by_state()), 0)
+        finally:
+            _ho.config.DATA_DIR = _saved_data
+            _ho.QUEUE_FILE = _saved_qf
+            _sh.rmtree(_tmp2, ignore_errors=True)
+
+        # ── ⑨g ★★★ 隔离闸门：只有"本项目音乐种"可交棒/清盘（用户 2026-10-07 指令）──
+        #   ★★ 为什么必须有：用户明确「3020 上还会发别的种，不能被本项目误碰」
+        #     ⇒ 判据必须能**说不**。阴性对照是这一条的全部价值（`ERR-META-01`）。
+        _own = _ho.config.HANDOFF_OWN_CATEGORIES
+        # 阳性：白名单内的分类 ⇒ True
+        chk("⑨g Musopia 分类·认得（本项目）", _ho.is_own_project("Musopia"), True)
+        chk("⑨g CrabPT 分类·认得（本项目）", _ho.is_own_project("CrabPT"), True)
+        # 阴性对照①：未分类（用户手加的种常见）⇒ False
+        chk("⑨g 空分类·不认（阴性对照）", _ho.is_own_project(""), False)
+        # 阴性对照②：别的分类（用户在 3020 手发种）⇒ False
+        chk("⑨g 其它分类·不认（阴性对照）", _ho.is_own_project("SomeOther"), False)
+        # 阴性对照③：None ⇒ False（不许抛）
+        try:
+            chk("⑨g None 分类·不认且不抛", _ho.is_own_project(None), False)
+        except Exception as _e:                                   # noqa: BLE001
+            ok[0] = False
+            detail.append(f"✗ ⑨g is_own_project(None) 抛了: {type(_e).__name__}: {_e}")
+        # 白名单可注入（判据参数化生效）
+        chk("⑨g 注入白名单 ['X']·X 认得", _ho.is_own_project("X", own_categories=["X"]), True)
+        chk("⑨g 注入白名单 ['X']·Musopia 不认", _ho.is_own_project("Musopia", own_categories=["X"]), False)
+        # ★ 结构性判据：handoff_to_3020 / finalize_source 必须**真的调用** is_own_project
+        #   （否则"定义了闸门但没接" = ERR-ENV-03 形状：看着配好了，其实没用它）
+        import ast as _ast9g
+        import pathlib as _pl9g
+        _ho_py = _pl9g.Path(__file__).resolve().parent / "handoff.py"
+        _ho_src = _ho_py.read_text(encoding="utf-8")
+        _ht = _ast9g.parse(_ho_src)
+
+        def _uses_gate(func_name):
+            """AST：func_name 的函数体里是否出现 `is_own_project(` 调用。"""
+            for _fn in _ast9g.walk(_ht):
+                if isinstance(_fn, _ast9g.FunctionDef) and _fn.name == func_name:
+                    for _c in _ast9g.walk(_fn):
+                        if (isinstance(_c, _ast9g.Call)
+                                and isinstance(_c.func, _ast9g.Name)
+                                and _c.func.id == "is_own_project"):
+                            return True
+            return False
+
+        if not _uses_gate("handoff_to_3020"):
+            ok[0] = False
+            detail.append("✗ ⑨g handoff_to_3020 **没有**调用 is_own_project（闸门没接）")
+        if not _uses_gate("finalize_source"):
+            ok[0] = False
+            detail.append("✗ ⑨g finalize_source **没有**调用 is_own_project（闸门没接）")
+
+        # ── ⑨f 结构性判据：daemon 必须真的接了两个线程（否则"写了不接"）──
+        #   照 ⑦ 的教训走 **AST**（不看文本：注释里提到 Thread 不算数）。
+        import ast as _ast9
+        import pathlib as _pl9
+        _daemon_py = _pl9.Path(__file__).resolve().parent / "daemon.py"
+        if not _daemon_py.exists():
+            ok[0] = False
+            detail.append(f"✗ ⑨f 找不到 daemon.py（{_daemon_py}）⇒ 判据没测到东西（ERR-META-14）")
+        else:
+            _dtree = _ast9.parse(_daemon_py.read_text(encoding="utf-8"))
+            # 收集所有 `threading.Thread(target=X, ...)` 的 target 名
+            _targets = set()
+            for _n in _ast9.walk(_dtree):
+                if (isinstance(_n, _ast.Call)
+                        and getattr(_n.func, "attr", None) == "Thread"):
+                    for _k in _n.keywords:
+                        if _k.arg == "target" and isinstance(_k.value, _ast.Name):
+                            _targets.add(_k.value.id)
+            for _want in ("_readd_thread_loop", "_handoff_thread_loop"):
+                if _want not in _targets:
+                    ok[0] = False
+                    detail.append(f"✗ ⑨f daemon.py 没有 `Thread(target={_want}...)` 调用点 "
+                                  f"⇒ 该线程**定义了但没接线**（实测 target={sorted(_targets)}）")
+            # ★ 且这两个函数真的**有定义**（防止 target 指向不存在的名字：只在运行期炸）
+            _defs = {_n.name for _n in _ast9.walk(_dtree)
+                     if isinstance(_n, _ast.FunctionDef)}
+            for _want in ("_readd_thread_loop", "_handoff_thread_loop"):
+                if _want not in _defs:
+                    ok[0] = False
+                    detail.append(f"✗ ⑨f `{_want}` 在 daemon.py 里**没有定义** "
+                                  f"（接线会 NameError）")
+    except Exception as e:                                        # noqa: BLE001
+        ok[0] = False
+        detail.append(f"✗ ⑨ 交棒自检执行失败: {type(e).__name__}: {e}")
+
     return ok[0], detail
 
 

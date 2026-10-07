@@ -355,8 +355,45 @@ def build_stages():
             #      不靠探针（见 `topup_opencd_fields.py` 纪律 3）。
         })
 
-    return stages, dry_run
+    # 9) 免费窗口：把「收费种子（暂停下载）」这类种，在免费窗口内 resume、窗口结束 pause。
+    #
+    #    ★★ 2026-10-06（#34）：脚本从 `.scratch/` 正式收进 `src/free_window.py`。
+    #
+    #    ★ 为什么默认**关**（`ENABLE_FREE_WINDOW` 默认 **False**）：
+    #      · 它是**又一个会动 qB 种子的阶段**（resume/pause 875 条）—— 虽然动作**可逆**，
+    #        但"大规模自动启停"是要人**先看小样**才敢放开的（同 crawl 的安全默认）；
+    #      · 且它**出网访问皇后站点**（判免费要靠站点列表页）⇒ 与 crawl 同一类
+    #        "对外行为" ⇒ 默认关 = 升级镜像不改对外行为。
+    #
+    #    ★★ dry-run 用**专用**变量 `FREE_WINDOW_DRY_RUN`（默认 **True**），
+    #       不复用 `DRY_RUN` —— 理由同 crawl 阶段①②：这个阶段动的是 **qB 种子的启停**
+    #       （不是"往 Musopia 写"、也不是"往站点发"），是**第三个**独立风险面，
+    #       必须各自可控；且极性相反（`DRY_RUN` 默认 false=写，本阶段要默认 true=只看）。
+    #       ⇒ **不能**用 `apply_flag`（那是 opt-out）；本阶段 `--apply` 是 opt-in，要**加**。
+    if env_bool("ENABLE_FREE_WINDOW", False):
+        cmd = ["python", "free_window.py"]
+        # ★ 小样：默认只处理 `FREE_WINDOW_LIMIT` 条（默认 20）——**配额护城河**。
+        #   `detect_free_windows` 在"全站非免费"时**逐条**抓列表页 ⇒ 875 条 = 875 请求，
+        #   而皇后每日上限只有 50（`OPENCD_MAX_PER_DAY`）。⇒ 必须靠 limit 卡住每轮条数，
+        #   否则一轮就把日配额烧穿、后续阶段全饿死（V5 那类"配额被一个阶段吃干"）。
+        limit = env_int("FREE_WINDOW_LIMIT", 20)
+        if limit:
+            cmd += ["--limit", str(limit)]
+        # ★ 真跑才加 `--apply`（`free_window.py` 默认 dry-run）。
+        if not env_bool("FREE_WINDOW_DRY_RUN", True):
+            cmd.append("--apply")
+        stages.append({
+            "name": "free_window",
+            "cmd": cmd,
+            # ★ 3600s（1h）：免费窗口是**小时级**的（站点 title 里是时刻），
+            #   每小时看一次足够；比 crawl 的 1800 更疏，因为它的请求量更大（逐条）。
+            "interval": env_int("FREE_WINDOW_INTERVAL", 3600),
+            # ★★ **故意不加 `pending` 探针**：与 crawl 同一条理由 ——
+            #   "还有多少种在免费窗口里"要在**调度进程里出网**才知道（探针不许出网），
+            #   且配额用尽时 pending 会持续 >0 ⇒ 反而把站点敲得更勤。
+        })
 
+    return stages, dry_run
 
 # ==================== 启动前安全检查 ====================
 
@@ -457,6 +494,24 @@ ENV_SNAPSHOT_KEYS = (
     #   （见上面的选白名单理由：宁可看得见地缺，不要静默地漏）。
     "ENABLE_VTID",
     "OPENCD_CRAWL_DRY_RUN", "ALLOW_EMPTY_DB",
+    # ★★ 2026-10-06（#34）：免费窗口阶段。进白名单的理由与 crawl 那条完全相同 ——
+    #   "看不见的开关 = 会被当成没配"；且本机读不到 NAS 的 `.env`（ERR-ENV-02），
+    #   "这个阶段开没开 / 是真跑还是只看"这件事，唯一能问的就是这份快照。
+    #   ★ 三个值都是普通布尔/整数，不含凭据 ⇒ 放进选择性落盘没有外溢问题。
+    "ENABLE_FREE_WINDOW", "FREE_WINDOW_DRY_RUN", "FREE_WINDOW_INTERVAL", "FREE_WINDOW_LIMIT",
+    # ★★ 2026-10-06（#7）：qB readiness 闸门两个旋钮。进白名单理由同上面的 `*_INTERVAL`
+    #   —— 巡检要能回答"回加前最多等多久 / 多久探一次"（.env 本机读不到，ERR-ENV-02）。
+    #   都是普通整数、非凭据。
+    "QB_READY_TIMEOUT", "QB_READY_INTERVAL",
+    # ★★ 2026-10-07（#92）：**发种交棒**的几个开关与旋钮。进白名单理由同上
+    #   （"看不见的开关 = 会被当成没配"；.env 本机读不到，ERR-ENV-02）。
+    #   ★ 巡检必须能回答"交棒现在是开是关、是不是只演练(dry_run)、判据阈值多少"，
+    #     否则"新流程到底接管了没有"只能登 NAS 猜。
+    #   ★ 全是普通布尔/整数/天数字符串，**不含任何凭据**（3020 的 host 是内网地址，
+    #     不是密钥）⇒ 放选择性落盘无外溢问题。
+    "ENABLE_HANDOFF", "HANDOFF_DRY_RUN", "HANDOFF_SEEDERS_MIN",
+    "HANDOFF_SEED_DAYS", "HANDOFF_THREAD_TICK", "HANDOFF_MAX_PER_ROUND",
+    "QB_HOST_OPENCD",
     # ★★ 2026-09-24 加的自动发布钥匙。**它必须进白名单**，理由与 ENABLE_PUBLISH
     #   完全相同 —— 而恰恰是"判据要用的"：
     #   · 巡检要能回答"**自动发布现在能不能发**"，而不必去读容器日志；
@@ -740,6 +795,19 @@ READD_CONFLICT_IS_SUCCESS = env_bool("READD_CONFLICT_IS_SUCCESS", True)
 READD_RETRY_BASE = env_int("READD_RETRY_BASE", 300)      # 首次失败后最短重试间隔（秒）=5min
 READD_RETRY_CAP = env_int("READD_RETRY_CAP", 21600)      # 退避上限（秒）=6h
 
+# ★★ 2026-10-06（#7）：回加**前**等 qB 就绪，避免开机竞态（`SSLError port=3020`）。
+#   为什么需要：`SEED_DELAY_MIN=0`（默认）时发布**立即**回加，而开机后 qB 要几十秒
+#   才起来 ⇒ 撞 `SSLError`；虽然后续"顺延重试"不丢数据，但**无显式闸门、日志吓人**
+#   （把"还在启动"念成通用错误）。
+#   ★ 只读探活（`GET app/version`），**不 add、不动种子**。
+#   ★ 失败 = **顺延**（绝不丢），与既有"连不上=顺延"语义一致。
+#   ★★★ 2026-10-06（#49）：实现已搬到 `qb_client.py`（`qb_ready_once` / `wait_qb_ready`）
+#     —— 因为现在有**两个**调用方（本函数 + `publish.connect_qb()`）。
+#     下面的薄包装只是**保留 #7 已部署的符号名**（`tools/test_qb_ready.py` 按名注入假
+#     clock/sleep/probe）。**逻辑只有一份**，改行为改 `qb_client`，别在这重写。
+READY_TIMEOUT = env_int("QB_READY_TIMEOUT", 120)     # 单轮最多等多久（秒，封顶）
+READY_INTERVAL = env_int("QB_READY_INTERVAL", 5)     # 每次探活间隔（秒）
+
 
 def _readd_backoff(attempts):
     """第 `attempts` 次失败后，下次重试要等多少秒。★ 纯函数 ⇒ 可单测。
@@ -811,6 +879,27 @@ def _alive_line(state, stages, now):
     return "[存活] " + " · ".join(parts)
 
 
+def _qb_ready_once(host, timeout=3):
+    """只读探一次 qB 是否就绪。返回 `(ok, detail)`。★ 薄包装 —— 逻辑在 `qb_client.qb_ready_once`。
+
+    ★ 保留本名：`tools/test_qb_ready.py`（#7，15/15）按此名注入假 `urlopen` 测三支。
+    """
+    import qb_client
+    return qb_client.qb_ready_once(host, timeout=timeout)
+
+
+def _wait_qb_ready(host, *, timeout, interval, clock=time.monotonic, sleep=time.sleep,
+                   probe=None, log=log):
+    """等 qB 就绪，最多 `timeout` 秒。★ 薄包装 —— 唯一实现在 `qb_client.wait_qb_ready`。
+
+    ★ 保留本签名（含可注入 `clock`/`sleep`/`probe`/`log`）：`tools/test_qb_ready.py` 用它们
+      做**零等待**单测。★ 逻辑改动请改 `qb_client`（两个调用方共用一份，见那里的注释）。
+    """
+    import qb_client
+    return qb_client.wait_qb_ready(host, timeout=timeout, interval=interval,
+                                   clock=clock, sleep=sleep, probe=probe, log=log)
+
+
 def _drain_pending_readds():
     """到点的延迟回加条目 → `torrents_add`。**绝不 raise**（主循环的一步）。"""
     try:
@@ -824,6 +913,16 @@ def _drain_pending_readds():
         log(f"⚠️  [readd] 读队列出错，跳过本轮: {e}")
         return
     if not due:
+        return
+
+    # ★★ #7（2026-10-06）：连 qB 之前先等它就绪 —— 封住开机竞态（`SSLError port=3020`）。
+    #   ★ 超时 ⇒ **顺延**（due 条目原样留在盘上，下轮再试；**绝不丢**）。
+    #   ★ 这一步**只加不减**：下面 `build()` 的 try/except 原样保留作**二级兜底**
+    #     （即使 readiness 放过、add 瞬间 qB 又挂，既有"连不上=顺延"仍生效）。
+    #   ★ **不动 `build()` 契约**（`ERR-QB-08`：唯一构造点、连不上就抛）——
+    #     readiness 是它**前面**的一道**独立轻量只读闸门**。
+    if not _wait_qb_ready(config.QB_HOST, timeout=READY_TIMEOUT, interval=READY_INTERVAL):
+        log(f"ℹ️  [readd] qB 未就绪，{len(due)} 条延迟回加顺延（不改队列）")
         return
 
     # ★ 只在**真有到点条目**时才连 qB（没有待办就一条连接都不建）
@@ -951,6 +1050,115 @@ def _readd_thread_loop():
     log("🧵 [readd] 延迟回加线程退出")
 
 
+# ==================== ★★ 发种交棒线程（#92 新流程，2026-10-07 加）====================
+#
+# 干什么：把「满足交棒判据（出种≥N 或 做种≥D 天）」的种子任务从 3040 交棒到 3020，
+#   零拷贝（3020 的 /downloads 就是 HDD 上的原文件），然后清 SSD 副本 + 删 3040 任务。
+#   流程与安全边界见 `handoff.py` 模块头。
+#
+# ★ 为什么也是**独立线程**（照抄 readd 的理由，见上面那段长注释）：
+#   主循环单线程同步，scan/crawl 一跑就占满一整轮 ⇒ 放主循环里会"一轮 tick 才判一次"，
+#   被判据的"做种≥3天"无所谓，但"到点就交棒"会被长 stage 饿住。独立线程每
+#   `HANDOFF_THREAD_TICK` 自跑一次，与 stage 时长解耦。
+#
+# ★★ 线程安全：本线程是 `handoff_queue.json` 的**唯一写者**（与 readd_queue 同款）。
+#   qB 连接：本线程**自己** build 两个 Client（3040 = config.QB_HOST、3020 = 另一个 host），
+#   与各 stage、与 readd 线程的 Client 互不共享（qB WebAPI 无状态 HTTP）。
+#
+# ★★★ 默认**不开**（`ENABLE_HANDOFF=false`）⇒ 本线程压根不起，老行为一字不改。
+#   要开必须显式在 `.env` 加 `ENABLE_HANDOFF=true`（ERR-ENV-02：缺键默认中性）。
+#
+# ★★ 3020 的地址：**单独一个键** `QB_HOST_OPENCD`（默认 3020）—— **不**复用 config.QB_HOST
+#   （那个已被本流程改成 3040）。两个实例必须各有一个真值来源，否则交棒会"自己发给自己"。
+
+HANDOFF_HOST_3020 = os.getenv("QB_HOST_OPENCD", "http://127.0.0.1:3020")
+HANDOFF_THREAD_TICK = env_int("HANDOFF_THREAD_TICK", 300)      # 5min：慢判断，不必高频
+HANDOFF_MAX_PER_ROUND = env_int("HANDOFF_MAX_PER_ROUND", 5)
+
+
+def _handoff_dry_run():
+    return env_bool("HANDOFF_DRY_RUN", True)
+
+
+def _handoff_build_two():
+    """build (3040_src, 3020_dst) 两个 qB 连接。任一失败 ⇒ 返回 (None, None) + 原因。"""
+    import qb_client
+    try:
+        qb_src = qb_client.build(config)               # 3040（config.QB_HOST）
+    except Exception as e:                                          # noqa: BLE001
+        return None, None, f"连 3040 失败: {type(e).__name__}: {e}"
+    try:
+        # 3020 用**另一个 host**，但同一份构造纪律（复用 build 的 key/账号回退）。
+        import types
+        cfg3020 = types.SimpleNamespace(
+            QB_HOST=HANDOFF_HOST_3020,
+            QB_USER=getattr(config, "QB_USER", "admin"),
+            QB_PASS=config.QB_PASS,
+            QB_API_KEY=getattr(config, "QB_API_KEY", ""),
+        )
+        qb_dst = qb_client.build(cfg3020)
+    except Exception as e:                                          # noqa: BLE001
+        return None, None, f"连 3020 失败: {type(e).__name__}: {e}"
+    return qb_src, qb_dst, ""
+
+
+def _drain_handoff():
+    """推进 handoff 队列里所有**未完成**条目。**绝不 raise**（线程的一步）。"""
+    try:
+        import handoff
+    except Exception as e:                                          # noqa: BLE001
+        log(f"⚠️  [handoff] 无法 import handoff，跳过: {e}")
+        return
+    try:
+        pending = handoff.items_by_state(
+            "PENDING", "HANDOFF_ADDED", "HANDOFF_RECHECK", "FAILED")
+    except Exception as e:                                          # noqa: BLE001
+        log(f"⚠️  [handoff] 读队列出错，跳过本轮: {e}")
+        return
+    if not pending:
+        return
+    dry = _handoff_dry_run()
+    if not dry and not _wait_qb_ready(config.QB_HOST,
+                                      timeout=READY_TIMEOUT, interval=READY_INTERVAL):
+        log(f"ℹ️  [handoff] 3040 未就绪，{len(pending)} 条交棒顺延")
+        return
+    qb_src, qb_dst, err = _handoff_build_two()
+    if qb_src is None or qb_dst is None:
+        log(f"⚠️  [handoff] {err} ⇒ {len(pending)} 条交棒顺延")
+        return
+    done = 0
+    for it in pending[:HANDOFF_MAX_PER_ROUND]:
+        before = it.get("state")
+        after = handoff.process_one(qb_src, qb_dst, it, dry_run=dry)
+        if after != before:
+            log(f"🔀 [handoff] {it.get('infohash', '')[:12]}… {before} → {after}"
+                + (f"（{it.get('last_error')}）" if after == "FAILED" else ""))
+        if after == "DONE":
+            done += 1
+    if done:
+        log(f"✅ [handoff] 本轮完成 {done} 条（交棒+清盘）")
+
+
+def _handoff_thread_loop():
+    """独立线程：每 `HANDOFF_THREAD_TICK` 秒推进一次交棒状态机。**绝不退出到线程外**。"""
+    if os.getenv("ENABLE_HANDOFF", "false").strip().lower() not in ("1", "true", "yes", "y", "on"):
+        log("🧵 [handoff] ENABLE_HANDOFF 未开 ⇒ 交棒线程不起（新流程不接管）")
+        return
+    log(f"🧵 [handoff] 交棒线程启动（每 {HANDOFF_THREAD_TICK}s 扫一次；"
+        f"dry_run={_handoff_dry_run()}）")
+    while not _shutdown:
+        try:
+            _drain_handoff()
+        except Exception as e:                                      # noqa: BLE001
+            # 双保险：`_drain_handoff` 本身已"绝不 raise"。
+            log(f"⚠️  [handoff] 线程本轮异常（吞掉，继续）: {type(e).__name__}: {e}")
+        slept = 0.0
+        while slept < HANDOFF_THREAD_TICK and not _shutdown:
+            time.sleep(min(1.0, HANDOFF_THREAD_TICK - slept))
+            slept += 1.0
+    log("🧵 [handoff] 交棒线程退出")
+
+
 def main():
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
@@ -1020,6 +1228,11 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
     #   `daemon=True` ⇒ 主进程退出即结束，不阻止容器停止。
     #   见 `_readd_thread_loop` 上方那段"为什么必须独立线程"的注释。
     threading.Thread(target=_readd_thread_loop, name="readd", daemon=True).start()
+
+    # ★★★ 启动**交棒独立线程**（#92 新流程，2026-10-07）—— 同样必须在主循环之前起。
+    #   ★ 默认 `ENABLE_HANDOFF=false` ⇒ 线程函数**第一件事就 return**（日志说明），
+    #     所以"起了个空线程"没有副作用，且"开没开"在日志里一眼可辨。
+    threading.Thread(target=_handoff_thread_loop, name="handoff", daemon=True).start()
 
     while not _shutdown:
         beat()

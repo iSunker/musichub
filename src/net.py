@@ -53,6 +53,21 @@
 
 ★ 回退开关：`NET_FORCE_IPV4=false` ⇒ 不打补丁（用于对照实验或某个目标只有 IPv6 时）。
   默认 `true`。
+
+═══════════════════════════════════════════════════════════════════════════
+第二件事：**GET/HEAD 的重试**（2026-10-06，`#38`）
+═══════════════════════════════════════════════════════════════════════════
+上面那件事治的是"**选错了地址**"。但"**选对了地址、那个 Cloudflare 边缘却慢到
+>timeout**"是另一回事：`crabpt.vip` 的 GET 在 `timeout=30` 上间歇 `ReadTimeout`，
+而全项目**零重试** ⇒ 一次超时就把整阶段判 `exit 1`（见 `#37` 的复现）。
+落点就是本模块 —— 文件头早就写着"将来若要加 `Retry`，改这里一处即可"。
+
+  ★ **只对幂等方法（GET/HEAD）重试**，**绝不重试 POST**：
+    `takeupload.php` 上传**不可逆**、且"超时 ≠ 失败"（可能已经发出）⇒
+    重试 POST = **发两条**。`urllib3.Retry(allowed_methods=frozenset(["GET","HEAD"]))`
+    对**不在白名单**的方法**直接放行、不重试** ⇒ 从**机制上**杜绝（不是靠自觉）。
+
+★ 回退开关：`NET_RETRY=false` ⇒ 不挂 Retry（对照实验 / 排查用）。默认 `true`。
 """
 import os
 import socket
@@ -60,6 +75,21 @@ import socket
 # 回退开关。★ 默认 true；只有当某个目标**确实只有 IPv6**时才需要关掉。
 FORCE_IPV4 = (os.getenv("NET_FORCE_IPV4", "true").strip().lower()
               not in ("0", "false", "no", "off"))
+
+# ★★ 2026-10-06（#38）：GET/HEAD 的重试策略（见文件头「第二件事」）。
+#   ★ 全部 env 可覆盖，便于"改了不用重构建"（与 FORCE_IPV4 同款）。
+RETRY_ENABLED = (os.getenv("NET_RETRY", "true").strip().lower()
+                 not in ("0", "false", "no", "off"))
+RETRY_TOTAL = int(os.getenv("NET_RETRY_TOTAL", "3"))        # 额外重试次数
+RETRY_CONNECT = int(os.getenv("NET_RETRY_CONNECT", "3"))
+RETRY_READ = int(os.getenv("NET_RETRY_READ", "3"))          # ★ 读超时重试（#37 病灶）
+RETRY_STATUS = int(os.getenv("NET_RETRY_STATUS", "2"))
+RETRY_BACKOFF = float(os.getenv("NET_RETRY_BACKOFF", "0.5"))
+# ★ 只重试"确定可再试"的状态码：429(限流) + 5xx（服务端临时错）。
+#   ★ 不重试 4xx 业务错（403/404/401）—— 那是**确定性**的，重试白敲站点（还可能被限）。
+RETRY_STATUS_LIST = (429, 500, 502, 503, 504)
+# ★ 允许重试的方法白名单。POST **永不**在列（不可逆上传的保护）。
+RETRY_METHODS = frozenset(["GET", "HEAD"])
 
 # 幂等标记：同一个进程里被 import 多次也只打一次补丁（也便于自检断言"补丁已生效"）。
 _patched = False
@@ -88,14 +118,37 @@ def force_ipv4():
 def new_session():
     """创建一个统一的 `requests.Session()`。
 
-    ★ 现在它与 `requests.Session()` 等价（补丁是**全局**的、对所有 Session 生效）；
-      存在的意义是**留一个落点**：将来若要加统一 header / `HTTPAdapter` / `Retry`，
-      改这里一处即可，不必去追三份复制粘贴的 Session。
+    ★★ 2026-10-06（#38）：挂 **Retry** —— 对 **GET/HEAD** 的
+      **连接错 / 读超时 / 5xx** 自动重试（指数退避）；**POST 永不重试**（不可逆）。
+    ★ 为什么只重试 GET/HEAD：`crabpt_site`/`musopia` 的 `takeupload.php` 是**不可逆上传**，
+      超时**不等于**失败（可能已发出）⇒ 重试 = 发两条。`Retry(allowed_methods=...)`
+      对**不在白名单**的方法**直接放行、不重试** ⇒ 从机制上杜绝。
+    ★ 为什么放这里：三客户端（musopia/crabpt_site/crawl）**都**走 `net.new_session()`
+      ⇒ 一处生效、覆盖 T1/T3/T5 三族（封面/图床/站点）超时（`ERR-META-03`）。
+    ★ 回退开关 `NET_RETRY=false` ⇒ 不挂 Retry（对照实验 / 排查用），默认开。
     ★ 纪律：**新写网络代码一律用 `net.new_session()`**，不要再裸写
       `requests.Session()` —— 否则将来有人改了统一层，第四条 Session 会静默漏掉。
     """
     import requests
-    return requests.Session()
+    s = requests.Session()
+    if RETRY_ENABLED:
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        retry = Retry(
+            total=RETRY_TOTAL,                 # 额外重试次数
+            connect=RETRY_CONNECT,             # 连接阶段重试
+            read=RETRY_READ,                   # ★ 读超时重试（#37 的直接病灶）
+            status=RETRY_STATUS,               # 5xx 等状态码重试
+            status_forcelist=RETRY_STATUS_LIST,
+            backoff_factor=RETRY_BACKOFF,      # 0.5 → 1 → 2 → 4 s 指数退避
+            allowed_methods=RETRY_METHODS,     # ★ 只 GET/HEAD —— 绝不含 POST
+            respect_retry_after_header=True,
+            raise_on_status=False,             # 重试耗尽仍返回响应，交给上层判（不新造异常方言）
+        )
+        ad = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+        s.mount("https://", ad)
+        s.mount("http://", ad)
+    return s
 
 
 # ★ 模块 import 时立即生效（见文件头「为什么放在模块 import 时做」）。
@@ -134,6 +187,11 @@ def selftest():
             return True, detail
         if post != socket.AF_INET:
             return False, detail + [f"★ 补丁后不是 AF_INET（得到 {post}）⇒ 修复没生效"]
+        # ★ 顺带验 #38 的 Retry：GET 在白名单、POST 不在（安全侧）。
+        ok_retry, d_retry = _selftest_retry()
+        detail.extend(d_retry)
+        if not ok_retry:
+            return False, detail
         return True, detail
     finally:
         # 还原成"本模块应有的状态"：若开着开关就保持补丁，否则还原默认。
@@ -141,6 +199,64 @@ def selftest():
             force_ipv4()
         else:
             u3c.allowed_gai_family = saved
+
+
+def _selftest_retry():
+    """#38 的判据：**只重试 GET/HEAD、绝不含 POST**（且这条判据**能失败**）。
+
+    ★ 关键安全判据：把 `allowed_methods` 换成"含 POST"必须**报红** ——
+      即证明"不重试 POST"是被**测出来**的，而不是空真（`ERR-META-32`）。
+    """
+    detail = []
+    try:
+        from urllib3.util.retry import Retry
+    except ImportError as e:                                # noqa: BLE001
+        return False, [f"★ urllib3.util.retry 不可用：{e}"]
+
+    # ① 常量白名单本身不含 POST
+    if "POST" in RETRY_METHODS:
+        return False, detail + ["★ RETRY_METHODS 含 POST ⇒ 会重试不可逆上传！"]
+    detail.append(f"① RETRY_METHODS = {sorted(RETRY_METHODS)}（不含 POST ✅）")
+
+    # ② 用与 new_session 相同的参数构造 Retry，断言：GET 会重试、POST 不会。
+    def _mk(methods):
+        return Retry(total=RETRY_TOTAL, connect=RETRY_CONNECT, read=RETRY_READ,
+                     status=RETRY_STATUS, status_forcelist=RETRY_STATUS_LIST,
+                     backoff_factor=RETRY_BACKOFF, allowed_methods=methods,
+                     respect_retry_after_header=True, raise_on_status=False)
+
+    real = _mk(RETRY_METHODS)
+    if not real.is_retry("GET", 503):
+        return False, detail + ["★ GET+503 竟然不重试 ⇒ Retry 没生效"]
+    if real.is_retry("POST", 503):
+        return False, detail + ["★ POST+503 被判定可重试 ⇒ 危险！"]
+    if real.is_retry("POST", None):        # 无 status（=连接/读错）也不该重试 POST
+        return False, detail + ["★ POST+连接/读错 被判定可重试 ⇒ 危险！"]
+    detail.append("② 真白名单：GET/503=重试、POST/503=不重试、POST/连接错=不重试 ✅")
+
+    # ③★ 阴性对照：把 POST 加进白名单 ⇒ 上面那条"不该重试"的断言**必须**翻面。
+    bad = _mk(frozenset(["GET", "HEAD", "POST"]))
+    if not bad.is_retry("POST", 503):
+        return False, detail + ["★ 阴性对照失败：含 POST 的白名单竟也判 POST 不重试 ⇒ 判据是空真"]
+    detail.append("③★ 阴性对照：白名单含 POST 时 POST 变可重试 ⇒ 证明判据②不是空真 ✅")
+
+    # ④ NET_RETRY=false ⇒ new_session 不应挂 adapter（用假 requests 验，零网络）。
+    if not RETRY_ENABLED:
+        detail.append("④ NET_RETRY=false（当前配置）⇒ new_session 不挂 Retry；这是配置不是失败")
+    else:
+        import requests as _rq
+        s = new_session()
+        ad = s.get_adapter("https://crabpt.vip/")
+        mt = getattr(getattr(ad, "max_retries", None), "allowed_methods", None)
+        if mt is not None and "POST" in mt:
+            return False, detail + [f"★ new_session 的 adapter 白名单含 POST：{mt}"]
+        # 阴性对照：裸 requests.Session() 的 adapter 没有我们的 Retry（allowed_methods 非本白名单）
+        raw = _rq.Session().get_adapter("https://crabpt.vip/")
+        if getattr(getattr(raw, "max_retries", None), "allowed_methods", None) == RETRY_METHODS:
+            detail.append("④ 注意：裸 Session 也带同款白名单（环境异常，非失败）")
+        else:
+            detail.append("④ new_session 挂了 Retry 适配器（GET/HEAD），裸 Session 没有 ✅")
+    return True, detail
 
 
 def _selftest_cli():

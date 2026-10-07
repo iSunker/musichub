@@ -106,6 +106,65 @@ def build(config_mod=None, api_key=None):
     return qb
 
 
+# ═══════════════════════════════════════════════════════════════════════════ #
+# ★★★ 2026-10-06（#49）：qB readiness 闸门 —— **放在本模块 = 唯一一份**。
+#
+#   为什么搬到这（原先在 `daemon.py`）："回加前等 qB 就绪"现在有**两个**调用方 ——
+#     · `daemon._drain_pending_readds()`（延迟回加，SEED_DELAY_MIN>0 那条路，#7 已接）；
+#     · `publish.connect_qb()`（发布后**立即**回加，SEED_DELAY_MIN=0 那条路，#49 补上）。
+#   ★ 两个调用方若各留一份实现 ⇒ 就是 `ERR-QB-08` 那个"**13 处各写各的**"的形状
+#     （作者会在某天用更宽松的写法改其中一处）⇒ 收敛成**唯一一份**，两边都指过来。
+#
+#   ★ 纪律与 `build()` 同：**只读**探活（`GET app/version`，不 add / 不动种子 / 不登录）；
+#     不 import `qbittorrentapi`（用 urllib）⇒ 没有该库、没有 `.env` 时也能单测。
+#   ★ 契约：`_wait_qb_ready()` **返回布尔、绝不 raise**（连不上/超时/SSL 都算"未就绪"）。
+# ═══════════════════════════════════════════════════════════════════════════ #
+def qb_ready_once(host, timeout=3):
+    """只读探一次 qB 是否就绪。返回 `(ok, detail)`。★ 不抛（异常 → 未就绪）。
+
+    ★ 判据：`GET {host}/api/v2/app/version` 返回 200 且 body 形如 `v5.x.x`。
+      · 连不上 / SSL 错 / 超时 ⇒ `(False, 原因)` —— 都当"未就绪"（**不是**"坏"）。
+    ★ 为什么不复用 `build()`：`build()` 连不上**就抛**（设计如此），且**不区分**
+      "没起"与"鉴权错"；readiness 要的是**轻量、可反复、无副作用**的一探。
+    """
+    import urllib.request
+    try:
+        req = urllib.request.Request(host.rstrip("/") + "/api/v2/app/version")
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            ver = r.read().decode("utf-8", "replace").strip()
+        if getattr(r, "status", 0) == 200 and ver.startswith("v"):
+            return True, ver
+        return False, f"HTTP {getattr(r, 'status', '?')} ver={ver[:12]!r}"
+    except Exception as e:                                      # noqa: BLE001
+        return False, f"{type(e).__name__}: {e}"
+
+
+def wait_qb_ready(host, *, timeout, interval, clock=None, sleep=None,
+                  probe=None, log=None):
+    """等 qB 就绪，最多 `timeout` 秒。★ 纯逻辑（clock/sleep/probe 可注入）⇒ 单测不真等。
+
+    返回 `True`=就绪；`False`=超时（仍未起）。★ **绝不 raise**（返回布尔，调用方决定顺延）。
+    """
+    import time as _time
+    clock = clock or _time.monotonic
+    sleep = sleep or _time.sleep
+    probe = probe or qb_ready_once
+    if log is None:
+        def log(msg):
+            print(msg, flush=True)
+    deadline = clock() + timeout
+    last = ""
+    while True:
+        ok, detail = probe(host)
+        if ok:
+            return True
+        last = detail
+        if clock() >= deadline:
+            log(f"ℹ️  qB 未就绪（等了 {timeout}s，最后一次：{last}）⇒ 本轮顺延")
+            return False
+        sleep(interval)
+
+
 # ==================== 自检（全离线，不需要 .env）====================
 #
 # ★ 本自检**不 import 真 config**（那要 `QB_PASS`，本机没 `.env` 会 sys.exit）：
