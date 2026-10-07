@@ -58,6 +58,17 @@ QB_PASS = require_env("QB_PASS")
 #     （`daemon.ENV_SNAPSHOT_KEYS` 是**白名单**制 ⇒ 本键默认不外溢，同 `LSKY_TOKEN` 的纪律）。
 QB_API_KEY = os.getenv("QB_API_KEY", "")
 
+# ★★★ 2026-10-07（#129/#92-g）：**3020(opencd)** 自己的 API Key —— 交棒链路专用。
+#   ★ 为什么必须**再开一个键**（实测踩出来的，不是洁癖）：
+#     `QB_API_KEY` 现在指 **3040**（发种实例，见 `QB_HOST`）。而交棒要连 **3020** 查原种 /
+#     加种 —— 若复用 `QB_API_KEY`，就会**拿 3040 的 key 去打 3020** ⇒ 3020 回 **403**，
+#     整条交棒链在"定位 HDD 目录"那一步就静默失败（_resolve_opencd_content_path 返回 ""）。
+#   ★★ qB 5.2.4 实测铁律（见 NAS-92g）：API Key 必须是 `qbt_`+28 位 = **32 位总长**；
+#     36 位的 key 能存进 conf，但 `Authorization: Bearer` 会 **403**。
+#   ★ 留空 ⇒ 3020 客户端**回退用户名/密码**（`config.QB_USER`/`QB_PASS`——两台机器同账号即成立）。
+#     ⇒ 老部署不填这个键也**不会更坏**（回退路径本就在）。
+OPENCD_QB_API_KEY = os.getenv("QB_API_KEY_OPENCD", "")
+
 OPENCD_CATEGORY = os.getenv("OPENCD_CATEGORY", "opencd")
 PUBLISH_CATEGORY = os.getenv("PUBLISH_CATEGORY", "Musopia")
 

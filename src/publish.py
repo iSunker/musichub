@@ -341,7 +341,9 @@ def _resolve_opencd_content_path(info_hash):
             QB_HOST=os.getenv("QB_HOST_OPENCD", "http://127.0.0.1:3020"),
             QB_USER=getattr(config, "QB_USER", "admin"),
             QB_PASS=getattr(config, "QB_PASS", ""),
-            QB_API_KEY=getattr(config, "QB_API_KEY", ""),
+            # ★★★ 2026-10-07（#129）：3020 用**它自己的** key（`OPENCD_QB_API_KEY`），
+            #   绝不用 `config.QB_API_KEY`（那是 3040 的）—— 否则 3020 回 403（实测）。
+            QB_API_KEY=getattr(config, "OPENCD_QB_API_KEY", ""),
         )
         qb3020 = qb_client.build(cfg3020)
         got = qb3020.torrents_info(torrent_hashes=info_hash)
