@@ -383,9 +383,14 @@ def _source_category(qb_src, info_hash, dry_run=False):
 
     ★ 查不到该种 ⇒ 返回错误（**不当成"没分类"**），因为"查不到"与"未分类"必须分开
       —— 前者说明种不在 3040（还没发/已被删），此时**绝不能**往下走。
-    ★ `dry_run=True` ⇒ 不连 qB（没有真连接），返回 `("", "")` 让闸门在 dry-run 下放行。
+    ★★ `dry_run=True` 时**仍然真查**（NAS-92g 实测修）：本查询是**只读 GET**，dry-run 下
+      做了也**不改任何状态**；而闸门 `is_own_project(cat)` 依赖它拿到真分类。
+      ★★★ 原先 `dry_run` 短路返回 `("","")` ⇒ 闸门拿空串比白名单 ⇒ **恒判 False**
+        ⇒ dry-run 下**每条种都在闸门这一步被"拒交棒"**（日志像"非本项目种"，其实不是）。
+        这使 dry-run **失去演练意义**（永远看不到"本会交棒"那一步）。故改为：
+        dry-run 也查，只有**真的没有客户端**（`qb_src is None`）时才跳过。
     """
-    if dry_run:
+    if qb_src is None:
         return "", ""
     try:
         info = qb_src.torrents_info(torrent_hashes=info_hash)
