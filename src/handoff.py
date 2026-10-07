@@ -92,6 +92,35 @@ def save_queue(q):
         return False
 
 
+# ==================== ★★★ "漏做种"账本（让"复制没跑"不再静默）====================
+
+MISSING_LOG = os.path.join(config.DATA_DIR, "handoff_missing_data.jsonl")
+
+
+def record_missing_data(info_hash, album, site, reason):
+    """★★★ 记一条「已发布但发种区没有数据 ⇒ 这条不会做种」到**追加式账本**。
+
+    ★★ 为什么要有（2026-10-07 实测踩到，5 条种静默变下载）：发布时若**复制没跑成**
+      （拿不到 3020 源 / 复制抛异常 / 复制后核对不过），`publish.py` 会 `return` 跳过
+      回加 —— 这是**对的**（避免变下载），但**当时只有一行 print**。一旦 daemon 日志被
+      轮转/重启冲掉，"这条漏了"就**再也查不到**（本轮就是：16:00–18:14 的 5 条，
+      日志全没了、只能靠人肉比对 3040 与发种区才发现）。⇒ **失败必须落到盘上**。
+    ★ 形态：**JSONL 追加**（一行一条），不覆盖、不解析整文件 ⇒ 并发/异常都安全，
+      也**绝不 raise**（发布主流程不能被它带崩）。
+    ★ 用途：事后用一行命令 `grep handoff_missing_data.jsonl` 就能列全"漏做种的种"，
+      据此补复制 + `recheck`（见 README「漏做种补救」）。
+    """
+    rec = {"at": _now(), "infohash": str(info_hash or ""), "album": str(album or ""),
+           "site": str(site or ""), "reason": str(reason or "")}
+    try:
+        os.makedirs(os.path.dirname(MISSING_LOG), exist_ok=True)
+        with open(MISSING_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError as e:                                          # noqa: BLE001
+        # ★ 账本写不了**也不能崩发布流程**；但要说出来（同 `save_queue` 的纪律）。
+        print(f"⚠️  [handoff] 写漏做种账本失败（本条仍会跳过回加）: {e}")
+
+
 def enqueue(info_hash, name, save_path, target_save_path, note="", state="PENDING",
             category="", target_category="", src_path="", album=""):
     """把一条待交棒的种写进队列。**幂等**（同 infohash 已在 ⇒ 直接返回 True）。

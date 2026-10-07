@@ -9,7 +9,47 @@
 
 ---
 
-## 2026-10-07（续 91）—— #134：两个种"文件没传完就被推上 3040 ⇒ 变下载"的根因与修复
+## 2026-10-07（续 92）—— #135：复制判据重构 + 5 条"发种区无文件"坏种修复 + 自检副作用隔离
+
+> 承「续 91」。用户报："又有好几个种子添加进来但没做种、没文件"。本轮：查清 → 修复 5 条 → 重构复制判据 → 发现并修自检污染生产。**中途 compact**，本节点为续接锚点。
+
+### A. 已提交（本地，**未 push**）
+- `12b1152`：数据没就位 ⇒ 绝不回加 3040（上轮栅门）。
+- `5b278ee`：**复制完成判据从「目录非空」改为「逐字节核对补齐」** —— `copy_to_publish_area` 原先 `if isdir(dst) and listdir(dst): return`（把 qB 自己写进来的半截数据当"已复制好"）⇒ 改为一律 `verify_publish_area_complete` 核对，不完整即 `copytree(dirs_exist_ok=True)` 补齐。自检 ⑨h 加"半截目录必须被补齐"三态 + 回归护栏。**已构建镜像 `isunker/opencd2others:5b278ee` 并部署 NAS**（容器 `Up healthy`，容器内 selftest 通过，容器内 `handoff.py` 有/无新代码均已 grep 核实）。
+
+### B. 5 条坏种（3040 上属于本项目、但发种区无数据）—— **已全部修好并验证做种**
+| 站 | id | 专辑 | 病因 | 现状 |
+|---|---|---|---|---|
+| CrabPT | 217789 | ☆ac8.13f | 发种区无目录 | **stalledUP 1.000** |
+| Musopia | 20625 | Beyond II | 有目录但字节不符(缺18MB) | **stoppedUP 1.000** |
+| CrabPT | 217808 | 谈芳兵-问候你 | 发种区无目录 | **uploading 1.000** |
+| Musopia | 20636 | Buoc Chan Thoi Gian | 发种区无目录 | **queuedUP 1.000** |
+| CrabPT | 217832 | David Foster | 发种区无目录 | **uploading 1.000** |
+
+- **判"是本项目加的"**：`comment` = 发布页 URL + 分类 ∈ {Musopia,CrabPT} + 库里 `status=PUBLISHED/site_status=EXISTS` ⇒ **全是本项目发的，非别人手加**。
+- **recipe（已验证有效）**：① 复制 HDD→SSD（`begin_handoff_for_task` 或 `copy_to_publish_area`，逐字节核对）② 向 qB `POST /api/v2/torrents/recheck?hashes=<3040 hash>` ⇒ 转 `*UP progress=1.0`。
+- 补齐用的源 = 3020 上原种的 `content_path`（`/downloads/<专辑>`，容器内 = HDD ro 挂载）；**3020 上这 5 条都在做种（stalledUP）**，源可用。
+
+### C. ★ 根因：自动复制当时"静默没跑"（**未完全坐实，见「未解」**）
+- 事实链：① 复制代码（`0b362da`）+ `/publish` 挂载修正（`4da5979`）**14:31–14:37 CST 才进 git**；② 这 5 条 `added_on` = **16:01–18:14 CST**；③ **`☆ac8.13f`/`Beyond` 在续 91（17:11）已被记为"已坏"** ⇒ 坏在修复部署生效**之前**的镜像上；④ 我**现在**用**真路径**复现（`_resolve_opencd_content_path` + `begin_handoff_for_task`）**100% 成功**。
+- ⇒ **最可能**：那段时间跑的镜像里"复制整条没生效"（镜像早于 14:31，或 `#129` 3020-key 修复（15:11 CST）尚未部署 ⇒ `_resolve_opencd_content_path` 拿不到 source ⇒ `src=""` ⇒ 跳过复制）。**且当时是"静默"的**（只有一行 print，无落地）。
+
+### D. ★ 顺带发现并修复：自检 ⑨h **污染了生产队列**（真事故）
+- ⑨h 自检会真调 `begin_handoff_for_task` ⇒ `enqueue` ⇒ 写**真** `/data/handoff_queue.json`。NAS 实测：队列里多了一条 `cafebabe AlbumY FAILED`。**已清掉**。
+- **修法**：⑨h 里把 `_ho.QUEUE_FILE` 重定向到临时目录、跑完恢复（`_saved_qf3`）。**本机已验**：自检后真队列为空。
+- ★ 教训：自检**绝不许**有真副作用（`ERR-META-14`）。已加进本轮改动。
+
+### E. 未做 / 待续（compact 后接）
+- **B2（进行中）**：`handoff.record_missing_data()` —— 复制没跑成/抛异常时写**追加式账本** `data/handoff_missing_data.jsonl`，让"漏做种"不再静默（已在 `handoff.py` 写好函数，**尚未接线进 `publish.py` 的跳过点**，**尚未加自检**）。
+- **C1**：提交本轮改动（自检隔离 + record_missing_data + publish 接线）。
+- **C2**：补 ERRATA（新条目）+ 本节点已在；构建镜像 + 部署 NAS + 验证。
+- 待办细节见 TaskList（#10 完成、#11 B2 进行中、#12 C1、#13 C2）。
+
+### F. 清理（本轮已做）
+- 本机：清空 `.scratch/`、旧镜像 19→1（只留 `5b278ee`）。
+- NAS `opencd2others/`：删 `.env.bak-*`、`docker-compose.yml.bak-*`、旧落点 `publish_data/`、`@eaDir/`、`rollback-92g/`；镜像 13→1；同步 `.env.example`/`README.md`（compose 保留 NAS 的 sha pin 未覆盖）。NAS 部署目录现为标准 5 项 + `data/`。
+
+
 
 > 用户报：`crabpt/details.php?id=217789`、`musopia/details.php?id=20625` 这两个种
 > **在文件传输前就被推到 3040**，导致没做种、没发种、**变成下载**。排查 + 修复 + 重建镜像。

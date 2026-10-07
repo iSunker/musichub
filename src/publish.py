@@ -450,17 +450,23 @@ def readd_to_qb(qb, client, info_hash, torrent_id):
                     if not _ok:
                         print(f"    ❌ handoff 未就位 ⇒ **跳过回加 3040**（避免变成下载）："
                               f"{_why}")
+                        # ★★★ B2：**入账**（否则这条"已上站却不会做种"**静默消失**，见下）。
+                        handoff.record_missing_data(info_hash, album, "musopia", _why)
                         return
                 else:
                     print("    ⚠️  handoff：拿不到 3020 上的 content_path，"
                           "跳过复制（本条大概率不会做种）")
                     # ★ 拿不到源路径 ⇒ 无法复制 ⇒ 数据必然不在发种区 ⇒ 同样拒绝回加。
                     print("    ❌ 无法定位源成品 ⇒ **跳过回加 3040**（避免变成下载）")
+                    handoff.record_missing_data(info_hash, album, "musopia",
+                                                "拿不到 3020 content_path")
                     return
             except Exception as _e:                              # noqa: BLE001
                 # ★ 复制/核对**抛异常** ⇒ 数据状态未知 ⇒ 保守拒绝回加（宁可漏做种，不可推假下载）。
                 print(f"    ❌ handoff 复制/核对异常 ⇒ **跳过回加 3040**（避免变成下载）: "
                       f"{type(_e).__name__}: {_e}")
+                handoff.record_missing_data(info_hash, album, "musopia",
+                                            f"{type(_e).__name__}: {_e}")
                 return
         else:
             orig = qb.torrents_info(torrent_hashes=info_hash)
@@ -663,14 +669,20 @@ def readd_to_qb_crabpt(qb, client, info_hash, torrent_id):
                     if not _ok:
                         print(f"    ❌ handoff 未就位 ⇒ **跳过回加 3040**（避免变成下载）："
                               f"{_why}")
+                        # ★★★ B2：入账（同乌托邦路，见 `readd_to_qb` 内注释）。
+                        handoff.record_missing_data(info_hash, album, "crabpt", _why)
                         return
                 else:
                     print("    ⚠️  handoff：拿不到 3020 上的 content_path，跳过复制")
                     print("    ❌ 无法定位源成品 ⇒ **跳过回加 3040**（避免变成下载）")
+                    handoff.record_missing_data(info_hash, album, "crabpt",
+                                                "拿不到 3020 content_path")
                     return
             except Exception as _e:                              # noqa: BLE001
                 print(f"    ❌ handoff 复制/核对异常 ⇒ **跳过回加 3040**（避免变成下载）: "
                       f"{type(_e).__name__}: {_e}")
+                handoff.record_missing_data(info_hash, album, "crabpt",
+                                            f"{type(_e).__name__}: {_e}")
                 return
         else:
             # ① 做种路径：**乌托邦那条**（= 皇后原种 infohash）的 save_path

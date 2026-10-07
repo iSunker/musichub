@@ -927,7 +927,15 @@ def selftest():
         _saved_pub3 = _ho.config.PUBLISH_CONTAINER_DIR
         _saved_handoff3 = _ho.config.ENABLE_HANDOFF
         _saved_dry3 = _ho.config.HANDOFF_DRY_RUN
+        # ★★★ 副作用隔离（2026-10-07 实测踩到）：⑨h 会真的调 `begin_handoff_for_task`
+        #   ⇒ 它会 `enqueue` ⇒ 写 **真** 的 `/data/handoff_queue.json`！本机跑一次自检，
+        #   就把测试种（`cafebabe`/`deadbeef`）塞进**生产队列**、daemon 还会把它们标 FAILED
+        #   （NAS 实测：`data/handoff_queue.json` 里多了一条 `cafebabe AlbumY FAILED`）。
+        #   ⇒ 自检**绝不许**碰真实状态（`ERR-META-14`：测试不许有真副作用）。把队列文件
+        #   重定向到临时目录，跑完恢复。
+        _saved_qf3 = _ho.QUEUE_FILE
         try:
+            _ho.QUEUE_FILE = os.path.join(_tmp3, "handoff_queue.json")
             _ho.config.PUBLISH_CONTAINER_DIR = _pub_root3
             _ho.config.ENABLE_HANDOFF = "true"
             # ★ 关 dry-run：本节的判据是"复制不完整必须拒回加"，走的是**真实分组逻辑**
@@ -1002,6 +1010,7 @@ def selftest():
             _ho.config.PUBLISH_CONTAINER_DIR = _saved_pub3
             _ho.config.ENABLE_HANDOFF = _saved_handoff3
             _ho.config.HANDOFF_DRY_RUN = _saved_dry3
+            _ho.QUEUE_FILE = _saved_qf3
             _sh.rmtree(_tmp3, ignore_errors=True)
 
         # ── ⑨i ★★★ #134：回加复核判据必须能对"下载中"报红 ──
@@ -1029,6 +1038,31 @@ def selftest():
         if _pub_src.count("and prog >= 1.0") < 2:
             ok[0] = False
             detail.append("✗ ⑨i 回加复核缺少 `progress >= 1.0` 门槛（应两条路径都有）")
+
+        # ── ⑨j ★★★ B2：**"漏做种"必须入账**（不许静默跳过）──
+        #   ★★ 为什么：`not _ok` / 拿不到源 / 复制抛异常 ⇒ `return`（正确地拒回加），
+        #     但**只 print 一行**（日志被重启冲掉就没了）⇒ "已上站却不会做种"**静默消失**。
+        #     这正是「#134 五条坏种」被发现前**无任何账**可查的原因。
+        #   ★ 判据 = 两站的 3 个跳过点（× 2 站 = 6 处）都必须调 `record_missing_data`，
+        #     且账本函数本身必须在 `handoff.py` 里存在（否则接线是"接了个空"）。
+        if _pub_src.count("record_missing_data(") < 6:
+            ok[0] = False
+            detail.append(f"✗ ⑨j publish.py 里 `record_missing_data(` 只出现 "
+                          f"{_pub_src.count('record_missing_data(')} 处（应 ≥6："
+                          f"乌托邦+蟹黄堡 各 3 个跳过点）⇒ 漏做种会**静默**")
+        # 两站都要有（防"只接了一半"）
+        if _pub_src.count('handoff.record_missing_data(info_hash, album, "musopia"') < 3:
+            ok[0] = False
+            detail.append("✗ ⑨j 乌托邦路跳过点未全部入账（应 3 处：未就位/无源/异常）")
+        if _pub_src.count('handoff.record_missing_data(info_hash, album, "crabpt"') < 3:
+            ok[0] = False
+            detail.append("✗ ⑨j 蟹黄堡路跳过点未全部入账（应 3 处：未就位/无源/异常）")
+        # 账本函数必须真存在于 handoff.py（防"接线接了个空引用"）
+        _ho_py = _pl9i.Path(__file__).resolve().parent / "handoff.py"
+        _ho_src = _ho_py.read_text(encoding="utf-8") if _ho_py.exists() else ""
+        if "def record_missing_data(" not in _ho_src:
+            ok[0] = False
+            detail.append("✗ ⑨j handoff.py 里没有 `def record_missing_data(` ⇒ 接线是空引用")
     except Exception as e:                                        # noqa: BLE001
         ok[0] = False
         detail.append(f"✗ ⑨ 交棒自检执行失败: {type(e).__name__}: {e}")
