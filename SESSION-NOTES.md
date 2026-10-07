@@ -9,6 +9,195 @@
 
 ---
 
+## 2026-10-07（续 96）—— #26 [FIX-A7b]：**输出命名去重护栏**（治本，代码 + 自检 + ERRATA）——★ 未提交/未部署
+
+> 承「续 95」。用户「先做代码护栏（治本）」⇒ 本条**只治代码**，不改任何站点页面（那是 #27）。
+
+### A. 改了什么（3 处代码 + 1 条 ERRATA + 1 节自检）
+1. **新增纯函数 `run.output_sidecar_paths(formatted_title, info_hash, out_dir=None, *, exists=None, read_json=None)`**
+   （`src/run.py`，在 `create_musopia_torrent` 前）。职责：算 stem → 读**同 stem 的 `.json` sidecar** →
+   分三态：① 无同名 / 是**同一** infohash ⇒ **不改名**（重扫稳定，路径不漂移）；② 同名但 infohash **不同**
+   ⇒ 追加 `_{info_hash[:8]}` **消歧**（确定性：只看 infohash ⇒ 重扫不改名）；③ sidecar 坏/解析不出 ⇒
+   **保守不改名**且**不抛**。返回 `(torrent_path, json_path, collided)`。`exists`/`read_json` 两个注入参数
+   **只为单测**（使其成为可脱库的**纯函数**）。
+2. **接线写点**（`src/run.py` `main()` 内，原 `safe_name = re.sub(...)` / `torrent_file = ...` 两行**删除**）：
+   `torrent_file, json_path, _name_collided = output_sidecar_paths(formatted_title, info_hash)`；
+   `_name_collided` ⇒ **必须显式打印**（`ERR-META-14`）。下游 `.json` 落盘改用**同源** `json_path`
+   （**不再各算一次 stem** —— 各算一次正是本病根）。
+3. **旧注释同步**（`src/run.py:98` 附近）：把"由 `safe_name` 算"改成"由 `output_sidecar_paths()` 算"（`ERR-META-04`：改行为要同改文档）。
+4. **ERRATA 新增 `ERR-PUBLISH-11`**：教训 = "内容不同、名字相同"共用文件名 ⇒ 后写者静默覆盖前者**身份**；
+   **判据必须看内容身份（infohash）不看名字**。含"570 条假阳性（站点重写 infohash）/真信号 2 条"的关键鉴别。
+
+### B. 自检 ⑨n（`src/run.py` selftest，加在 ⑨l 之后）——**全部带阴性对照，实测双向**
+- **行为断言 6 条**（用注入的假文件系统，**不碰真盘**）：① 首见 ⇒ 默认名、无碰撞标志；② 同名是自己 ⇒
+  不改名；③ 同名是他者 ⇒ **改名 + `collided=True`**（核心）；④ 消歧名**确定性**（同输入逐字节相同）；
+  ⑤ sidecar 坏 ⇒ 不改名不抛；⑥ 无 info_hash ⇒ 不抛、后缀退化为 `nohash`。
+- **源码护栏**：剥注释后用**正则** `safe_name\s*=\s*re\.sub\(` 搜"旧单路命名"（回归即报红）+ 断言
+  `output_sidecar_paths(` 已接线。
+- **★ 阴性对照实测（两条都做了，不是"看着合理"）**：
+  · 把旧 `safe_name` 行**真的塞回** `run.py` ⇒ ⑨n **报红**（`❌ 自检失败：1 项不符`）；还原 ⇒ ✅。
+  · 把消歧逻辑改成 `pass`（不改名）⇒ ⑨n **报警 4 条**（消歧改名/同基名/碰撞标志/nohash）⇒ 还原 ✅。
+- **★ 踩坑并已修（本身即 `ERR-META-01` 形状，写进 ERRATA）**：
+  · 第一版源码护栏用**字面量**匹配 ⇒ 反斜杠转义层级写错（守卫里 `\\` ≠ 源码里 `\`）⇒ **守卫恒不触发**（静默失效）。
+  · 改成正则后 ⇒ 正则**命中了守卫自己的反面教材注释** ⇒ **守卫恒红**（真回归反而被淹没）。
+  · 终版 = **先剥行内注释**再搜 ⇒ 实测：clean ✅ / 塞回旧行 ❌ / 还原 ✅（三态都对）。
+
+### C. 影响与边界（**已核对**）
+- 只改**输出文件名**；`create_musopia_torrent()` 把内容目录做成 `.torrent`，**标题不进 info dict** ⇒ **不改 infohash**。
+- 消歧名**确定性**（只看 infohash）⇒ 重扫**不漂移**、库里 `torrent_file` 不每轮刷新（`flip_status` 那类"路径对不上"不会因此新增）。
+- `publish.py` 读的是 **DB 里存的 `torrent_file` 全路径**（`t.get("torrent_file")`）⇒ 只要 scan 把**消歧后的路径**写库，发布就上传**正确的文件** ⇒ 修法与下游自洽。
+- **不改历史**：已发布的 5+2 页仍是错的（#27 才处理）；本护栏只保证**今后**不再产生新的错版本。
+
+### D. 未做 / 待办
+- **未 commit、未 build、未 deploy**（项目规则：不主动 commit）。镜像 `bb68bf9-dirty` 是上一批修复的，**不含**本条。
+- #25（补查 `18984`/`19069` 两页）、#27（纠正 5+2 页）**未动**。
+- 待用户拍板：是否 (a) 提交/构建/部署本条护栏；(b) 以何策略处理 #27 的页面。
+
+---
+
+## 2026-10-07（续 95）—— #136 续 2：**多版本同名输出碰撞**（发布挂错版本的根因）——★ 只查未修
+
+> 承「续 94」。用户报 `musopia/details.php?id=20667` **又不做种/不上传**。**纯只读排查**，未改任何东西。
+
+### A. 病灶定性（NAS + 站点实测坐实）
+**输出文件名只由 `formatted_title` 决定**（不含版本/编号）⇒ **同一专辑的不同版本会算出同一个 basename** ⇒
+`.torrent` 与 sidecar `.json` **互相覆盖错位** ⇒ 发布时上传的是"**另一个版本**"的种子 ⇒ 站点页面**忠实挂上错版本**，
+而 DB 记着"对的"任务元数据 ⇒ **"页面挂的版本 ≠ DB 声称的版本"**。
+
+**实例（20667）确诊链**：
+- musopia 页 20667 抓到的 infohash = **`60dd1d72…`**（`created_by=音乐乌托邦` ⇒ 从站点下载回来的那份），内容 = **期間版 AICL-4905~6，818928227B**。
+- DB `site_publish`/`tasks` 里 id 20667 = **`9e9ed78a`**、`torrent_name=[…初回生産限定盤][AICL-4904]…`、`opencd_tid=197283`（=**初回版**）。
+- 本地 `output_torrents/Hana Hope - blue hour - FLAC 整轨 - OpenCD.torrent` 内容 = **期間版**（`65399d35`），
+  **但同目录 sidecar `.json` 却写着初回版**（`info_hash=9e9ed78a`）⇒ **同名文件内容被另一版本覆盖**。
+
+### B. 输出目录扫（判据要用"名字"，不能用 info_hash）
+- basename **字面重名 = 0**（不是同一文件名写两遍）。
+- `.json.info_hash ≠ 旁 .torrent.info_hash` = **570 条**，但**绝大多数假阳性**：`.torrent` 是**站点回传再生成**的
+  （`announce=…/announce.php?passkey=…`、`private=1`）⇒ 哈希必然 ≠ 原始 OpenCD 的 `.json`。**这不是 bug**。
+- **正确判据 = 比"名字"**（`json.torrent_name` vs `.torrent` 的 `info.name`，归一化）⇒ **真拼错只有 2 条**：
+  1. `Hana Hope - blue hour - FLAC 整轨 - OpenCD`（json=初回 AICL-4904，torrent=**期間** AICL-4905~6）
+  2. `SEKAI NO OWARI - Stella - FLAC 整轨 - OpenCD`（json=通常 TYCT-30170，torrent=**天幕** TYCT-39354）
+
+### C. 站点交叉核对（147 个已发布页）
+命中 8 个候选；**已坐实 5 个**（页面渲染出的 `[音乐乌托邦].`/`[XHB].` 文件名即其真正挂的种）：
+| 站点 | 页面 | DB/任务说 | 页面实际挂 | 判定 |
+|---|---|---|---|---|
+| musopia | 19333 | リーガルリリー-コニファー **期間** KSCL-3667 | **初回** KSCL-3665~6 | ❌ |
+| musopia | 20667 | Hana Hope-blue hour **初回** AICL-4904 | **期間** AICL-4905~6 | ❌ |
+| crabpt | 216217 | 女王蜂-星 **完全** AICL-4918~9 | **期間** AICL-4920 | ❌ |
+| crabpt | 217592 | リーガルリリー-コニファー **初回** KSCL-3665~6 | **期間** KSCL-3667 | ❌ |
+| crabpt | 216915 | SEKAI NO OWARI-Stella **天幕** TYCT-39354 | **通常** TYCT-30170 | ❌ |
+| musopia | 18984(女王蜂) / 19069(Stella) | — | 页面未渲染出（**待查**） | ⚠️ |
+- ★ 有 9 月的老页（19333 等）⇒ **长期存在**，非本轮新引入。
+- 本轮**未修任何页面/代码**。根因是**输出命名不含版本标识**。
+
+### D. ★ 下一步（见 TaskList #24）
+- **FIX-A7（#24）代码护栏（治本）**：输出文件名纳入版本/编号标识（如 `info.name` 的 `AICL-xxxx`），
+  或**写文件前比同名 `.json` 的 `info_hash`**，不一致即报错/加后缀 ⇒ 杜绝覆盖。
+- **数据纠正（治标）**：对 C 表 5+2 个页面逐页裁决（重发正确版本 / 编辑页面 / 仅记录）。
+- ★ 未解：`18984`/`19069` 两页未渲染出，**待验**（换 header/UA 或查 DB 该行的实际 torrent_file 内容）。
+
+### E. 本轮其余已完成（#14–#22，见续 94）
+坏种补救 20639/217848（已 `prog=1.0` 做种）· 3040 队列上限（`max_active_torrents 3→100000`，`queuedUP→0`）·
+ERRATA +3 条（`ERR-PUBLISH-09/10`、`ERR-QBTUNE-02`）· counts.json（ERR 126）· **构建并部署 `bb68bf9-dirty`**（NAS RepoDigest `sha256:8f7905ba…` 核对一致、容器内 grep 新代码 6/6、容器内 selftest 通过、healthy）。
+
+---
+
+## 2026-10-07（续 94）—— #136 续：坏种补救（#14–#17）+ 3040 队列上限修复（#22）+ 文档（#18/#19）
+
+> 承「续 93」。用户："先把那两个发种问题解决了" + "为什么 qb 里种子在排队也不发种"。
+> **本轮全部已实测坐实**；代码侧四个修复仍在「续 93」（**本轮未动代码**）。
+
+### A. 坏种清单（#14，NAS 实测）
+- 3040 上本项目种共 **8 个**；坏种**恰好 2 个**，健康 6 个（全 `prog=1.000`）。
+  | 站 | id | 3040 hash | 病因 | 源（3020 `stalledUP`） |
+  |---|---|---|---|---|
+  | Musopia | 20639 | `0908cab5d258` | 18:57 重启**前**的旧镜像发布 ⇒ 从没复制 | Eric Clapton - Icon 2，734M ✓ |
+  | CrabPT | 217848 | `d80b97b5e8d8` | 交棒失败→`FAILED→DONE` 删了 SSD 副本 | 秦腔名戏双CD，588M ✓ |
+- **`handoff_missing_data.jsonl` 账本不存在** ⇒ 这个部署上闸门还没触发过（两坏种都卡在闸门验证边界）。
+
+### B. 补救（#15/#16，recipe = 续 92 §B）
+- 用容器内 `handoff.copy_to_publish_area` + `verify_publish_area_complete`（**逐字节**）复制 HDD→SSD，再 3040 `POST torrents/recheck`。
+  - `20639`：769199147 字节，逐字节核对通过 ⇒ `stalledUP prog=1.000` ✓
+  - `217848`：615698388 字节，逐字节核对通过 ⇒ `uploading prog=1.000` ✓
+- 复查（#17）：全量 8 种 **BAD=0/8**，全 `prog=1.000` + 发种区逐字节就位。
+- 够格未交棒集（部署 FIX-2 后由交棒线程处理）：`20625`(出种4)/`217789`(18)/`217808`(11)/`217832`(13)；`20058`(comp=3) 按 `num_complete-1>=3` **不够格**。
+
+### C. ★ 3040「排队不发种」根因（#22，已修）
+- **不是数据/代码问题**：8 种全 `prog=1.000` 健康，但 3 `stalledUP` + 5 `queuedUP`。
+- **根因 = `Session\MaxActiveTorrents=3`**（全局活动槽，上下行共用）+ **慢种豁免未开**（`dont_count_slow_torrents=false`，实测读回 `True` 前是默认 false）⇒ 3 个停滞做种（`up=0`）**永久霸占活动槽** ⇒ 排队 5 个**永远轮不上**。
+- **谁设的**：3040 是 **10-07 12:37 新建**的实例（`qBittorrent.conf.bak-init` 无这三个键 ⇒ 用原生默认 `5/3/3`），到 14:48 (`bak-apikey`) 已被手写成 `3/10/1`。**不是** qbit_manage（`config_publish/config.yml` 明确不碰队列）、**不是**本项目代码。
+- **为什么不合理**：同机的 **3020 早已踩过并修好**（`ERR-QBTUNE-01`：`max_active_*`→`100000` + `IgnoreSlowTorrentsForQueueing=true`），**3040 新实例漏抄**。
+- **修法（已实测生效）**：`docker stop qbittorrent-publish` → 改 conf（`MaxActiveTorrents=100000`/`MaxActiveUploads=100000` + 加 `Session\IgnoreSlowTorrentsForQueueing=true`）→ `docker start`。备份 `qBittorrent.conf.bak-queuefix-20261007-220121`。
+  - **验证（按内容）**：回读 prefs `max_active_torrents=100000`、`dont_count_slow_torrents=True`；`queuedUP → 0`（8 种全 active，2 个正在 `uploading` ~3MB/s）。
+
+### D. 文档（#18/#19，本轮已做）
+- `ERRATA.md` 新增三条（**只教训+根因**）：`ERR-PUBLISH-09`（FAILED 落 finalize ⇒ 误删在用副本）、`ERR-PUBLISH-10`（延迟回加是第二条路径无闸门）、`ERR-QBTUNE-02`（判据死代码 + 新实例漏抄防护配置）。引用已解析（新 id 无悬空）；`ERR-SITE-01` 悬空是**既有**问题，与本轮无关。
+- `counts.json` 重生成：`ERR 126 条`（原 123，+3）。
+
+### E. ★ 未做（下一步）
+- **DEPLOY（#20/#21）**：`run.py --selftest` → `bash build-push.sh` → NAS `pull && up -d musopia` → **容器内 grep + selftest** → 观察日志确认真出现「已交棒到 3020」。
+- **改动的 5 个文件（仍未提交）**：`src/handoff.py` `src/daemon.py` `src/publish.py` `src/readd_queue.py` `src/run.py`。
+
+---
+
+## 2026-10-07（续 93）—— #136：`20639`/`217848` 未做种 + 「出种≥3 不交棒」根因 + 四个修复（**未部署**）
+
+> 承「续 92」。用户报：`musopia/details.php?id=20639`、`crabpt/details.php?id=217848` 两个种
+> 已添加但**没文件/没做种**；又问「出种>3 的种为什么没交棒到 3020」。**先诊断、后改码**，
+> 本轮**未部署**（改完本机 selftest 全绿 + 每个修复都有阴性对照）。
+
+### A. 诊断（NAS 实测坐实，非推测）
+1. **不是"代码没部署"**：容器跑的正是**修复镜像** `isunker/opencd2others:922aad9`（18:57 CST 起，`Up healthy`）。
+2. **两个种都"发种区无数据"**（`stalledDL`/`queuedDL prog=0`），但**成因不同**，且都在 18:57 前后：
+   | 站 | id | added_on(CST) | state | 实测链条 |
+   |---|---|---|---|---|
+   | crabpt | 217848 | 19:14 | `queuedDL` 0 | 18:59 复制**成功**+入队(15min后回加)→19:02 交棒失败`PENDING→FAILED`→**19:07 `FAILED→DONE` 把 SSD 副本删了**→19:14 回加时目录已没 |
+   | musopia | 20639 | 19:03 | `stalledDL` 0 | 发布在 18:57 重启**之前**（旧镜像）⇒ 从没复制；队列条目被持久化，重启后延迟回加线程 19:03 原样推到 3040（数据本就不在） |
+3. **`217848` 的直接凶手**：`handoff.process_one` 的交棒块只认 `("PENDING","HANDOFF_ADDED")`，
+   `FAILED` 条目会**跳过交棒**、直落 `verify_3020_seeding`+`finalize_source`；此刻 3020 恰好
+   已有该种在做种（辅种工具抢先）⇒ 判就绪 ⇒ `finalize_source` 把**3040 还没回加、副本还在用**的
+   SSD 目录删掉（`_source_category` 对"找不到该种"当"已删⇒安全"放行）。
+4. **`20639` 的直接凶手**：`daemon._drain_pending_readds`（**延迟回加**，与 publish 同步回加并列的
+   **第二条异步路径**）直接 `torrents_add`，**从不核对发种区**⇒数据缺失也照推。#134 的三道闸门
+   只加在 publish 同步路径，**这条漏了**。
+5. **「出种≥3 不交棒」根因**：`handoff.judge`/`pick_handoff_candidates` **只在 `run.py --selftest` 被调用**，
+   生产 daemon 从不引用 ⇒ 判据是**死代码**。实测：3040 上本项目种 `☆ac8.13f` **20 个别人做种**、
+   `David Foster` 13、`谈芳兵` 12 —— **一个都没交棒**；容器内 `已交棒到 3020` 计数 **= 0**。
+
+### B. 修复（四个，均本机 selftest 绿 + **阴性对照已做**；**未提交、未构建、未部署**）
+- **FIX-1 `process_one`（handoff.py）**：交棒块条件加 `"FAILED"`；新增**结构性旗标** `handed_off`
+  —— `finalize` 前显式 `if not handed_off: 拒删`。⇒ 堵死"FAILED 跳过交棒⇒直接清盘"。
+- **FIX-2 够格才交棒（用户 2026-10-07 拍板语义）**：新增 `handoff.eligible_on_3040(qb_src, ih)`
+  三态（缺种/不够格/够格）；`process_one` 的 **PENDING** 分支先过它 —— 不够格就**停在 PENDING**
+  （不交棒/不标 FAILED/不动源）。判据 = 用户原话「出种≥N(HANDOFF_SEEDERS_MIN=3) 或 做种≥D(HANDOFF_SEED_DAYS=3) 天」。
+- **FIX-3 延迟回加闸门（daemon.py + readd_queue.py + publish.py）**：`readd_queue.enqueue` 增 `src_path`/`album`
+  （兼容变更，不 bump 版本）；`publish.py` 两路带过去；抽出纯函数 **`daemon._readd_area_ready(item)`**
+  （有 src/album ⇒ `verify_publish_area_complete` 逐字节；老条目 ⇒ `save_path` 目录非空兜底；都无 ⇒ 判不就位），
+  `_drain_pending_readds` 在 `torrents_add` **之前**必须过它，不就位 ⇒ **跳过+`record_missing_data` 入账**。
+- **FIX-4 空 `last_error`（daemon.py）**：`_drain_handoff` 的 FAILED 日志原先读**过期快照**
+  `it.get('last_error')`（`process_one` 只 `update_item` 写盘、不改传入的 dict）⇒ 日志
+  `FAILED（）` 括号**恒空**（现场 `e3babe7f… PENDING → FAILED（）` 即此）。改为从**队列重读**真值。
+
+### C. 自检（新增 ⑨k / ⑨l / ⑨m，均含阴性对照）
+- **⑨k**：FAILED 条目 + SSD 副本在位 + 假 qb_dst 报"3020 在做种" + `handoff_to_3020` 失败（复刻 217848）
+  ⇒ 断言 SSD 副本**未被删**、结果**非 DONE**、条目**留队列**。阴性对照：撤掉 FIX-1 两处 ⇒ 报红 3 项。
+- **⑨l**：`eligible_on_3040` 四态（缺种/只自己做种/别人3够格/progress<1）+ 源码护栏（**调用点**
+  `eligible_on_3040(qb_src, info_hash)`）。阴性对照：删调用点 ⇒ 报红。
+- **⑨m**：`_readd_area_ready` 四态（空/完整/老条目兜底/无路径）+ 源码护栏（`_readd_area_ready(it)` +
+  `def _readd_area_ready(` **且** 不得再出现 `f"（{it.get('last_error')}）"`）。阴性对照：拆闸门/还原旧读法 ⇒ 报红。
+
+### D. ★ 未做（**下一步**，见 TaskList #12/#13/#14）
+- **OPS-A（#12）**：数据面补救——用 `handoff_missing_data.jsonl` 账本 + 3040 实况列**全部**坏种
+  （含 20639/217848 + 4 个够格未交棒的），复制 HDD→SSD → recheck。recipe 见续 92 §B。
+- **DEPLOY（#13）**：`src/run.py --selftest` → 构建 → 推/直传 → NAS `up -d musopia` → 容器内 grep+selftest
+  → 观察日志确认真出现「已交棒到 3020」。
+- **DOCS（#14）**：ERRATA 新条目（FAILED 落 finalize / 交棒判据死代码 / 延迟回加无闸门）+ `counts.json` 重生成。
+  ★ 注意：本节 SESSION-NOTES 是**追加**，改完计数要 `python tools/gen_counts.py`。
+- **改动的 5 个文件（未提交）**：`src/handoff.py` `src/daemon.py` `src/publish.py` `src/readd_queue.py` `src/run.py`。
+
+---
+
 ## 2026-10-07（续 92）—— #135：复制判据重构 + 5 条"发种区无文件"坏种修复 + 自检副作用隔离
 
 > 承「续 91」。用户报："又有好几个种子添加进来但没做种、没文件"。本轮：查清 → 修复 5 条 → 重构复制判据 → 发现并修自检污染生产。**中途 compact**，本节点为续接锚点。

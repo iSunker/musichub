@@ -900,6 +900,32 @@ def _wait_qb_ready(host, *, timeout, interval, clock=time.monotonic, sleep=time.
                                    clock=clock, sleep=sleep, probe=probe, log=log)
 
 
+def _readd_area_ready(item):
+    """★ #136：延迟回加前，判"发种区数据是否就位"。返回 `(ok, why)`。**纯只读、不连 qB**。
+
+    ★★ 为什么必须（2026-10-07 实测 `20639` Eric Clapton）：延迟回加是**另一条异步路径**
+      （与 publish 的同步回加并列），原先直接 `torrents_add` ⇒ 发种区没有数据也照推 3040
+      ⇒ qB 找不到文件 ⇒ `stalledDL progress=0` 变下载。
+    ★ 判据（与 handoff 同源，同一函数，不发明第二套）：
+      · 条目带 `src_path`+`album`（新条目）⇒ `handoff.verify_publish_area_complete`（逐字节）。
+      · 老条目没有这俩键 ⇒ 退化为"`save_path` 目录存在且非空"（兼容，别因缺字段就放行）。
+      · 两者都拿不到 ⇒ **判不就位**（宁可漏做种，不可推假下载）。
+    """
+    src = item.get("src_path") or ""
+    album = item.get("album") or ""
+    if src and album:
+        try:
+            import handoff
+            return handoff.verify_publish_area_complete(src, album)
+        except Exception as e:                                    # noqa: BLE001
+            return False, f"核对发种区异常: {type(e).__name__}: {e}"
+    sp = item.get("save_path") or ""
+    if sp:
+        ok = bool(os.path.isdir(sp) and os.listdir(sp))
+        return ok, f"发种区目录{'在' if ok else '不在/空'}: {sp}"
+    return False, "条目既无 src_path/album 也无 save_path，无从核对"
+
+
 def _drain_pending_readds():
     """到点的延迟回加条目 → `torrents_add`。**绝不 raise**（主循环的一步）。"""
     try:
@@ -943,6 +969,29 @@ def _drain_pending_readds():
     for it in due[:READD_MAX_ATTEMPTS]:
         note = it.get("note", "?")
         try:
+            # ★★★ #136（2026-10-07 实测 `20639`）：**回加前先核对发种区数据就位**。
+            #   ★ 为什么：延迟回加是**另一条异步路径**（与 publish 的同步回加并列），
+            #     原先直接 `torrents_add` ⇒ 数据缺失时照样把种推上 3040 ⇒ qB 找不到文件
+            #     ⇒ `stalledDL progress=0` 变下载。这正是 `20639`（Eric Clapton）的形状：
+            #     发布在修复生效前的镜像上、发种区没有它的目录，15 分钟后延迟回加照推。
+            #   ★ 注意：这里**没有** qb_src，核对只读本地盘（`verify_publish_area_complete`
+            #     比文件数+总字节）⇒ 不需要连 3040，开销只是 walk 一遍目录。
+            #   ★ 不就位 ⇒ **跳过回加 + 入账**（`record_missing_data`），**绝不**推假下载；
+            #     条目**出队**（避免每 30s 重试一条永远缺数据的条目刷屏）—— 种已上站不可逆，
+            #     回加失败属本地问题，退避重试无意义（同 `readd_to_qb` 的既有纪律）。
+            _ok136, _why136 = _readd_area_ready(it)
+            if not _ok136:
+                log(f"❌ [readd] {note} 发种区数据未就位 ⇒ **跳过回加**（避免变成下载）: "
+                    f"{_why136}")
+                try:
+                    import handoff as _ho136b
+                    _ho136b.record_missing_data(it.get("infohash", ""),
+                                                it.get("album") or "",
+                                                "readd-delayed", _why136)
+                except Exception:                                 # noqa: BLE001
+                    pass
+                done.append(it)                                   # 出队（不重试无源条目）
+                continue
             content = base64.b64decode(it["torrent_b64"])
             qb.torrents_add(
                 torrent_files=content,
@@ -1133,8 +1182,18 @@ def _drain_handoff():
         before = it.get("state")
         after = handoff.process_one(qb_src, qb_dst, it, dry_run=dry)
         if after != before:
+            # ★★★ #136（2026-10-07 实测）：**别读 `it` 的 `last_error`** —— 那是入队时的
+            #   快照，`process_one` 只 `update_item`（写盘），**不改**传进去的这个 dict
+            #   ⇒ 日志里 `FAILED（）` 括号**恒为空**（现场 `e3babe7f… PENDING → FAILED（）`
+            #   就是这么来的，害得排障时看不到"为什么失败"）。⇒ 从**队列**里重读真值。
+            _err_after = ""
+            try:
+                _fresh = {x.get("infohash"): x for x in handoff.items_by_state()}
+                _err_after = (_fresh.get(it.get("infohash")) or {}).get("last_error") or ""
+            except Exception:                                    # noqa: BLE001
+                _err_after = ""
             log(f"🔀 [handoff] {it.get('infohash', '')[:12]}… {before} → {after}"
-                + (f"（{it.get('last_error')}）" if after == "FAILED" else ""))
+                + (f"（{_err_after}）" if after == "FAILED" else ""))
         if after == "DONE":
             done += 1
     if done:

@@ -100,7 +100,8 @@ def save_queue(q):
         return False
 
 
-def enqueue(torrent_bytes, save_path, category, delay_min, note=""):
+def enqueue(torrent_bytes, save_path, category, delay_min, note="",
+            src_path="", album=""):
     """把一条「待回加」记进队列。**发布成功后调用**（此时种子已上站、不可逆）。
 
     :param torrent_bytes: `.torrent` 的**原始字节**（站点那份，带正确 announce）。
@@ -109,6 +110,9 @@ def enqueue(torrent_bytes, save_path, category, delay_min, note=""):
                           蟹黄堡 = `CRABPT_PUBLISH_CATEGORY`）。
     :param delay_min:     延迟多少分钟（<=0 时**不入队**，调用方应直接 add）。
     :param note:          人看的备注（哪条种子、哪个站），进日志用。
+    :param src_path:      ★ #136：成品 HDD 源（`/volume1/video/music/<专辑>`）。
+                          回加前用它**逐字节核对**发种区数据是否就位（见 daemon drain）。
+    :param album:         ★ #136：专辑名（核对发种区时拼落点用）。
 
     :returns: 入队成功返回 True。
     """
@@ -138,6 +142,13 @@ def enqueue(torrent_bytes, save_path, category, delay_min, note=""):
         "category": category,
         "note": note,
         "torrent_b64": b64,
+        # ★ #136（2026-10-07）：成品 HDD 源 + 专辑名 —— 回加前用它核对发种区数据就位。
+        #   ★ 为什么（`20639` 实测）：延迟回加**另一条异步路径**，原先直接 `torrents_add`，
+        #     不核对发种区 ⇒ 数据缺失时照样把种推上 3040 ⇒ 变下载（`stalledDL prog=0`）。
+        #   ★ 加字段是**兼容变更**，不 bump 版本；老条目没有这俩键 ⇒ 回加处退化为
+        #     "目录存在且非空"（同 handoff 的兜底），见 daemon `_drain_pending_readds`。
+        "src_path": src_path,
+        "album": album,
         # ★ 试了几次：到点 add 失败时 +1（见 daemon drain）。超过上限就放弃并报警。
         "attempts": 0,
         # ★★ 2026-10-04（#24）：回加失败后**退避重试**用的字段。

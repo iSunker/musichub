@@ -427,6 +427,8 @@ def readd_to_qb(qb, client, info_hash, torrent_id):
 
         _handoff_on = str(getattr(config, "ENABLE_HANDOFF", "false")).strip().lower() in (
             "1", "true", "yes", "y", "on")
+        # ★ #136：把成品源路径带到延迟回加条目里，供 daemon 回加前核对发种区就位。
+        _h_src, _h_album = "", ""
         if _handoff_on:
             # ★ 复制成品 HDD→3040 发种区 + 入队（用户要求：复制/删除由本项目代码自动化）。
             #   源 = 3020 上这条种的 content_path（= HDD `/volume1/video/music/<专辑>`）。
@@ -435,6 +437,7 @@ def readd_to_qb(qb, client, info_hash, torrent_id):
                 import handoff
                 src = _resolve_opencd_content_path(info_hash)
                 album = os.path.basename(str(src).rstrip("/\\")) if src else ""
+                _h_src, _h_album = src, album        # ★ #136：带给 delay 队列核对用
                 if src and album:
                     _ok, _why = handoff.begin_handoff_for_task(
                         src, album, info_hash, task=None,
@@ -487,6 +490,7 @@ def readd_to_qb(qb, client, info_hash, torrent_id):
             readd_queue.enqueue(
                 content, save_path, config.PUBLISH_CATEGORY,
                 config.SEED_DELAY_MIN, note=f"乌托邦 {info_hash[:12]}…",
+                src_path=_h_src, album=_h_album,     # ★ #136：回加前核对发种区用
             )
             # ★ 延迟回加时**不做**下面的回加复核（种子还没进 qB，查必然为空）
             return
@@ -650,12 +654,15 @@ def readd_to_qb_crabpt(qb, client, info_hash, torrent_id):
         #   ★ 关闭 handoff ⇒ 回退老行为（取 3040 上 orig 的 save_path）。
         _handoff_on = str(getattr(config, "ENABLE_HANDOFF", "false")).strip().lower() in (
             "1", "true", "yes", "y", "on")
+        # ★ #136：同乌托邦路 —— 把成品源路径带进延迟回加条目，供前核对发种区。
+        _h_src, _h_album = "", ""
         if _handoff_on:
             save_path = config.PUBLISH_SAVE_ROOT
             try:
                 import handoff
                 src = _resolve_opencd_content_path(info_hash)
                 album = os.path.basename(str(src).rstrip("/\\")) if src else ""
+                _h_src, _h_album = src, album        # ★ #136
                 if src and album:
                     _ok, _why = handoff.begin_handoff_for_task(
                         src, album, info_hash, task=None,
@@ -717,6 +724,7 @@ def readd_to_qb_crabpt(qb, client, info_hash, torrent_id):
             readd_queue.enqueue(
                 content, save_path, config.CRABPT_PUBLISH_CATEGORY,
                 config.SEED_DELAY_MIN, note=f"蟹黄堡 {info_hash[:12]}…",
+                src_path=_h_src, album=_h_album,     # ★ #136：回加前核对发种区用
             )
             return
         qb.torrents_add(

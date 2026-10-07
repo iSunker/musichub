@@ -95,8 +95,10 @@ def parse_title(raw_title, folder_path):
     #   ★★ 连带后果（已核对，**不是** `ERR-DATA-06` 那种副作用）：
     #     · 本行只影响**标题字符串**；`create_musopia_torrent()` 把内容目录做成
     #       `.torrent`，**标题不进 info dict** ⇒ **不改 infohash**。
-    #     · `torrent_file` 的文件名由 `safe_name` 算（看下面）⇒ 库里那个路径会
-    #       在下一轮 `scan` 里被重算覆盖，`save_task` 会连 `updated_at` 一起刷新。
+    #     · `torrent_file` 的文件名由 `output_sidecar_paths()` 算（看下面）⇒ 库里那个
+    #       路径会在下一轮 `scan` 里被重算，`save_task` 会连 `updated_at` 一起刷新。
+    #       ★ 但重算**稳定**：消歧只看 `info_hash`（重扫不变）⇒ 名字不漂移。
+    #       （#136 之前是 `safe_name` 只按标题算 ⇒ 同名版本互踏，见 `ERR-PUBLISH-11`。）
     #       这与"入库后 status 被改成 NO_TORRENT_FILE 导致踢出队列"是**两件事**：
     #       后者的根因已修（`topup_opencd_fields.py` 现在会带回库里已有路径）。
     formatted_title = f"{core} {year} - {fmt} {track_type}"
@@ -1063,11 +1065,366 @@ def selftest():
         if "def record_missing_data(" not in _ho_src:
             ok[0] = False
             detail.append("✗ ⑨j handoff.py 里没有 `def record_missing_data(` ⇒ 接线是空引用")
+
+        # ── ⑨k ★★★ #136（2026-10-07 `217848` 实测）：**FAILED 条目绝不许直接清盘** ──
+        #   ★★ 为什么：`process_one` 原代码的交棒块只认 `("PENDING","HANDOFF_ADDED")`；
+        #     一条 `FAILED` 条目会**跳过交棒**、直落 `verify_3020_seeding` + `finalize_source`。
+        #     若此刻 3020 恰好已有该种在做种（辅种工具抢先加了）⇒ verify 判就绪 ⇒
+        #     `finalize_source` 把**3040 还没回加、发种区副本还在用**的 SSD 目录**删掉**
+        #     ⇒ 15 分钟后的延迟回加指向一个已删目录 ⇒ 变下载（`queuedDL progress=0`）。
+        #   ★ 判据（阴性对照，必须能对**旧行为**报红）：
+        #     构造 `state=FAILED` 的队列条目 + SSD 副本**确实在位** + 假 qb_dst 报"3020 在做种"
+        #     + 假 qb_src 报"3040 找不到该种"（= 回加还没发生）。调 `process_one` 后断言：
+        #       (a) **SSD 副本仍在**（没被 `_safe_rmtree` 删）—— 这是核心；
+        #       (b) 结果**不是 DONE**（没被误判成功）；
+        #       (c) 条目**留在队列里**（可重试，不是被 remove_item 抹掉）。
+        _tmp4 = _tf.mkdtemp(prefix="handoff-136-selftest-")
+        _pub_root4 = os.path.join(_tmp4, "publish")
+        _saved_pub4 = _ho.config.PUBLISH_CONTAINER_DIR
+        _saved_qf4 = _ho.QUEUE_FILE
+        _saved_h2 = _ho.handoff_to_3020
+        _saved_v2 = _ho.verify_3020_seeding
+        try:
+            _ho.QUEUE_FILE = os.path.join(_tmp4, "handoff_queue.json")
+            _ho.config.PUBLISH_CONTAINER_DIR = _pub_root4
+            # 成品源（HDD 侧）+ 发种区副本，**逐字节完整**（所以"发种区副本在位"成立）。
+            _src4 = os.path.join(_tmp4, "hdd", "AlbumZ")
+            os.makedirs(_src4)
+            with open(os.path.join(_src4, "z.flac"), "wb") as _f:
+                _f.write(b"Z" * 2048)
+            _dst4 = os.path.join(_pub_root4, "AlbumZ")
+            os.makedirs(_dst4)
+            with open(os.path.join(_dst4, "z.flac"), "wb") as _f:
+                _f.write(b"Z" * 2048)
+            # 入队 + 人为把它置成 FAILED（模拟"上一轮某步没过"）。
+            _ho.enqueue("beefcafe", "AlbumZ", _dst4, "/downloads", state="PENDING",
+                        category="CrabPT", target_category="CrabPT",
+                        src_path=_src4, album="AlbumZ")
+            _ho.update_item("beefcafe", state="FAILED", last_error="上一轮失败")
+
+            # 假 qb_dst：3020 **已有该种在做种**（触发旧代码的 finalize）。
+            class _FakeDst:
+                def torrents_info(self, **kw):
+                    return [{"hash": "beefcafe", "progress": 1.0, "state": "uploading"}]
+                def torrents_add(self, **kw):
+                    return None
+                def torrents_recheck(self, **kw):
+                    return None
+
+            # 假 qb_src：3040 **找不到该种**（= 回加还没发生）⇒ `finalize_source` 的
+            #   隔离闸门拿 "找不到该种"（旧代码把它当"已删⇒安全可清"⇒ 删盘！）。
+            class _FakeSrc:
+                def torrents_info(self, **kw):
+                    return []
+                def torrents_delete(self, **kw):
+                    return None
+
+            # ★ 忠实复刻 `217848` 现场：19:02 交棒**失败**（`PENDING → FAILED`），
+            #   19:07 重试时 state 已是 FAILED。**旧代码**在 FAILED 这一步**跳过交棒**、
+            #   直落 verify+finalize；**新代码**必须让 FAILED **重走交棒**——交棒若**再失败**
+            #   ⇒ 提前 return FAILED（不落 finalize）。故 mock `handoff_to_3020` **失败**。
+            _ho.handoff_to_3020 = lambda *a, **k: (False, "fake 交棒失败（复刻 217848）")
+            _ho.verify_3020_seeding = lambda *a, **k: (True, "fake 3020 在做种")
+
+            _after4 = _ho.process_one(_FakeSrc(), _FakeDst(),
+                                      {"infohash": "beefcafe", "state": "FAILED",
+                                       "save_path": _dst4, "target_save_path": "/downloads",
+                                       "target_category": "CrabPT",
+                                       "src_path": _src4, "album": "AlbumZ"},
+                                      dry_run=False)
+            # (a) ★ 核心：SSD 副本**必须还在**（旧代码此处在 finalize 里把它删了）。
+            _z_still = os.path.exists(os.path.join(_dst4, "z.flac"))
+            chk("⑨k FAILED 条目·SSD 副本未被误删（核心，217848 病根）", _z_still, True)
+            # (b) 不得被判成 DONE（旧代码返回 DONE）。
+            chk("⑨k FAILED 条目·结果不是 DONE", _after4 != "DONE", True)
+            # (c) 条目要留下（可重试），不许被 remove_item 抹掉。
+            _still_q = any(it.get("infohash") == "beefcafe" for it in _ho.items_by_state())
+            chk("⑨k FAILED 条目·仍在队列（可重试）", _still_q, True)
+        finally:
+            _ho.handoff_to_3020 = _saved_h2
+            _ho.verify_3020_seeding = _saved_v2
+            _ho.config.PUBLISH_CONTAINER_DIR = _saved_pub4
+            _ho.QUEUE_FILE = _saved_qf4
+            _sh.rmtree(_tmp4, ignore_errors=True)
+
+        # ── ⑨m ★★★ #136（2026-10-07 `20639` 实测）：**延迟回加前必须核对发种区就位** ──
+        #   ★★ 为什么：延迟回加（`daemon._drain_pending_readds`）是与 publish 同步回加
+        #     并列的**另一条异步路径**，原先直接 `torrents_add` ⇒ 数据缺失也照推 3040
+        #     ⇒ 变下载（`20639` 形状）。修法 = 抽出纯函数 `daemon._readd_area_ready(item)`，
+        #     回加前据此裁决。判据分两条：
+        #       (a) 行为判据（纯本地）：带 src_path/album 且发种区**完整** ⇒ True；
+        #           发种区**空** ⇒ False（阴性对照）；拿不到任何路径 ⇒ False。
+        #       (b) 源码护栏：`_drain_pending_readds` 里 `torrents_add` 之前**必须**出现
+        #           `_readd_area_ready(`（防有人把闸门拆了 ⇒ 回归到"直接推"）。
+        try:
+            import importlib as _il9m
+            _dmn = _il9m.import_module("daemon")
+            _tmp5 = _tf.mkdtemp(prefix="readd-136-selftest-")
+            _pub_root5 = os.path.join(_tmp5, "publish")
+            _saved_pub5 = _ho.config.PUBLISH_CONTAINER_DIR
+            try:
+                _ho.config.PUBLISH_CONTAINER_DIR = _pub_root5
+                _src5 = os.path.join(_tmp5, "hdd", "AlbumR")
+                os.makedirs(_src5)
+                with open(os.path.join(_src5, "r.flac"), "wb") as _f:
+                    _f.write(b"R" * 1024)
+                # ① 发种区**空** ⇒ 判不就位（阴性对照 —— 这就是 20639 的现场）
+                _r5a, _ = _dmn._readd_area_ready(
+                    {"src_path": _src5, "album": "AlbumR", "save_path": "/downloads"})
+                chk("⑨m 延迟回加·发种区空 ⇒ 判不就位（拒回加，阴性对照）", _r5a, False)
+                # ② 发种区**完整** ⇒ 判就位
+                _dst5 = os.path.join(_pub_root5, "AlbumR")
+                os.makedirs(_dst5)
+                with open(os.path.join(_dst5, "r.flac"), "wb") as _f:
+                    _f.write(b"R" * 1024)
+                _r5b, _ = _dmn._readd_area_ready(
+                    {"src_path": _src5, "album": "AlbumR", "save_path": "/downloads"})
+                chk("⑨m 延迟回加·发种区完整 ⇒ 判就位", _r5b, True)
+                # ③ 老条目（无 src_path/album）+ save_path 目录存在非空 ⇒ 兜底判就位
+                _r5c, _ = _dmn._readd_area_ready({"save_path": _dst5})
+                chk("⑨m 老条目·save_path 目录非空 ⇒ 兜底判就位", _r5c, True)
+                # ④ 啥都拿不到 ⇒ 判不就位（绝不因缺字段放行）
+                _r5d, _ = _dmn._readd_area_ready({})
+                chk("⑨m 无任何路径 ⇒ 判不就位（不放行）", _r5d, False)
+            finally:
+                _ho.config.PUBLISH_CONTAINER_DIR = _saved_pub5
+                _sh.rmtree(_tmp5, ignore_errors=True)
+            # ⑤ 源码护栏：`torrents_add` 必须被 `_readd_area_ready` 挡在前面
+            _dmn_src = (_pl9i.Path(__file__).resolve().parent / "daemon.py").read_text(
+                encoding="utf-8") if (_pl9i.Path(__file__).resolve().parent
+                                      / "daemon.py").exists() else ""
+            if "_readd_area_ready(it)" not in _dmn_src:
+                ok[0] = False
+                detail.append("✗ ⑨m daemon._drain_pending_readds **没有**调 `_readd_area_ready(it)`"
+                              " ⇒ 延迟回加又变「不核对直接推」（#136 病根）")
+            if "def _readd_area_ready(" not in _dmn_src:
+                ok[0] = False
+                detail.append("✗ ⑨m daemon.py 里没有 `def _readd_area_ready(` ⇒ 护栏是空引用")
+            # ⑥ ★ #136：FAILED 日志不得再读**过期快照** `it.get('last_error')`
+            #   （现场 `PENDING → FAILED（）` 括号恒空 = 排障时看不到失败原因）。
+            if "f\"（{it.get('last_error')}）\"" in _dmn_src:
+                ok[0] = False
+                detail.append("✗ ⑨m [handoff] FAILED 日志仍读**过期** `it.get('last_error')`"
+                              " ⇒ 括号恒空（应改读队列真值）")
+        except Exception as _e9m:                                # noqa: BLE001
+            ok[0] = False
+            detail.append(f"✗ ⑨m 执行失败: {type(_e9m).__name__}: {_e9m}")
+
+        # ── ⑨l ★★★ #136：**"够格才交棒"必须真生效**（出种≥N 或 做种≥D 天）──
+        #   ★★ 为什么：`judge`/`pick_handoff_candidates` 原先**只在 selftest 被调**，
+        #     生产 daemon 从不引用 ⇒ "出种≥3 才交棒"是**死代码**（实测 `☆ac8.13f` 20 个
+        #     别人做种仍不交棒、容器内 `已交棒到 3020` 计数=0）。用户 2026-10-07 拍板
+        #     语义 = **够格才交棒** ⇒ `process_one` 的 PENDING 分支必须先过 `eligible_on_3040`。
+        #   ★ 判据：(a) 行为 —— `eligible_on_3040` 三态正确（缺种/不够格/够格）；
+        #           (b) 源码护栏 —— `process_one` 里出现 `eligible_on_3040(`，
+        #               且 daemon 侧交棒块**不是**无条件立即交棒。
+        try:
+            # (a) 行为：假 qb_src 覆盖三种 3040 实况。
+            class _FakeSrc9L:
+                def __init__(self, info):
+                    self._info = info
+                def torrents_info(self, **kw):
+                    return self._info
+            _NOW9L = 1_800_000_000.0
+            # ① 3040 上没这条种 ⇒ present=False（还没回加）⇒ 等
+            _p1, _e1, _ = _ho.eligible_on_3040(_FakeSrc9L([]), "aa", now=_NOW9L,
+                                               seeders_min=3, seed_days=3)
+            chk("⑨l 3040 无该种 ⇒ 不交棒（等）", (_p1, _e1), (False, False))
+            # ② 做完种但别人做种=0（num_complete=1）、做种 0 天 ⇒ 不够格
+            _p2, _e2, _ = _ho.eligible_on_3040(
+                _FakeSrc9L([{"hash": "aa", "progress": 1.0, "num_complete": 1,
+                             "added_on": _NOW9L}]), "aa", now=_NOW9L,
+                seeders_min=3, seed_days=3)
+            chk("⑨l 只有自己做种(num_complete=1)·0天 ⇒ 不交棒（等）", _e2, False)
+            # ③ 别人做种=3（num_complete=4）⇒ 够格交棒
+            _p3, _e3, _ = _ho.eligible_on_3040(
+                _FakeSrc9L([{"hash": "aa", "progress": 1.0, "num_complete": 4,
+                             "added_on": _NOW9L}]), "aa", now=_NOW9L,
+                seeders_min=3, seed_days=3)
+            chk("⑨l 别人做种3(num_complete=4) ⇒ 交棒", _e3, True)
+            # ④ 还没做完种（progress<1）即便 num_complete 很大 ⇒ 不够格
+            _p4, _e4, _ = _ho.eligible_on_3040(
+                _FakeSrc9L([{"hash": "aa", "progress": 0.5, "num_complete": 9,
+                             "added_on": _NOW9L}]), "aa", now=_NOW9L,
+                seeders_min=3, seed_days=3)
+            chk("⑨l progress<1 即便出种多 ⇒ 不交棒（等）", _e4, False)
+            # (b) 源码护栏：`process_one` 必须真调 `eligible_on_3040`（**调用点**，
+            #     ★ 别只搜 `eligible_on_3040(` —— 那是 `def` 行也含的子串，会恒为真）。
+            if "eligible_on_3040(qb_src, info_hash)" not in _ho_src:
+                ok[0] = False
+                detail.append("✗ ⑨l handoff.py 里**没有调用** `eligible_on_3040(qb_src, "
+                              "info_hash)` ⇒ 「够格才交棒」仍是死代码（#136 病根）")
+            if "def eligible_on_3040(" not in _ho_src:
+                ok[0] = False
+                detail.append("✗ ⑨l handoff.py 里没有 `def eligible_on_3040(`")
+        except Exception as _e9l:                                # noqa: BLE001
+            ok[0] = False
+            detail.append(f"✗ ⑨l 执行失败: {type(_e9l).__name__}: {_e9l}")
+
+        # ── ⑨n ★★★ #136 / ERR-PUBLISH-11：**多版本同名输出碰撞**防护 ──
+        #   ★★ 为什么：输出名原先只由 `formatted_title` 算 ⇒ 不同版本（初回/期間/完全/
+        #     通常/分轨/整轨）只要算出的标题相同就**算到同一个文件名** ⇒ 后写者覆盖前者的
+        #     `.torrent`/`.json` ⇒ 站点挂错版本（实测 `20667`/`23313`/`216217`/`217592`/`216915`
+        #     五例）。判据 = 同名 sidecar 里记的 `info_hash` 若**不是自己** ⇒ 消歧改名。
+        #   ★ 全部用**注入的 exists/read_json**（`output_sidecar_paths` 是纯函数）——
+        #     不碰真文件系统（`ERR-META-14`：自检不许有真副作用）。
+        try:
+            _out = os.path.join(_tf.mkdtemp(prefix="namecollide-136-selftest-"), "out")
+            os.makedirs(_out, exist_ok=True)
+            # 假文件系统：`_FS[name] = None`（存在但解析失败）或 = dict（解析成功）。
+            _FS = {}
+            _exists = lambda p: os.path.basename(p) in _FS      # noqa: E731
+            def _readj(p, _FS=_FS):                              # noqa: ANN001
+                v = _FS.get(os.path.basename(p))
+                if v is None:
+                    raise ValueError("坏 json")
+                return v
+
+            _TITLE = "女王蜂 - 星 2024 - FLAC 整轨"
+            _stem = _safe_output_stem(_TITLE)
+
+            # ① 无同名 sidecar（首见）⇒ **不改名**、无碰撞标志。
+            _t1, _j1, _c1 = output_sidecar_paths(
+                _TITLE, "aaaaaaaaaaaa", _out, exists=_exists, read_json=_readj)
+            chk("⑨n 首见（无同名 sidecar）·用默认名", os.path.basename(_t1), f"{_stem}.torrent")
+            chk("⑨n 首见·json 与 torrent 同 stem", os.path.basename(_j1), f"{_stem}.json")
+            chk("⑨n 首见·无碰撞标志", _c1, False)
+
+            # ② 同名 sidecar 是**自己**（重扫）⇒ **不改名**（名字稳定，不漂移）。
+            _FS[f"{_stem}.json"] = {"info_hash": "AAAAAAAAAAAA"}   # 大小写/同一哈希
+            _t2, _j2, _c2 = output_sidecar_paths(
+                _TITLE, "aaaaaaaaaaaa", _out, exists=_exists, read_json=_readj)
+            chk("⑨n 同名 sidecar 是自己·不改名（重扫稳定）", os.path.basename(_t2), f"{_stem}.torrent")
+            chk("⑨n 同名 sidecar 是自己·无碰撞标志", _c2, False)
+
+            # ③ ★★ 核心（阴性对照的镜像）：同名 sidecar 是**别的 infohash** ⇒ 消歧改名。
+            _FS[f"{_stem}.json"] = {"info_hash": "bbbbbbbbbbbb"}
+            _t3, _j3, _c3 = output_sidecar_paths(
+                _TITLE, "abcdef012345", _out, exists=_exists, read_json=_readj)
+            chk("⑨n 同名 sidecar 是别的版本·消歧改名", os.path.basename(_t3), f"{_stem}_abcdef01.torrent")
+            chk("⑨n 消歧·json 与 torrent **同**基名", os.path.basename(_j3), f"{_stem}_abcdef01.json")
+            chk("⑨n 消歧·置碰撞标志（上层须报出）", _c3, True)
+
+            # ④ 消歧名**确定性**：同样输入再算一次必须**逐字节相同**（否则每轮 scan 漂移）。
+            _t4, _j4, _c4 = output_sidecar_paths(
+                _TITLE, "abcdef012345", _out, exists=_exists, read_json=_readj)
+            chk("⑨n 消歧名确定性（同输入同结果）", (_t4, _j4), (_t3, _j3))
+
+            # ⑤ sidecar 坏/解析不出 ⇒ **不改名**（保守，不因坏 json 制造新名）+ 不抛。
+            _FS[f"{_stem}.json"] = None
+            _t5, _j5, _c5 = output_sidecar_paths(
+                _TITLE, "cccccccccccc", _out, exists=_exists, read_json=_readj)
+            chk("⑨n sidecar 坏·不改名（保守·不抛）", os.path.basename(_t5), f"{_stem}.torrent")
+            chk("⑨n sidecar 坏·无碰撞标志", _c5, False)
+
+            # ⑥ 无 info_hash 也不抛（消歧后缀退化为 nohash）—— 边界不许崩。
+            _FS[f"{_stem}.json"] = {"info_hash": "dddddddddddd"}
+            _t6, _j6, _c6 = output_sidecar_paths(
+                _TITLE, "", _out, exists=_exists, read_json=_readj)
+            chk("⑨n 无 info_hash·消歧不抛且带 nohash", os.path.basename(_t6), f"{_stem}_nohash.torrent")
+            _sh.rmtree(os.path.dirname(_out), ignore_errors=True)
+        except Exception as _e9n:                                # noqa: BLE001
+            ok[0] = False
+            detail.append(f"✗ ⑨n 执行失败: {type(_e9n).__name__}: {_e9n}")
+
+        # ⑨n 源码护栏：write 路径**不许**再出现旧的"各算一次 stem"（回归护栏）。
+        _run_py = _pl9i.Path(__file__).resolve().parent / "run.py"
+        _run_src = _run_py.read_text(encoding="utf-8") if _run_py.exists() else ""
+        # ★ 先**去掉注释与字符串里的假匹配**：本守卫自己的注释里就写了
+        #   `safe_name = re.sub(`（当反面教材），不去掉 ⇒ **自己把自己判红**
+        #   （实测踩到：守卫恒红、真回归反而看不见 —— 正是 ERR-META-01 的形状）。
+        #   ⇒ 只保留"行内 `#` 之前"的代码部分再搜。
+        _run_code_lines = []
+        for _ln in _run_src.splitlines():
+            _code = _ln.split("#", 1)[0]
+            _run_code_lines.append(_code)
+        _run_code = "\n".join(_run_code_lines)
+        if re.search(r"safe_name\s*=\s*re\.sub\(", _run_code):
+            ok[0] = False
+            detail.append("✗ ⑨n run.py 仍按 `safe_name` 只从标题算输出名 ⇒ 同名版本又互踏"
+                          "（ERR-PUBLISH-11 回归）")
+        if "output_sidecar_paths(" not in _run_code:
+            ok[0] = False
+            detail.append("✗ ⑨n run.py 里没有 `output_sidecar_paths(` ⇒ 消歧护栏没接线")
     except Exception as e:                                        # noqa: BLE001
         ok[0] = False
         detail.append(f"✗ ⑨ 交棒自检执行失败: {type(e).__name__}: {e}")
 
     return ok[0], detail
+
+
+def _safe_output_stem(formatted_title):
+    """把标题变成可用作文件名的 stem（去非法字符）。
+
+    ★ 单独抽出来是为了**让"stem 怎么算"只有一处**：护栏（`output_sidecar_paths`）
+      与落盘都要用它，否则两处各算一次会再次错位（`ERR-META-03` 的形状）。
+    """
+    return re.sub(r'[\\/*?:"<>|]', "_", formatted_title or "")
+
+
+def _hash_suffix(info_hash):
+    """取 info_hash 的短后缀（前 8 位），用于同名碰撞时消歧。
+
+    ★ 为什么用 info_hash 而**不是**随机数/时间戳：同一版本重扫时 stem 必须**稳定**
+      —— 否则每轮 scan 都改一次文件名 ⇒ 库里 `torrent_file` 每轮被刷新、
+      已发布页面的本地路径漂移（`flip_status` 那类"路径对不上"的病就是它）。
+      info_hash 是这条种子的身份，重扫不变 ⇒ 消歧后的名字也不变。
+    """
+    h = (info_hash or "").strip().lower()
+    return h[:8] if h else "nohash"
+
+
+def output_sidecar_paths(formatted_title, info_hash, out_dir=None,
+                         *, exists=None, read_json=None):
+    """算这条种子的输出 `.torrent` / `.json` 路径，**并对同名碰撞消歧**。
+
+    ★★★ 为什么需要它（#136 / `ERR-PUBLISH-11`，2026-10-07 实测）：
+      原代码只按 `formatted_title` 算 stem（`run.py` 旧 `safe_name`）——
+      **不同版本**（初回/期間/完全/通常/分轨/整轨…）只要算出的标题**碰巧相同**，
+      就会**算到同一个文件名**：
+        · 后处理的那条把前一条的 `.torrent` 覆盖 ⇒ 站点上挂的是"后一个版本"
+          （`20667`、`23313`、`216217`、`217592`、`216915` 实测五例）；
+        · 两条的 `.json` sidecar 也互相覆盖 ⇒ 连带错位。
+      ⇒ **名字里必须带上"是哪一条种子"的信息**，否则同名必然互踏。
+
+    ★ 判据（唯一，可脱库单测）：看**同 stem 的 `.json` sidecar 里已记的 `info_hash`**。
+        · 没有同名 sidecar 或解析不出 ⇒ **不改名**（首个用默认名）；
+        · 同名 sidecar 的 `info_hash` == 我们的 ⇒ **不改名**（是同一版本重扫）；
+        · 同名 sidecar 的 `info_hash` != 我们的 ⇒ **碰撞** ⇒ 追加 `_<hash8>` 消歧。
+
+    ★ 返回 `(torrent_path, json_path, collided)`：
+        · `collided=True` 时调用方**必须**打印（`ERR-META-14`：兜底不许静默）；
+        · 消歧名是**确定性的**（只看 info_hash）⇒ 重扫稳定、不漂移。
+
+    ★ `exists` / `read_json` 两个参数**只**为单测注入（默认走真文件系统）——
+      让本函数是**纯函数**：给同样的目录状态就算出同样的结果。
+    """
+    out_dir = out_dir if out_dir is not None else config.OUTPUT_TORRENT_DIR
+    _exists = exists if exists is not None else os.path.exists
+    stem = _safe_output_stem(formatted_title)
+    sidecar = os.path.join(out_dir, f"{stem}.json")
+    collided = False
+    if _exists(sidecar):
+        prev_hash = None
+        try:
+            if read_json is not None:
+                data = read_json(sidecar)
+            else:
+                with open(sidecar, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            if isinstance(data, dict):
+                prev_hash = (data.get("info_hash") or "").strip().lower() or None
+        except (OSError, ValueError, TypeError):
+            # 解析失败 ⇒ **不改名**（保守：宁可沿用默认名，也不因坏 sidecar 制造新名）。
+            # ★ 但这是"拿不到旧身份"⇒ 不静默：调用方按 collided=False 会照常命名，
+            #   由上层日志覆盖（这里不抛，避免一颗坏 json 让整轮 scan 崩 —— 见 ERR-META-14）。
+            prev_hash = None
+        if prev_hash is not None and prev_hash != (info_hash or "").strip().lower():
+            stem = f"{stem}_{_hash_suffix(info_hash)}"
+            collided = True
+    return (os.path.join(out_dir, f"{stem}.torrent"),
+            os.path.join(out_dir, f"{stem}.json"),
+            collided)
 
 
 def create_musopia_torrent(content_path, save_path):
@@ -1270,8 +1627,18 @@ def main():
         else:
             print(f"📷 复用库内已有封面: {cover_url}")
 
-        safe_name = re.sub(r'[\\/*?:"<>|]', "_", formatted_title)
-        torrent_file = os.path.join(config.OUTPUT_TORRENT_DIR, f"{safe_name}.torrent")
+        # ★★★ #136 / `ERR-PUBLISH-11`（2026-10-07）：输出名**必须对同名碰撞消歧**。
+        #   旧代码只按 `formatted_title` 算名 ⇒ 不同版本同名 ⇒ 后写者覆盖前者的
+        #   `.torrent`/`.json` ⇒ 站点挂错版本（实测五例）。判据与消歧见
+        #   `output_sidecar_paths()` 的 docstring（纯函数，可脱库单测）。
+        #   ★ `torrent_file`/`json_path` **必须用同一个消歧后的 stem** —— 两者分开算
+        #     就又回到"错位"（那是本条的病根本身）。
+        torrent_file, json_path, _name_collided = output_sidecar_paths(
+            formatted_title, info_hash)
+        if _name_collided:
+            # ERR-META-14：消歧是兜底动作，**不许静默** —— 必须显式报出。
+            print(f"⚠️  输出名碰撞：{formatted_title!r} 已有别的版本占用 "
+                  f"⇒ 本条改用 {os.path.basename(torrent_file)} 消歧")
 
         print("🔨 生成种子中...")
         try:
@@ -1351,8 +1718,9 @@ def main():
             "content_path": content_path,
         }
         try:
-            with open(os.path.join(config.OUTPUT_TORRENT_DIR, f"{safe_name}.json"),
-                      "w", encoding="utf-8") as f:
+            # ★ 用**与 .torrent 同源**的 `json_path`（`output_sidecar_paths` 的产物）
+            #   —— 绝不再各算一次 stem（那样二者会错位，正是 #136 的本病）。
+            with open(json_path, "w", encoding="utf-8") as f:
                 json.dump(meta, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"⚠️  JSON 写入失败: {e}")

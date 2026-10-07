@@ -419,6 +419,39 @@ def pick_handoff_candidates(torrents, now=None, seeders_min=None, seed_days=None
     return out
 
 
+def eligible_on_3040(qb_src, info_hash, now=None, seeders_min=None, seed_days=None):
+    """★★ #136：判"3040 上这条是否**够格交棒**"。返回 `(present, eligible, why)`。
+
+    ★★ 为什么（用户 2026-10-07 拍板）：交棒语义 = **够格才交棒**（出种≥N 或 做种≥D 天），
+      **不是**发布后就立即推给 3020。原代码 `process_one` 对 PENDING 条目**立即交棒**，
+      而 `judge`/`pick_handoff_candidates` 只在 selftest 里被调 ⇒ "出种≥3 才交棒"从未生效
+      （实测：`☆ac8.13f` 20 个别人做种却一直没交棒、整个容器 `已交棒到 3020` 计数=0）。
+    ★ 三态（显式区分，同 `ERR-META-14`：不许把"还没轮到"与"够格"混一个词）：
+      · `present=False` ⇒ 3040 上**还没这条种**（延迟回加还没到点/失败了）⇒ **等**，不交棒。
+      · `present=True, eligible=False` ⇒ 在做种但**还不**够格 ⇒ **等**，不交棒。
+      · `present=True, eligible=True` ⇒ 够格 ⇒ 交棒。
+    ★ `qb_src is None` ⇒ 返回 `(False, False, "无 3040 连接")`（dry-run 无客户端时也走这）。
+    """
+    now = _now() if now is None else now
+    if qb_src is None:
+        return False, False, "无 3040 连接"
+    try:
+        info = qb_src.torrents_info(torrent_hashes=info_hash)
+    except Exception as e:                                        # noqa: BLE001
+        return False, False, f"查 3040 失败: {type(e).__name__}: {e}"
+    if not info:
+        return False, False, "3040 上还没有这条种（延迟回加未到/失败）⇒ 等"
+    t = info[0]
+    # ★ 先要 progress≥1（做完种）才有资格谈"出种/做种天数"。
+    progress = float(_torrent_field(t, "progress", 0) or 0)
+    if progress < 1.0:
+        return True, False, f"3040 上还没做完种（progress={progress:.2f}）⇒ 等"
+    ok, why = judge(_torrent_field(t, "num_complete", 0),
+                    _torrent_field(t, "added_on", 0),
+                    now=now, seeders_min=seeders_min, seed_days=seed_days)
+    return True, ok, why
+
+
 # ==================== 交棒 3040→3020（步③，零拷贝）====================
 
 def export_torrent_bytes(qb, info_hash):
@@ -608,6 +641,15 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
 
     ★ 每步都幂等：3020 已存在(409) ⇒ 视为已交棒；SSD 目录已不在 ⇒ 视为已清。
     ★ 任一步失败 ⇒ 置 FAILED 并记 `last_error`（不删任何东西，下轮可重试）。
+    ★★★ #136（2026-10-07 实测 `217848`）：`FAILED` **必须重新走交棒**，**绝不**
+      落到 `verify_3020_seeding` + `finalize_source`。原代码的交棒块只认
+      `("PENDING", "HANDOFF_ADDED")` ⇒ 一条 `FAILED` 条目会**跳过交棒**、直接
+      往下走到清盘：若此时 3020 那边**恰好已有该种在做种**（例如辅种工具抢先加了），
+      `verify_3020_seeding` 判就绪 ⇒ `finalize_source` 把**3040 还没回加、发种区
+      副本还在用**的 SSD 目录删掉 ⇒ 延迟回加(15min后)指向一个刚被删的目录 ⇒
+      变下载（`queuedDL progress=0`）。⇒ 现在把 `FAILED` 也纳入交棒块：要么**重试
+      交棒**（幂等，409=已在）后正常推进，要么**再判 FAILED 并提前 return** ——
+      **两条路都不会 fall-through 到 finalize**。同族 `ERR-PUBLISH-07`（存在≠完成）。
     ★ 本函数**绝不 raise**（daemon 线程调用）。
     """
     dry_run = config.HANDOFF_DRY_RUN == "true" if dry_run is None else dry_run
@@ -616,8 +658,28 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
     target = item.get("target_save_path") or ""
     target_cat = item.get("target_category") or ""
     try:
+        # ★★★ #136 结构性不变量：**只有"本趟确实走到了已交棒状态"的条目才允许清盘**。
+        #   `handed_off` 由交棒块在成功时置 True（或在途状态 HANDOFF_RECHECK/SEEDING 亦然）。
+        #   下面 finalize 那步会**再查一次**这个旗标 ⇒ 从结构上堵死"FAILED 跳过交棒 ⇒
+        #   直接 finalize"（`217848` 的凶手），而不是靠"恰好没 fall-through"。
+        handed_off = item.get("state") in ("HANDOFF_ADDED", "HANDOFF_RECHECK",
+                                           "HANDOFF_SEEDING")
         # ---- 交棒（零拷贝；含隔离闸门）----
-        if item.get("state") in ("PENDING", "HANDOFF_ADDED"):
+        # ★★★ `FAILED` 也在内（#136）：FAILED 只代表"上一轮某步没过"，**不代表已交棒**。
+        #   让它重走交棒块 ⇒ 失败则提前 return（不 fall-through 到 finalize）。
+        if item.get("state") in ("PENDING", "HANDOFF_ADDED", "FAILED"):
+            # ★★★ #136（用户 2026-10-07 拍板「够格才交棒」）：**只在 PENDING（新条目）
+            #   上判"够格"** —— 在途态（HANDOFF_ADDED）与 FAILED（重试）已经过了这道门，
+            #   不再重复判（否则交棒到一半的条目会被打回等待）。
+            #   ★ 为什么必须有这道门：原代码对 PENDING **立即交棒**，`judge` 是死代码 ⇒
+            #     "出种≥N 才交棒"从未生效（实测 `已交棒到 3020` 计数=0）。
+            #   ★ 不够格 ⇒ **停在 PENDING**（不交棒、不标 FAILED、不动源）⇒ 下轮再看。
+            if item.get("state") == "PENDING" and not dry_run:
+                _present, _elig, _ewhy = eligible_on_3040(qb_src, info_hash)
+                if not _elig:
+                    update_item(info_hash, state="PENDING",
+                                last_error=f"等够格交棒: {_ewhy}")
+                    return "PENDING"
             # ★★★ #134 第四道闸门：交棒前**确认 SSD 副本还在**。
             #   ★ 为什么：队列条目可能在"数据其实没到位/已被清"的情况下残留（例如某轮
             #     复制失败仍入了队、或人工清过盘）。此时交棒到 3020 会 add 一条**没有
@@ -640,6 +702,7 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
                             first_failed_at=item.get("first_failed_at") or _now())
                 return "FAILED"
             update_item(info_hash, state="HANDOFF_ADDED")
+            handed_off = True
             if dry_run:
                 return "HANDOFF_ADDED"
             item = dict(item, state="HANDOFF_ADDED")
@@ -651,6 +714,13 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
             return "HANDOFF_RECHECK"
         update_item(info_hash, state="HANDOFF_SEEDING")
         # ---- 清盘（★ 只有 3020 已做种才走到这）----
+        # ★★★ #136 最后一道结构性闸门：**没交棒过就绝不清盘**。走到这理论上必有
+        #   `handed_off=True`（PENDING/FAILED 都过了交棒块，在途态本身也为真）；此处
+        #   显式再拦一次 —— 宁可停在 HANDOFF_SEEDING 让人工看，也不删不该删的盘。
+        if not handed_off:
+            update_item(info_hash, state="FAILED",
+                        last_error="未完成交棒却走到清盘（已拦，拒删源）⇒ 需人工核")
+            return "FAILED"
         if finalize_source(qb_src, info_hash, ssd_dir, dry_run=dry_run):
             if not dry_run:
                 remove_item(info_hash)
