@@ -533,7 +533,10 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
         if finalize_source(qb_src, info_hash, ssd_dir, dry_run=dry_run):
             if not dry_run:
                 remove_item(info_hash)
-            update_item(info_hash, state="DONE")
+            # ★ 清 last_error：进 DONE 是"成功终态"，不该再留上一轮的路过标签
+            #   （否则队列/日志里会看到"3020 上还没有这条种"这种**过期**文案，
+            #    而状态其实是 DONE —— NAS-92g 实测踩到，纯误导）。
+            update_item(info_hash, state="DONE", last_error="")
             return "DONE"
         update_item(info_hash, state="FAILED", last_error="清盘失败")
         return "FAILED"
