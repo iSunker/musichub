@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "offline": {
-    "generated_at": "2026-10-07T10:23:48Z",
+    "generated_at": "2026-10-07T10:54:16Z",
     "generator": "tools/gen_counts.py",
     "selftests": {
       "descr.py --selftest": {
@@ -203,24 +203,12 @@
     },
     "line_counts": {
       ".claude/RULES.md": 125,
-      ".scratch/SESSION-STATE-2026-10-06.md": 492,
-      ".scratch/crabpt-ReadTimeout复现-2026-10-06.md": 133,
-      ".scratch/crabpt超时重试改法-diff-2026-10-06.md": 174,
-      ".scratch/free_window入库与daemon接入-落盘记录-2026-10-06.md": 121,
-      ".scratch/missingFiles复核与修正方案-2026-10-06.md": 168,
-      ".scratch/免费窗口内实测-现状与结论-2026-10-06.md": 87,
-      ".scratch/免费窗口检测机制-2026-10-06.md": 155,
-      ".scratch/免费窗口脚本-草案与实测-2026-10-06.md": 95,
-      ".scratch/开机时序改法草案-2026-10-06.md": 171,
-      ".scratch/收费种子875-盘点与责任方-2026-10-06.md": 106,
-      ".scratch/浏览器手发最小实验-步骤书-2026-10-06.md": 96,
-      ".scratch/站点端入手路径调研-2026-10-06.md": 108,
-      ".scratch/被拒发种清单与对照-2026-10-06.md": 137,
+      ".scratch/COMPACT-HANDOFF.md": 42,
       "CLAUDE.md": 112,
-      "ERRATA.md": 691,
+      "ERRATA.md": 701,
       "PLAN-crabpt.md": 891,
       "README.md": 972,
-      "SESSION-NOTES.md": 4981,
+      "SESSION-NOTES.md": 5021,
       "src/assets.py": 1037,
       "src/backfill_covers.py": 144,
       "src/backfill_covers_opencd.py": 205,
@@ -234,19 +222,19 @@
       "src/descr.py": 1097,
       "src/flip_status.py": 750,
       "src/free_window.py": 353,
-      "src/handoff.py": 637,
+      "src/handoff.py": 666,
       "src/healthcheck.py": 55,
       "src/musopia.py": 584,
       "src/net.py": 273,
       "src/observe_custom_fields.py": 99,
       "src/opencd.py": 3111,
       "src/opencd_sanitize.py": 401,
-      "src/publish.py": 2522,
+      "src/publish.py": 2534,
       "src/qb_client.py": 338,
       "src/qb_probe.py": 241,
       "src/readd_queue.py": 205,
       "src/readiness_probe.py": 279,
-      "src/run.py": 1401,
+      "src/run.py": 1435,
       "src/sync_opencd_tid.py": 839,
       "src/sync_site.py": 119,
       "src/topup_opencd_fields.py": 603,
@@ -310,7 +298,7 @@
       "x/HANDOFF-20260926.md": 390
     },
     "errata": {
-      "count": 121,
+      "count": 123,
       "ids": [
         "ERR-DATA-01",
         "ERR-DATA-02",
@@ -389,6 +377,7 @@
         "ERR-META-45",
         "ERR-META-46",
         "ERR-META-47",
+        "ERR-META-48",
         "ERR-NET-01",
         "ERR-NET-02",
         "ERR-NET-03",
@@ -405,6 +394,8 @@
         "ERR-PUBLISH-04",
         "ERR-PUBLISH-05",
         "ERR-PUBLISH-06",
+        "ERR-PUBLISH-07",
+        "ERR-PUBLISH-08",
         "ERR-QB-05",
         "ERR-QB-06",
         "ERR-QB-07",
@@ -414,7 +405,6 @@
         "ERR-QB-11",
         "ERR-QB-12",
         "ERR-QBTUNE-01",
-        "ERR-SITE-01",
         "ERR-SITE-02",
         "ERR-SITE-03",
         "ERR-SITE-04",
@@ -437,18 +427,18 @@
     }
   },
   "online": {
-    "generated_at": "2026-10-07T10:23:55Z",
+    "generated_at": "2026-10-07T10:54:24Z",
     "reachable": true,
     "source_host": "\\\\iSunker-DS423\\docker_ssd\\opencd2others\\data",
     "heartbeat": {
       "alive": true,
-      "content_epoch": 1791368611,
-      "age_s": 23.190503358840942
+      "content_epoch": 1791370447,
+      "age_s": 15.356100082397461
     },
     "stages": {
       "scan": {
-        "last_run": 1791368219.977125,
-        "age_s": 415.14772605895996,
+        "last_run": 1791370033.332087,
+        "age_s": 429.82214522361755,
         "interval_s": 1800,
         "overdue": false,
         "disabled": false,
@@ -456,17 +446,17 @@
         "no_progress": null
       },
       "publish": {
-        "last_run": 1791366421.9924562,
-        "age_s": 2213.1323947906494,
+        "last_run": 1791370056.2015476,
+        "age_s": 406.9526846408844,
         "interval_s": 1800,
-        "overdue": true,
+        "overdue": false,
         "disabled": false,
         "last_ok": true,
         "no_progress": null
       },
       "sync": {
         "last_run": 1791290506.214562,
-        "age_s": 78128.91028904915,
+        "age_s": 79956.93967032433,
         "interval_s": 86400,
         "overdue": false,
         "disabled": false,
@@ -475,7 +465,7 @@
       },
       "covers": {
         "last_run": 1791355545.0882275,
-        "age_s": 13090.036623477936,
+        "age_s": 14918.066004753113,
         "interval_s": 21600,
         "overdue": false,
         "disabled": false,
@@ -484,7 +474,7 @@
       },
       "edit": {
         "last_run": 1791357527.7469113,
-        "age_s": 11107.37793970108,
+        "age_s": 12935.407320976257,
         "interval_s": 21600,
         "overdue": false,
         "disabled": false,
@@ -492,8 +482,8 @@
         "no_progress": false
       },
       "crawl": {
-        "last_run": 1791368311.7796183,
-        "age_s": 323.34523272514343,
+        "last_run": 1791370117.6977134,
+        "age_s": 345.4565188884735,
         "interval_s": 1800,
         "overdue": null,
         "disabled": true,
@@ -503,11 +493,11 @@
     },
     "db": {
       "total": 1982,
-      "exists": 81,
+      "exists": 82,
       "stale": 1,
       "no_log_file": 1436,
-      "success": 441,
-      "max_updated_at": "2026-10-07 09:58:46"
+      "success": 440,
+      "max_updated_at": "2026-10-07 10:47:17"
     },
     "skipped_reason": null
   }
