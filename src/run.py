@@ -969,7 +969,10 @@ def selftest():
                 source_category="Musopia", target_category="Musopia")
             chk("⑨h 源不存在·begin_handoff 返回 False（拒回加，阴性对照）", _okb, False)
 
-            # ⑤ 源存在但**只填半截**且已存在（幂等跳过复制）⇒ 核对不过 ⇒ 必须 False
+            # ⑤ ★★★ 核心回归（就是 `Beyond` 的病根）：发种区**已有目录、但内容半截**
+            #   （qB 边下边写留下的），**旧代码**用"目录非空"当"已复制"⇒ 跳过复制 ⇒
+            #   坏数据留在那 ⇒ 变下载。**新代码**必须**补齐**（copytree 覆盖）并核对通过。
+            #   ★ 判据 = 复制后逐字节完整（True），且**发种区那份被真正改写**（不是跳过）。
             _src2 = os.path.join(_tmp3, "hdd", "AlbumY")
             os.makedirs(_src2)
             with open(os.path.join(_src2, "x.flac"), "wb") as _f:
@@ -977,12 +980,24 @@ def selftest():
             _dst2 = os.path.join(_pub_root3, "AlbumY")
             os.makedirs(_dst2)
             with open(os.path.join(_dst2, "x.flac"), "wb") as _f:
-                _f.write(b"X" * 1024)                 # 半截：目录非空 ⇒ copytree 跳过
+                _f.write(b"X" * 1024)                 # 半截：目录非空，内容不全
             _okb, _whyb = _ho.begin_handoff_for_task(
                 _src2, "AlbumY", "cafebabe",
                 source_category="Musopia", target_category="Musopia")
-            chk("⑨h 半截副本(目录非空,幂等跳过)·begin_handoff 返回 False（阴性对照）",
-                _okb, False)
+            chk("⑨h 半截副本(目录非空)·被**补齐**并判已就位",
+                _okb, True)
+            # ★ 强判据：发种区那份 x.flac 必须已被补齐到 4096（证明**真重拷**、没"非空跳过"）。
+            _dst2_sz = os.path.getsize(os.path.join(_dst2, "x.flac")) if os.path.exists(
+                os.path.join(_dst2, "x.flac")) else -1
+            chk("⑨h 半截副本被补齐到源大小(4096)", _dst2_sz, 4096)
+            # ★★★ 回归护栏：源码里**不许**再出现"目录非空 ⇒ 跳过复制"的旧判据。
+            import pathlib as _pl9h
+            _ho_py = _pl9h.Path(__file__).resolve().parent / "handoff.py"
+            _ho_src = _ho_py.read_text(encoding="utf-8") if _ho_py.exists() else ""
+            if "os.listdir(dst)" in _ho_src and "跳过复制" in _ho_src:
+                ok[0] = False
+                detail.append("✗ ⑨h handoff.py 仍是旧判据「目录非空 ⇒ 跳过复制」"
+                              "（`Beyond` 的病根，ERR-PUBLISH-06）")
         finally:
             _ho.config.PUBLISH_CONTAINER_DIR = _saved_pub3
             _ho.config.ENABLE_HANDOFF = _saved_handoff3

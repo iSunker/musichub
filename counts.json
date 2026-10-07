@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "offline": {
-    "generated_at": "2026-10-07T08:28:07Z",
+    "generated_at": "2026-10-07T10:23:48Z",
     "generator": "tools/gen_counts.py",
     "selftests": {
       "descr.py --selftest": {
@@ -99,6 +99,7 @@
         "PUBLISH_I_AM_HERE": "i-am-here",
         "PUBLISH_MAX_PER_CYCLE": 1,
         "PUBLISH_MIN_GAP": 0,
+        "PULL_POLICY": "missing",
         "QB_API_KEY": "",
         "QB_API_KEY_OPENCD": "",
         "QB_HOST": "http://127.0.0.1:3040",
@@ -216,10 +217,10 @@
       ".scratch/站点端入手路径调研-2026-10-06.md": 108,
       ".scratch/被拒发种清单与对照-2026-10-06.md": 137,
       "CLAUDE.md": 112,
-      "ERRATA.md": 686,
+      "ERRATA.md": 691,
       "PLAN-crabpt.md": 891,
-      "README.md": 938,
-      "SESSION-NOTES.md": 4924,
+      "README.md": 972,
+      "SESSION-NOTES.md": 4981,
       "src/assets.py": 1037,
       "src/backfill_covers.py": 144,
       "src/backfill_covers_opencd.py": 205,
@@ -233,7 +234,7 @@
       "src/descr.py": 1097,
       "src/flip_status.py": 750,
       "src/free_window.py": 353,
-      "src/handoff.py": 631,
+      "src/handoff.py": 637,
       "src/healthcheck.py": 55,
       "src/musopia.py": 584,
       "src/net.py": 273,
@@ -245,7 +246,7 @@
       "src/qb_probe.py": 241,
       "src/readd_queue.py": 205,
       "src/readiness_probe.py": 279,
-      "src/run.py": 1386,
+      "src/run.py": 1401,
       "src/sync_opencd_tid.py": 839,
       "src/sync_site.py": 119,
       "src/topup_opencd_fields.py": 603,
@@ -309,7 +310,7 @@
       "x/HANDOFF-20260926.md": 390
     },
     "errata": {
-      "count": 120,
+      "count": 121,
       "ids": [
         "ERR-DATA-01",
         "ERR-DATA-02",
@@ -403,6 +404,7 @@
         "ERR-PUBLISH-03",
         "ERR-PUBLISH-04",
         "ERR-PUBLISH-05",
+        "ERR-PUBLISH-06",
         "ERR-QB-05",
         "ERR-QB-06",
         "ERR-QB-07",
@@ -435,18 +437,18 @@
     }
   },
   "online": {
-    "generated_at": "2026-10-07T08:28:14Z",
+    "generated_at": "2026-10-07T10:23:55Z",
     "reachable": true,
     "source_host": "\\\\iSunker-DS423\\docker_ssd\\opencd2others\\data",
     "heartbeat": {
       "alive": true,
-      "content_epoch": 1791361689,
-      "age_s": 4.791542053222656
+      "content_epoch": 1791368611,
+      "age_s": 23.190503358840942
     },
     "stages": {
       "scan": {
-        "last_run": 1791360963.2322996,
-        "age_s": 730.7005631923676,
+        "last_run": 1791368219.977125,
+        "age_s": 415.14772605895996,
         "interval_s": 1800,
         "overdue": false,
         "disabled": false,
@@ -454,8 +456,8 @@
         "no_progress": null
       },
       "publish": {
-        "last_run": 1791359163.7270255,
-        "age_s": 2530.205837249756,
+        "last_run": 1791366421.9924562,
+        "age_s": 2213.1323947906494,
         "interval_s": 1800,
         "overdue": true,
         "disabled": false,
@@ -464,7 +466,7 @@
       },
       "sync": {
         "last_run": 1791290506.214562,
-        "age_s": 71187.7183008194,
+        "age_s": 78128.91028904915,
         "interval_s": 86400,
         "overdue": false,
         "disabled": false,
@@ -473,7 +475,7 @@
       },
       "covers": {
         "last_run": 1791355545.0882275,
-        "age_s": 6148.844635248184,
+        "age_s": 13090.036623477936,
         "interval_s": 21600,
         "overdue": false,
         "disabled": false,
@@ -482,7 +484,7 @@
       },
       "edit": {
         "last_run": 1791357527.7469113,
-        "age_s": 4166.185951471329,
+        "age_s": 11107.37793970108,
         "interval_s": 21600,
         "overdue": false,
         "disabled": false,
@@ -490,8 +492,8 @@
         "no_progress": false
       },
       "crawl": {
-        "last_run": 1791361025.3192036,
-        "age_s": 668.6136591434479,
+        "last_run": 1791368311.7796183,
+        "age_s": 323.34523272514343,
         "interval_s": 1800,
         "overdue": null,
         "disabled": true,
@@ -501,11 +503,11 @@
     },
     "db": {
       "total": 1982,
-      "exists": 80,
+      "exists": 81,
       "stale": 1,
       "no_log_file": 1436,
-      "success": 443,
-      "max_updated_at": "2026-10-07 07:57:20"
+      "success": 441,
+      "max_updated_at": "2026-10-07 09:58:46"
     },
     "skipped_reason": null
   }

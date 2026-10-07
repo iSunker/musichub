@@ -198,17 +198,23 @@ def copy_to_publish_area(src_path, album_name, dry_run=True):
     ★★ 落点 = **3040 看得见的 SSD 目录**（#133 订正：原先是 `/publish`，3040 看不见）。
       ⇒ 复制完成 = 3040 的 `/downloads/<专辑>/` 里有了数据，加种即可校验（父目录语义）。
     ★ `dry_run=True` ⇒ 只报"要复制什么到哪"，**不落盘**。
-    ★ 已存在且非空 ⇒ 视为已复制（幂等），不重复拷。
+    ★★★ 判"已复制完成"用 **逐字节核对**（`verify_publish_area_complete`：文件数+总字节），
+      **绝不**用"目录非空"—— 那条判据把 3040 的 qB **自己写进来的半截数据**当成了
+      "已复制好"⇒ 跳过复制 ⇒ 变下载（2026-10-07 `Beyond` 实测，`ERR-PUBLISH-06`）。
+    ★ 已完整 ⇒ 秒回（只 walk 列名+大小，不读文件内容），幂等不重复拷；
+      不完整/缺失 ⇒ `copytree(dirs_exist_ok=True)` **补齐/覆盖**。
     ★★ 只用 `copytree`/`copyfile` **单向** 复制；**绝不**反过来动 `src_path`（HDD 原文件）。
     """
     dst = publish_target_dir(album_name)
     if not os.path.isdir(src_path):
         raise FileNotFoundError(f"源成品不存在: {src_path}")
-    if os.path.isdir(dst) and os.listdir(dst):
-        print(f"ℹ️  [handoff] 发种区已存在（跳过复制）: {dst}")
-        return dst
     if dry_run:
         print(f"🅿️  [handoff][dry-run] 将复制 {src_path} → {dst}")
+        return dst
+    # ★ 完成判据 = 逐字节核对（不是"非空"）。已完整 ⇒ 秒回；否则补齐后核对由调用方裁决。
+    done, _why = verify_publish_area_complete(src_path, album_name)
+    if done:
+        print(f"ℹ️  [handoff] 发种区已完整（逐字节核对通过，跳过复制）: {dst}")
         return dst
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     if os.path.isdir(src_path):
