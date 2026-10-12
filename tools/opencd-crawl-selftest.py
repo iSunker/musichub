@@ -40,7 +40,8 @@ crawl.py 的**离线自检** —— 用本地 HTTP mock 假装是皇后。
   ⑲ ★ `ZEROHIT`（空成功·缓存 no_hit） vs `HTTPFAIL`（失败·**不缓存**）结论**必须不同**
   ⑳ RSS 请求数 == 闸门计数（每个请求都过 `RateGate`）
   ㉑ 写库只填**空白 tid** 行；非空行 `opencd_tid`/`updated_at` 逐列不变（纪律 3）
-     ★ ⑰-㉑ 测 `rss_backfill_tid.py`（2026-10-12 新增的 RSS 反查路）。
+  ㉒ ★ RSS 请求**必须带 passkey**（漏掉 ⇒ 皇后返 `passkey error`、全 ParseError）；未配 ⇒ 0 请求
+     ★ ⑰-㉒ 测 `rss_backfill_tid.py`（2026-10-12 新增的 RSS 反查路）。
 
 跑法：python tools/opencd-crawl-selftest.py
 """
@@ -74,6 +75,10 @@ sys.path.insert(0, REPO)
 _TMP = tempfile.mkdtemp(prefix="opencd-selftest-")
 os.environ["OPENCD_RAW_DIR"] = os.path.join(_TMP, "raw_html")
 os.environ["OPENCD_COOKIE"] = "c_secure_pass=fake"
+# ★★ 2026-10-12：RSS 反查要**皇后 passkey**（`torrentrss.php?passkey=`）。
+#   ★ 曾经漏掉它 ⇒ 皇后返回 `passkey error` ⇒ 全 `ParseError`（真 bug，#23 试跑抓到）。
+#   这里给个假的（mock 不看值），并**由判据㉒ 断言请求里真的带上了它**。
+os.environ["QUEEN_RSS_PASSKEY"] = "0123456789abcdef0123456789abcdef"
 os.environ["DATA_DIR"] = _TMP
 
 import crawl                      # noqa: E402
@@ -465,6 +470,37 @@ def main(json_mode=False):
     c.check("★ 二次跑同词 = 0 新请求（全部复用落盘）", 0,
             len([h for h in HITS if "torrentrss" in h]))
     c.check("二次读来自缓存 (from_cache)", True, r17b.from_cache)
+
+    print("\n【判据㉒】★★ RSS 请求**必须带 passkey**（曾经漏掉 ⇒ 皇后返 `passkey error`）")
+    # ★ 教训来源：`fetch_index` 原先不带 `passkey`，皇后返回纯文本 `passkey error`
+    #   （13B，非 XML）⇒ 全 `ParseError`、命中 0。**mock 当时不校验这个 ⇒ 漏过去了。**
+    #   本判据把「请求里必须有 passkey」钉死，防回归。
+    _clear_raw_dir()
+    HITS.clear()
+    g22 = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
+    cli22 = crawl.Client(gate=g22)
+    RB.fetch_index(cli22, "带passkey词")
+    _rss_hits = [h for h in HITS if "torrentrss" in h]
+    c.check("发出了 1 个 torrentrss 请求", 1, len(_rss_hits))
+    c.check("★ 请求 URL 含 passkey=", True, bool(_rss_hits and "passkey=" in _rss_hits[0]))
+    c.check("★ passkey 值与 env 一致", True,
+            bool(_rss_hits and os.environ["QUEEN_RSS_PASSKEY"] in _rss_hits[0]))
+
+    # ★ 没配 passkey ⇒ **一条请求都不发**（省配额、不白敲站点），且返回可解释的失败。
+    _saved_pk = os.environ.pop("QUEEN_RSS_PASSKEY", None)
+    try:
+        _clear_raw_dir()
+        HITS.clear()
+        g22b = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
+        cli22b = crawl.Client(gate=g22b)
+        _res_nopk = RB.fetch_index(cli22b, "无passkey词")
+        c.check("★ 未配 passkey ⇒ 0 请求", 0,
+                len([h for h in HITS if "torrentrss" in h]))
+        c.check("★ 未配 passkey ⇒ ok=False + why=no_passkey",
+                ("no_passkey", False), (_res_nopk.why, _res_nopk.ok))
+    finally:
+        if _saved_pk is not None:
+            os.environ["QUEEN_RSS_PASSKEY"] = _saved_pk
 
     print("\n【判据⑱】dry-run / 不加 --apply ⇒ 0 请求")
     HITS.clear()

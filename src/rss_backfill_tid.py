@@ -225,15 +225,34 @@ class FetchResult:
         self.n_requests = n_requests
 
 
+def rss_passkey():
+    """
+    皇后 RSS 反查用的 passkey（**凭据**，只在 env 里）。
+
+    ★★ 2026-10-12 修（#23 试跑抓到的真 bug）：本模块原先**没给 `torrentrss.php` 带
+      `passkey`** —— 误以为"`crawl.Client` 的 cookie 就够"。实测：**不够**。
+      `crawl.Client` 只带 **cookie**（`OPENCD_COOKIE`），**不拼 `passkey`**；而
+      `torrentrss.php` 要的是 **query 里的 `passkey`**：
+        · 不带 ⇒ 返回纯文本 `passkey error`（13B，非 XML）
+        · 带错 ⇒ 返回 `invalid passkey`
+        · 带对 ⇒ 合法 `<rss>` XML（`parse_rss_index` items/usable 正常）
+    ★ 且 **皇后 passkey ≠ `MUSOPIA_PASSKEY`**（后者是乌托邦(Musopia)的）——两个站两个账号。
+      所以**单独**用一个 env 键 `QUEEN_RSS_PASSKEY`（**不要**拿 MUSOPIA_* 顶替）。
+
+    ★ 凭据纪律：**只在 env**，绝不写进代码/文档/日志；本函数只读 env、返回值。
+      返回空串 = 没配 ⇒ 调用方（`fetch_index`）直接当失败，**不发请求**（避免白敲站点）。
+    """
+    return (os.getenv("QUEEN_RSS_PASSKEY") or "").strip()
+
+
 def fetch_index(client, term):
     """
     取一个搜索词的 RSS 索引（**cache-first**：命中磁盘 ⇒ 零请求）。
 
     ★ 请求走 `crawl.Client.get()`（唯一出口，过 RateGate）。参数与实测一致：
-      `?linktype=dl&rows=100&search=<term>&search_area=0&search_mode=0`
-      ★ `passkey` 由 `crawl.Client` 的 base/cookie 体系处理 —— 这里**不**碰凭据；
-        `torrentrss.php` 实测**不要求登录 cookie**（用 passkey 即可），
-        但走同一个 session 无妨，且 cookie 在则由 Client 自动带上。
+      `?passkey=<皇后>&linktype=dl&rows=100&search=<term>&search_area=0&search_mode=0`
+      ★★ `passkey` **必须显式带上**（见 `rss_passkey()` 的 docstring）—— 曾经漏掉，
+        导致皇后返回 `passkey error`、全 `ParseError`。★ **没有它就别发请求**（白敲站点）。
     """
     cached = load_rss(term)
     if cached is not None:
@@ -243,7 +262,11 @@ def fetch_index(client, term):
         except Exception:                     # ★ 落盘坏了 ⇒ 当作没缓存，重抓
             pass
 
-    params = {"linktype": "dl", "rows": 100, "search": term,
+    pk = rss_passkey()
+    if not pk:
+        # ★ 没配凭据 ⇒ **不发请求**（省配额、不白敲站点），当作失败并说明原因。
+        return FetchResult(False, why="no_passkey", n_requests=0)
+    params = {"passkey": pk, "linktype": "dl", "rows": 100, "search": term,
               "search_area": 0, "search_mode": 0}
     r = client.get("/torrentrss.php", **params)
     if r.status_code != 200:
@@ -344,6 +367,14 @@ def main():
         print("    " + " ".join(_argv))
         print("=" * 74)
         return 0
+
+    # ★★ 凭据护栏：没有 `QUEEN_RSS_PASSKEY` ⇒ **开工前就退出**（别一条条白敲站点）。
+    #   报告模式（只读、不发请求）不需要它 ⇒ 只在真搜模式下要求。
+    if not rss_passkey():
+        print("\n⛔ 未配置 `QUEEN_RSS_PASSKEY`（皇后 RSS 反查的 passkey）——真搜模式**无法工作**。")
+        print("   ★ 它在 `.env` 里（凭据只在 env）；填好后重跑本命令。"
+              "（报告模式不需要它。）")
+        return 2
 
     # ── 真搜 ────────────────────────────────────────────────────────────────
     day_key = time.strftime("%Y-%m-%d")
