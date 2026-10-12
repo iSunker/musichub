@@ -325,35 +325,83 @@ def explain_key_reason(why):
 #        · `--auto` 声明无人值守 ⇒ 校验第二把钥匙（**没有它 ⇒ 保险被关**）
 
 
-def _resolve_opencd_content_path(info_hash):
-    """查 **3020(opencd)** 上这条种（按 DB 原种 infohash）的 `content_path`。
+def _opencd_content_host():
+    """★ O-6 漏洞 a（2026-10-10）：opencd 原种 A 所在实例的地址 —— **一处口径**。
 
-    ★ 用途（#92-f1/#133）：handoff 要把成品从 HDD 复制到 3040 发种区，得先知道
-      "HDD 上的专辑目录在哪"。**权威来源 = 3020 上那条仍在做种的皇后原种**
-      —— 它的 `content_path` 就是 `/volume1/video/music/<专辑>`（= 3020 的 `/downloads/<专辑>`）。
-    ★ 只在 `ENABLE_HANDOFF` 开启时才被调用。连不上/查不到 ⇒ 返回 ""（调用方跳过复制）。
-    ★ **绝不 raise**（回加主流程不能被它带崩）。
+    ★ 为什么单列一个函数（别在调用点再写 `os.getenv`）：重构后 `3020 ≠ opencd`（= movies1 电影），
+      旧代码 `os.getenv("QB_HOST_OPENCD", "http://127.0.0.1:3020")` 的**兜底默认 3020 是错的**：
+      一旦 env 没传（或有人不读 env），会去 **movies1** 找音乐原种 ⇒ 必然找不到 ⇒ 静默返 ""。
+    ★ 取 config 优先（`config.QB_HOST_OPENCD`，与 daemon 的 `HANDOFF_HOST_3020` 同源），
+      再退 env，二者皆无 ⇒ 用**正确**的默认 **3260=music3**（opencd 原种/data 所在；见台账 §11.1）。
+    ★ 生产 `.env` 里 `QB_HOST_OPENCD=http://127.0.0.1:3260` ⇒ 本函数返回 3260。
     """
+    return (getattr(config, "QB_HOST_OPENCD", "")
+            or os.getenv("QB_HOST_OPENCD", "")
+            or "http://127.0.0.1:3260")
+
+
+def _require_handoff_for_readd():
+    """★ O-6 漏洞 c（2026-10-10，方案 B）：**回加是否强制要求 handoff 已开**。
+
+    ★ 方案 B 不变量 = 「数据先复制到发种区（handoff），再回加」⇒ handoff 未开时**不应回加**
+      （否则落到没有数据的 save_path ⇒ stalledDL/prog=0 ⇒ 站点 0 做种，正是 O-6 病根）。
+    ★ 默认 **true**（方案 B 生效）。置 `false` ⇒ 回退老行为（应急开关，别在正常部署用）。
+    ★ 复用 `config` 读 env（与其它旋钮同口径，不新造方言）。
+    """
+    raw = os.getenv("REQUIRE_HANDOFF_FOR_READD",
+                    getattr(config, "REQUIRE_HANDOFF_FOR_READD", "true"))
+    return str(raw).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _resolve_opencd_content_path(info_hash, *, return_reason=False):
+    """查 **opencd 原种所在实例** 上这条种（按 DB 原种 infohash）的 `content_path`。
+
+    ★ 用途（#92-f1/#133）：handoff 要把成品从数据盘复制到发种区，得先知道
+      "专辑目录在哪"。**权威来源 = opencd 原种 A 所在实例上那条仍在做种的种**
+      —— 它的 `content_path` 就是 `<该实例>/downloads/<专辑>`。
+    ★ 实例地址见 `_opencd_content_host()`（★ O-6 漏洞 a：不再硬编码 3020）。
+    ★ 只在 `ENABLE_HANDOFF` 开启时才被调用。
+    ★ **绝不 raise**（回加主流程不能被它带崩）。
+
+    ★★ O-6 漏洞 a（2026-10-10）：**取不到不再"静默返空"** ——
+      旧调用点（`src and album` 为假）只会 print 一行、然后 `record_missing_data`。
+      但**原因**（连不上 / 原种不在 / content_path 为空）**没带进账本**，事后 grep 只知道
+      "漏了"，不知道"为什么漏"。⇒ 新增 `return_reason=True` 时返回 `(path, reason)`：
+        · 成功 ⇒ `(path, "")`；
+        · 失败 ⇒ `("", 具体原因)` —— **调用方据此把原因入账**（本函数自己**不**写账本，
+          保持"纯查询"职责；入账在 `readd_to_*` 的既有 3 个跳过点做，别新增第 4 处——
+          run.py 自检 `⑨j` 对账本调用点有精确计数断言）。
+    """
+    def _out(path, reason):
+        return (path, reason) if return_reason else path
+    host = _opencd_content_host()
     try:
         import types
         import qb_client
-        cfg3020 = types.SimpleNamespace(
-            QB_HOST=os.getenv("QB_HOST_OPENCD", "http://127.0.0.1:3020"),
+        cfg = types.SimpleNamespace(
+            QB_HOST=host,
             QB_USER=getattr(config, "QB_USER", "admin"),
             QB_PASS=getattr(config, "QB_PASS", ""),
-            # ★★★ 2026-10-07（#129）：3020 用**它自己的** key（`OPENCD_QB_API_KEY`），
-            #   绝不用 `config.QB_API_KEY`（那是 3040 的）—— 否则 3020 回 403（实测）。
+            # ★★★ 2026-10-07（#129）：opencd 实例用**它自己的** key（`OPENCD_QB_API_KEY`），
+            #   绝不用 `config.QB_API_KEY`（那是发种实例的）—— 否则回 403（实测）。
             QB_API_KEY=getattr(config, "OPENCD_QB_API_KEY", ""),
         )
-        qb3020 = qb_client.build(cfg3020)
-        got = qb3020.torrents_info(torrent_hashes=info_hash)
+        qb_src = qb_client.build(cfg)
+        got = qb_src.torrents_info(torrent_hashes=info_hash)
         if not got:
-            print(f"    ⚠️  handoff：3020 上找不到原种 {info_hash[:12]}… ⇒ 无法定位 HDD 目录")
-            return ""
-        return str(getattr(got[0], "content_path", "") or "")
+            msg = f"opencd 实例({host}) 上找不到原种 {str(info_hash)[:12]}…"
+            print(f"    ⚠️  handoff：{msg} ⇒ 无法定位成品目录")
+            return _out("", msg)
+        cp = str(getattr(got[0], "content_path", "") or "")
+        if not cp:
+            msg = f"opencd 实例({host}) 上原种 content_path 为空"
+            print(f"    ⚠️  handoff：{msg}")
+            return _out("", msg)
+        return _out(cp, "")
     except Exception as e:                                        # noqa: BLE001
-        print(f"    ⚠️  handoff：连 3020 查 content_path 失败: {type(e).__name__}: {e}")
-        return ""
+        msg = f"连 opencd 实例({host}) 查 content_path 失败: {type(e).__name__}: {e}"
+        print(f"    ⚠️  handoff：{msg}")
+        return _out("", msg)
 
 
 def readd_to_qb(qb, client, info_hash, torrent_id):
@@ -430,12 +478,13 @@ def readd_to_qb(qb, client, info_hash, torrent_id):
         # ★ #136：把成品源路径带到延迟回加条目里，供 daemon 回加前核对发种区就位。
         _h_src, _h_album = "", ""
         if _handoff_on:
-            # ★ 复制成品 HDD→3040 发种区 + 入队（用户要求：复制/删除由本项目代码自动化）。
-            #   源 = 3020 上这条种的 content_path（= HDD `/volume1/video/music/<专辑>`）。
+            # ★ 复制成品 →3010 发种区 + 入队（用户要求：复制/删除由本项目代码自动化）。
+            #   源 = opencd 原种所在实例上这条种的 content_path（★ O-6 漏洞 a：读 env，不再硬编码 3020）。
             save_path = config.PUBLISH_SAVE_ROOT
             try:
                 import handoff
-                src = _resolve_opencd_content_path(info_hash)
+                # ★ O-6 漏洞 a：`return_reason=True` ⇒ 取不到时把**具体原因**带出来入账。
+                src, _src_why = _resolve_opencd_content_path(info_hash, return_reason=True)
                 album = os.path.basename(str(src).rstrip("/\\")) if src else ""
                 _h_src, _h_album = src, album        # ★ #136：带给 delay 队列核对用
                 if src and album:
@@ -445,24 +494,25 @@ def readd_to_qb(qb, client, info_hash, torrent_id):
                         target_category=config.PUBLISH_CATEGORY,
                         dry_run=(config.HANDOFF_DRY_RUN == "true"))
                     print(f"    🔀 handoff 复制: {_why}")
-                    # ★★★ #134 定论：**数据没就位 ⇒ 绝不回加 3040**。
+                    # ★★★ #134 定论：**数据没就位 ⇒ 绝不回加 3010**。
                     #   原先这里**丢弃** `_ok` ⇒ 复制失败/半截也照推 ⇒ qB 去
                     #   `/downloads/<专辑>` 找不到文件 ⇒ progress=0 变下载（实测踩到）。
                     #   现在据返回值否决：种子已上站（不可逆、改不了），但**能否做种**
                     #   取决于数据在位；宁可不回加（下一轮可补救），也不推一条假下载。
                     if not _ok:
-                        print(f"    ❌ handoff 未就位 ⇒ **跳过回加 3040**（避免变成下载）："
+                        print(f"    ❌ handoff 未就位 ⇒ **跳过回加 3010**（避免变成下载）："
                               f"{_why}")
                         # ★★★ B2：**入账**（否则这条"已上站却不会做种"**静默消失**，见下）。
                         handoff.record_missing_data(info_hash, album, "musopia", _why)
                         return
                 else:
-                    print("    ⚠️  handoff：拿不到 3020 上的 content_path，"
+                    print("    ⚠️  handoff：拿不到 opencd 原种 content_path，"
                           "跳过复制（本条大概率不会做种）")
                     # ★ 拿不到源路径 ⇒ 无法复制 ⇒ 数据必然不在发种区 ⇒ 同样拒绝回加。
-                    print("    ❌ 无法定位源成品 ⇒ **跳过回加 3040**（避免变成下载）")
+                    print("    ❌ 无法定位源成品 ⇒ **跳过回加 3010**（避免变成下载）")
+                    # ★ O-6 漏洞 a：把**具体原因**（连不上/原种不在/cp 为空）入账，别只写死话术。
                     handoff.record_missing_data(info_hash, album, "musopia",
-                                                "拿不到 3020 content_path")
+                                                _src_why or "拿不到 opencd content_path")
                     return
             except Exception as _e:                              # noqa: BLE001
                 # ★ 复制/核对**抛异常** ⇒ 数据状态未知 ⇒ 保守拒绝回加（宁可漏做种，不可推假下载）。
@@ -472,6 +522,24 @@ def readd_to_qb(qb, client, info_hash, torrent_id):
                                             f"{type(_e).__name__}: {_e}")
                 return
         else:
+            # ★★★ O-6 漏洞 c（2026-10-10，方案 B）：**handoff 关 ⇒ 拒绝回加**。
+            #   方案 B 的不变量 = 「数据先复制到发种区，再回加」。handoff 关时数据**不会**
+            #   被复制 ⇒ 回加必然落到一个没有数据的 save_path（重构后 3010 的 /downloads
+            #   是 SSD 发种区，只在 handoff 复制过才有该专辑）⇒ 变 stalledDL/prog=0。
+            #   ⇒ 宁可**不回加**（漏做种，入账，可事后补），也**绝不**推一条假下载。
+            #   ★ 仅在方案 B 生效（`REQUIRE_HANDOFF_FOR_READD=true`，默认 true）时拒绝；
+            #     置 false ⇒ 回退老行为（取 orig 的 save_path）——留一个应急开关。
+            if _require_handoff_for_readd():
+                print("    ❌ [O-6/方案B] ENABLE_HANDOFF 未开 ⇒ 无法保证发种区有数据 ⇒ "
+                      "**跳过回加**（避免变成下载；如确需关闭 handoff 回加，设 "
+                      "REQUIRE_HANDOFF_FOR_READD=false）")
+                try:
+                    import handoff as _ho_c
+                    _ho_c.record_missing_data(info_hash, "", "musopia",
+                                              "ENABLE_HANDOFF 未开（方案B 拒绝回加）")
+                except Exception:                                 # noqa: BLE001
+                    pass
+                return
             orig = qb.torrents_info(torrent_hashes=info_hash)
             if not orig:
                 print("    ⚠️  qB 里找不到原始种子，无法确定做种路径，跳过回加")
@@ -660,7 +728,8 @@ def readd_to_qb_crabpt(qb, client, info_hash, torrent_id):
             save_path = config.PUBLISH_SAVE_ROOT
             try:
                 import handoff
-                src = _resolve_opencd_content_path(info_hash)
+                # ★ O-6 漏洞 a：`return_reason=True` ⇒ 取不到时把**具体原因**带出来入账。
+                src, _src_why = _resolve_opencd_content_path(info_hash, return_reason=True)
                 album = os.path.basename(str(src).rstrip("/\\")) if src else ""
                 _h_src, _h_album = src, album        # ★ #136
                 if src and album:
@@ -670,20 +739,21 @@ def readd_to_qb_crabpt(qb, client, info_hash, torrent_id):
                         target_category=config.CRABPT_PUBLISH_CATEGORY,
                         dry_run=(config.HANDOFF_DRY_RUN == "true"))
                     print(f"    🔀 handoff 复制: {_why}")
-                    # ★★★ #134 定论（同乌托邦路）：数据没就位 ⇒ **绝不回加 3040**。
+                    # ★★★ #134 定论（同乌托邦路）：数据没就位 ⇒ **绝不回加 3010**。
                     #   实测病根：蟹黄堡这条 `☆ac8.13f` 在 SSD 发种区**根本没目录**，
-                    #   却被推上 3040 变 `stalledDL`（10 leechers）—— 就是因为这里丢弃了 `_ok`。
+                    #   却被推上 3010 变 `stalledDL`（10 leechers）—— 就是因为这里丢弃了 `_ok`。
                     if not _ok:
-                        print(f"    ❌ handoff 未就位 ⇒ **跳过回加 3040**（避免变成下载）："
+                        print(f"    ❌ handoff 未就位 ⇒ **跳过回加 3010**（避免变成下载）："
                               f"{_why}")
                         # ★★★ B2：入账（同乌托邦路，见 `readd_to_qb` 内注释）。
                         handoff.record_missing_data(info_hash, album, "crabpt", _why)
                         return
                 else:
-                    print("    ⚠️  handoff：拿不到 3020 上的 content_path，跳过复制")
-                    print("    ❌ 无法定位源成品 ⇒ **跳过回加 3040**（避免变成下载）")
+                    print("    ⚠️  handoff：拿不到 opencd 原种 content_path，跳过复制")
+                    print("    ❌ 无法定位源成品 ⇒ **跳过回加 3010**（避免变成下载）")
+                    # ★ O-6 漏洞 a：把**具体原因**入账，别只写死话术。
                     handoff.record_missing_data(info_hash, album, "crabpt",
-                                                "拿不到 3020 content_path")
+                                                _src_why or "拿不到 opencd content_path")
                     return
             except Exception as _e:                              # noqa: BLE001
                 print(f"    ❌ handoff 复制/核对异常 ⇒ **跳过回加 3040**（避免变成下载）: "
@@ -692,6 +762,17 @@ def readd_to_qb_crabpt(qb, client, info_hash, torrent_id):
                                             f"{type(_e).__name__}: {_e}")
                 return
         else:
+            # ★★★ O-6 漏洞 c（2026-10-10，方案 B）：同乌托邦路 —— handoff 关 ⇒ 拒绝回加。
+            if _require_handoff_for_readd():
+                print("    ❌ [O-6/方案B] ENABLE_HANDOFF 未开 ⇒ 无法保证发种区有数据 ⇒ "
+                      "**跳过回加**（避免变成下载）")
+                try:
+                    import handoff as _ho_c
+                    _ho_c.record_missing_data(info_hash, "", "crabpt",
+                                              "ENABLE_HANDOFF 未开（方案B 拒绝回加）")
+                except Exception:                                 # noqa: BLE001
+                    pass
+                return
             # ① 做种路径：**乌托邦那条**（= 皇后原种 infohash）的 save_path
             orig = qb.torrents_info(torrent_hashes=info_hash)
             if not orig:
@@ -900,8 +981,97 @@ def explain_not_transferable(prefix):
         con.close()
 
 
+def _local_info_name(task):
+    """取本地 `.torrent` 的**权威** `info.name`（= 查重判据的左侧）。
+
+    ★★ 为什么用 `.torrent` 的 `info.name`、**不**用 `formatted_title`：
+       2026-10-11 实测（3/3 已知重复）—— 本地 `.torrent` 的 `info.name`
+       == 站侧 `.torrent` 的 `info.name`（精确相等）；而**标题不同**
+       （本地 `Forever Now 2026 - FLAC 整轨 - OpenCD` vs 站侧
+       `Switchfoot - Forever Now 2026 - FLAC 分軌 - Orpheus`）
+       ⇒ 比标题要么假阳（搜错）要么假阴（漏查）。`info.name` 由**种子内容**决定，
+         与发布者无关 ⇒ 才是"这条是不是同一专辑"的权威身份。
+    ★ 复用 `site_verify.extract_info_name`（它只认 `metainfo["info"]["name"]`，
+      **绝不**退回 `torf.Torrent.name`——单文件种子上那是文件名，会给出假结论）。
+    ★ 读不出（文件缺失 / 解析失败）⇒ 返回 `""`。**不抛**：查重侧对空名字
+      一律按"比不了 ⇒ 照旧提交"处理（不更坏，见 `find_existing_by_name`）。
+    """
+    import site_verify
+    path = (task or {}).get("torrent_file") or ""
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError as e:  # noqa: BLE001
+        print(f"    ℹ️  查重：本地种子文件读不出（{e}）⇒ 跳过查重、照旧提交")
+        return ""
+    name, why = site_verify.extract_info_name(data)
+    if not name:
+        print(f"    ℹ️  查重：本地种子 info.name 取不出（{why}）⇒ 跳过查重、照旧提交")
+        return ""
+    return name
+
+
+def _dedup_lookup(client, *, search_name, local_name, site_label):
+    """发布**前**查一次目标站点；返回命中的 tid 或 `None`。**出错向上抛**。
+
+    ★★ 这是 #13/#11 的**唯一**查重入口（两站共用，`ERR-META-03`：一处生效）——
+      把"搜不了 ⇒ 停轮非 0"与"搜到了不重复 ⇒ 照旧发"两条**相反**的处置，
+      在一个地方写死，免得两个调用点各写一份 `if` 链后慢慢漂。
+
+    ★ 判据链全在 `MusopiaClient.find_existing_by_name` 里（`info.name` 精确比对）；
+      本函数只负责：① 开关判断；② 取本地权威名；③ 命中/未命中/出错三态分流；
+        ④ 把结果打成一行人话日志。
+    ★ 返回 `None` = **要么开关关、要么搜到了不重复**（两者对调用方都是"照旧提交"）；
+      副作用上，命中的 tid 会**非 None** 返回，调用方据此改走"关联已有页"分支。
+    ★★ 异常**不吞**：`find_existing_by_name` 抛的 `LoginExpired`/`SiteError`
+      （含"查重搜索 HTTP≠200"）**原样向上冒** ⇒ 调用方按 `site_down` 停轮 + 非 0。
+      这正是用户拍板的"查重搜索失败 ⇒ 停轮非 0"（绝不静默降级成"没重复"）。
+    """
+    if not config.DEDUP_BEFORE_PUBLISH:
+        return None
+    if not search_name:
+        print("    ℹ️  查重：无搜索串（标题为空）⇒ 跳过查重、照旧提交")
+        return None
+    # ★（#23）打印**子查询计划**：多召回是"隐形的"，不打出来生产日志里看不出来
+    #   （`ERR-PUBLISH-17` 警告的"静默特性"）。计划纯本地、零网络。
+    try:
+        import musopia as _mus
+        _plan = _mus.SEARCH_QUERY_PLAN(
+            local_name, search_name=search_name,
+            max_queries=config.DEDUP_MAX_SEARCH_QUERIES)
+        print(f"    🔎 查重计划：{len(_plan)} 条子查询（本地名={local_name!r}）"
+              f" ⇒ {_plan}")
+    except Exception as _e:                         # noqa: BLE001 —— 只影响日志，不影响查重
+        print(f"    ℹ️  查重计划打印失败（不影响查重）：{_e}")
+    hit = client.find_existing_by_name(search_name, local_name=local_name)
+    if hit:
+        print(f"    🔍 查重命中：{site_label} 已有同版本 ⇒ id={hit}"
+              f"（本地名={local_name!r}）⇒ 关联已有页、**不再重复提交**")
+    else:
+        print(f"    🔍 查重：{site_label} 未发现同版本 ⇒ 照旧提交")
+    return hit
+
+
+class CoverItemError(Exception):
+    """**单条**种子的封面不可用（如本地无源图 / 图超图床大小上限 / 站点按 item 拒收）。
+
+    ★★ 与"设施级失败"（`LSKY_TOKEN` 没配 / 图床不可达 / 401）**必须分开**（ERR-META-03：
+    两件不同的事别用同一个判据）：
+      · **设施级** ⇒ 每条都过不去 ⇒ **停 + 非 0**（退避），修好设施再继续（保持原行为）。
+      · **本条级**（本异常）⇒ **只这一条**过不去，且**重跑多少次都一样**（如一张永久
+        超过图床大小的图）⇒ 必须**跳过这条、继续下一条**，否则**一条坏封面会把整条
+        蟹黄堡转种队列永久卡死**（2026-10-09 实测：`1e39f05940b6.jpg` 15.9 MB
+        被 Lsky 拒「图片大小超出限制」，蟹黄堡三天 0 条发布成功）。
+    ★ 抛出本异常 = 调用方**跳过本条**（不标 FAILED：种子本身没坏，只是这一站缺图；
+      可先 `backfill_covers_opencd.py` 换一张再重试）。
+    """
+
+
 def _crabpt_cover(task, *, dry_run=False):
     """确保这条种子在**蟹黄堡**上有一份**属于蟹黄堡的**封面 URL。返回 `(url, 说明)`。
+
+    ★★ 失败分级（2026-10-09 修）：**本条级**失败抛 `CoverItemError`（调用方跳过本条、
+    继续下一条）；**设施级**失败仍返回 `("", 说明)`（调用方停整轮 + 非 0）。见 `CoverItemError`。
 
     ★★ 为什么必须单独一步（用户 2026-09-25 明确要求「蟹黄堡要用专用的图链」）：
       两站的封面**各自一份** —— 乌托邦是 picgo（`tasks.cover_url`），
@@ -936,15 +1106,17 @@ def _crabpt_cover(task, *, dry_run=False):
     #   （封面当初就是为乌托邦抓的）⇒ 拿它当 key 去查，**只查本地、不联网**。
     src = (task.get("cover_url") or "").strip()
     if not src:
-        return "", "★ 库里连 cover_url 都没有 ⇒ 无源可传"
+        # ★ 本条级：这条种子**根本没有封面源** ⇒ 跳过本条（不是设施坏）。
+        raise CoverItemError("库里连 cover_url 都没有 ⇒ 无源可传")
     try:
         import cover_fetch
         local = cover_fetch._cached_file(src)
     except Exception as e:                                  # noqa: BLE001
         return "", f"★ 查本地封面缓存出错: {type(e).__name__}: {e}"
     if not local:
-        return "", (f"★ 本地封面缓存里没有这张图（key={src[:60]}…）⇒ "
-                    f"没有可上传的源")
+        # ★ 本条级：本地没有这张图（且不联网重下）⇒ 跳过本条。
+        raise CoverItemError(
+            f"本地封面缓存里没有这张图（key={src[:60]}…）⇒ 没有可上传的源")
     if dry_run:
         # ★ dry-run **不真上传**（那是外部副作用而且是不可撤销的写）。
         #   但也**不能说"封面就绪"** —— 那是个假判据。如实报"会传这一张"。
@@ -954,6 +1126,13 @@ def _crabpt_cover(task, *, dry_run=False):
     import assets
     url = assets.upload_to_lsky(local)
     if not url:
+        # ★★ 失败分级（2026-10-09）：单条级（这张图本身传不上去，如超大小上限）⇒
+        #   抛 `CoverItemError`，调用方**跳过本条**；设施级（token/配额/网络）⇒ 返空，
+        #   调用方**停整轮**。判据集中在 `assets.lsky_error_is_item_level`（一处口径）。
+        if assets.lsky_error_is_item_level():
+            raise CoverItemError(
+                f"Lsky 拒收这张图（单条级，重试无效）：{assets.LAST_LSKY_ERROR}"
+                f"；本地图 {local}")
         return "", f"★ Lsky 上传失败（本地图 {local}）—— 见上面图床那行输出"
     return url, f"新传到 Lsky：{local} ⇒ {url}"
 
@@ -1632,6 +1811,74 @@ def selftest_crabpt_failure_classification(verbose=True):
     return (not detail), detail
 
 
+def selftest_crabpt_limit_enumerates(verbose=True):
+    """断言 `run_crabpt` 的一轮**不会因为队首封面坏就白跑**（2026-10-10）。
+
+    ★★ 这条防的是什么（蟹黄堡 2026-10-07~10-10 实测三天零出种的**根因**）：
+      旧代码 `valid = valid[:limit]`（先截候选）**然后**才进循环逐条试封面。
+      `CRABPT_MAX_PER_CYCLE=1` ⇒ `valid` 只剩 1 条 ⇒ 队首那条封面坏（15.6MB 被
+      Lsky 拒）⇒ `CoverItemError` 的 `continue` **无处可去** ⇒ 一轮白跑；该条又**没标
+      FAILED** ⇒ 仍是队首（`ORDER BY updated_at`）⇒ **永久卡死**。
+    ⇒ 契约：`run_crabpt` 里**不得**在提交循环之前对 `valid` 做 `[:limit]` / `[:1]` 预截；
+      改为循环内按"**成功计数**"（`published_this_round >= max_publish`）截断。
+
+    ★ 判据 = **源码文本**（同 `selftest_crabpt_failure_classification` 的理由：
+      这里查的是"某段赋值语句在不在"，是**结构契约**；`_code_only` 会把它清掉）。
+    ★ 阴性对照：把 `valid = valid[:1]`（旧 bug 形状）塞回 `run_crabpt` ⇒ 判据**必须**报红。
+      没做过阴性对照的自检不算验证过（`ERR-META-01`：失效的检测比不检测更危险）。
+    """
+    src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    tree = _ast.parse(src)
+    fn = next((n for n in _ast.walk(tree)
+               if isinstance(n, _ast.FunctionDef) and n.name == "run_crabpt"), None)
+    if fn is None:
+        return False, ["★ 找不到 run_crabpt —— 函数被改名了？本条自检失效"]
+    lines = src.splitlines()
+    start = fn.lineno - 1
+    end = max((getattr(n, "lineno", start) for n in _ast.walk(fn)), default=start)
+    body = "\n".join(lines[start:end])
+
+    def _scan(text):
+        out = []
+        # ★ 契约 ①：不得出现"把 valid 按切片预截"的写法。
+        #   只看**对 `valid` 赋值且右侧是切片**的行（`valid = valid[:...]`），
+        #   不看只读的 `valid[:12]`（打印队列）或 `valid[0]`（dry-run 预览）。
+        bad_slice = []
+        for ln in text.splitlines():
+            s = ln.strip()
+            if s.startswith("valid = valid[") and ":" in s:
+                bad_slice.append(s)
+        if bad_slice:
+            out.append(f"★★ run_crabpt() 里仍有 `valid = valid[...]` 预截候选 "
+                       f"⇒ 队首封面坏时一轮白跑、队列永久卡死（#134 复发）：{bad_slice}")
+        # ★ 契约 ②：必须有"成功计数"驱动的高限。
+        if "published_this_round" not in text:
+            out.append("★★ run_crabpt() 里没有 `published_this_round` ⇒ `--limit` 不是按"
+                       "**成功条数**截断 ⇒ 坏封面会占掉名额、堵住后面的种子")
+        # ★ 契约 ③：坏封面必须**跳过并继续**（不是 break、不是标 FAILED）。
+        if "CoverItemError" not in text or "continue" not in text:
+            out.append("★★ run_crabpt() 里没有 `CoverItemError` + `continue` ⇒ "
+                       "坏封面不再'跳过并继续下一条'")
+        return out
+
+    detail = _scan(body)
+
+    # ---------- 阴性对照：把旧 bug 形状 `valid = valid[:1]` 塞回去，必须报红 ----------
+    #   ★ 注：塞到一个安全位置即可（这里拼在 body 末尾），只要 `_scan` 能扫到它。
+    neg = _scan(body + "\n        valid = valid[:1]\n")
+    if not any("预截候选" in d for d in neg):
+        detail.append("✗ ★ 阴性对照失败：把 `valid = valid[:1]` 塞回去后判据**没**报红 "
+                      "⇒ 本条自检是空的")
+
+    if verbose:
+        mark = "✅" if not detail else "❌"
+        print(f"{mark} 蟹黄堡 --limit 自检：run_crabpt() 按**成功计数**截断、"
+              f"坏封面跳过即继续（无 valid 预截）（含阴性对照）")
+        for d in detail:
+            print(f"    {d}")
+    return (not detail), detail
+
+
 def run_crabpt(args):
     """蟹黄堡（crabpt.vip）发布路径。★ 与 `main()` 的乌托邦路径**并列**，不互相调用。
 
@@ -1866,27 +2113,42 @@ def run_crabpt(args):
     if not valid:
         print("没有符合发布条件的任务，退出。")
         return
+
+    # ★★★ 2026-10-10：`--limit` 的语义从"**预截候选**"改成"**成功计数截断**"。
+    #
+    #   病根（2026-10-07~10-10 实测，蟹黄堡三天零出种）：旧代码是
+    #     `valid = valid[:limit]`（**先**截到 limit 条）**然后**才进提交循环逐条试封面。
+    #   `CRABPT_MAX_PER_CYCLE=1` ⇒ `valid` 只有 1 条 ⇒ 队首那条封面坏（15.6MB 被
+    #   Lsky 拒）抛 `CoverItemError` ⇒ `continue` **无处可去**（valid 就 1 条）
+    #   ⇒ 一轮白跑；而该条**没标 FAILED** ⇒ 仍是队首 ⇒ **永久卡死**，后面 34 条不动。
+    #
+    #   ⇒ 正确行为（用户 2026-10-10 拍板「先发别的种子」）：`--limit N` 表达的是
+    #     "**这一轮至多发成功 N 条**"，而**不是**"只试前 N 条候选"。循环必须能
+    #     **跳过坏封面、继续试下一条**，直到发够 N 条或候选耗尽。
+    #   ⇒ 所以这里**不再** `valid = valid[:limit]`；改为把"至多发 N 条"交给下面的
+    #     提交循环用 `published_this_round` 计数实现（见那段的注释）。
+    #
+    #   ★ 上界语义**没变**：一轮仍是**最多**发 N 条（不可逆操作的上限还得有）。
+    #     变的只是"这 N 条名额**被谁占用**" —— 旧代码让一个坏封面**占掉**唯一名额，
+    #     新代码把它**让给下一个能发的**。
+    #
+    #   ★ 默认仍保守（给了 --limit 才发 N 条，没给仍只发 1 条）：
+    #     不可逆操作的默认值必须保守，放开要有人显式写一个数（同 ERR-ENV-02 家族）。
+    #     只是这个"1"现在**必须真的发出去一条**，而不是"试一条、失败就收工"。
     if args.limit:
-        valid = valid[:args.limit]
-    # ★★ 未显式给 `--limit` 时，蟹黄堡这条路**一次最多 1 条**（2026-09-27 放宽后）。
-    #
-    #   ★ 改动史：原来这里是**无条件** `valid = valid[:1]`（无论给没给 --limit），
-    #     锚在"这条路从未验证过"上。2026-09-27 用户决定接 daemon
-    #     ⇒ 无人值守要能按 `CRABPT_MAX_PER_CYCLE` 发 N 条，
-    #       所以上限改由 `--limit` **显式**表达（daemon 会传它）。
-    #
-    #   ★★★ 但护栏本身**没有取消**，只是从"写死 1"变成"**默认 1**"：
-    #        给了 `--limit N` ⇒ 发 N 条（调用方**显式声明**了要多发）；
-    #        没给          ⇒ 仍然只发 1 条。
-    #      ⇒ 这个方向是对的：**不可逆操作的默认值必须保守**，
-    #        放开要有人显式写一个数（与 `ERR-ENV-02` 那条"缺键时默认中性"同族，
-    #        只是这里中性 = 保守）。
-    #   ★ 若真发了多条，**回读确认**仍是后面的步骤（见下面的比对段）。
-    elif len(valid) > 1:
-        print(f"\n★★ 蟹黄堡路径未给 --limit ⇒ 一次只发 1 条（本次命中 {len(valid)} 条）。")
-        print(f"   ★ 理由：发布不可逆。要一次多发请在命令行**显式**给 "
-              f"`--limit N`（daemon 用的是 `CRABPT_MAX_PER_CYCLE`）。")
-        valid = valid[:1]
+        max_publish = args.limit
+    else:
+        max_publish = 1
+        if len(valid) > 1:
+            print(f"\n★★ 蟹黄堡路径未给 --limit ⇒ 一次只发 1 条（本次命中 {len(valid)} 条）。")
+            print(f"   ★ 理由：发布不可逆。要一次多发请在命令行**显式**给 "
+                  f"`--limit N`（daemon 用的是 `CRABPT_MAX_PER_CYCLE`）。")
+
+    # ★★ 枚举软上限：坏封面会被**跳过并继续下一条**，若队列里坏封面极多，
+    #   一轮可能横扫整队、把 Lsky 打爆（每试一条 = 一次上传请求）。
+    #   ⇒ 给"本轮最多**试**多少条候选"设一个远大于 limit 的护栏；撞上就如实
+    #     打印"因候选耗尽停在此处"（ERR-META-14：兜底不许冒充真结果）。
+    max_scan = max(max_publish * 20, 200)
 
     # ---- 提交前：读发布页（★ 唯一能在提交前发现"没有发种权限"的判据）----
     client = crabpt_site.CrabptClient()
@@ -1919,11 +2181,17 @@ def run_crabpt(args):
             sys.exit(f"❌ {e}")
 
     # ---- dry-run：把字段与**来源**逐项打出来 ----
+    #
+    #   ★★ 2026-10-10：dry-run 只预览**队首一条**（`valid[0]`）。但真发布现在会
+    #     **跳过坏封面、继续下一条** ⇒ 若队首恰是坏封面，预览会停在它上面而**看不到**
+    #     真正会被发的那条。⇒ 下面把这一点**说清**（ERR-META-14：别让预览冒充真结果）。
     if args.dry_run:
         t = valid[0]
         print("\n" + "=" * 60)
         print(f"🔍 dry-run：{t.get('formatted_title')}")
         print("=" * 60)
+        print(f"   ★ 注意：真发布会**跳过坏封面、继续下一条**（至多发成功 {max_publish} 条）；"
+              f"本预览只演示**队首这一条**。")
         # ★★ 封面也要**走一遍**（`dry_run=True` ⇒ 只查不传）。
         #   ★ 为什么不能跳过这一步：不跑它就看不出一件最要紧的事 ——
         #     **本地到底有没有那张图**。而"没有图"正是真发布时会**拒绝发**的原因。
@@ -1932,7 +2200,7 @@ def run_crabpt(args):
         cover, cover_why = _crabpt_cover(t, dry_run=True)
         print(f"封面 ← {cover_why}")
         if not cover:
-            print("   ★★ 注意：按现在的状态**真发布会在这里停下**（不发）—— 见上。")
+            print("   ★★ 注意：队首这条**真发布会在这里跳过**（不改发别的）—— 见上。")
         else:
             t = dict(t)
             t["cover_url"] = cover
@@ -1955,8 +2223,11 @@ def run_crabpt(args):
         return
 
     # ---- 确认（★ 与 main() 同一处语义：`--yes` 跳过，`--auto` 另查钥匙）----
+    # ★ 2026-10-10：确认文案随 `--limit` 新语义更新 —— 说的是"至多发成功几条"，
+    #   而不是"valid 有几条"（valid 现在**不预截**，`len(valid)` 会比实际名额大）。
     if not args.yes:
-        answer = input(f"\n确认向**蟹黄堡**发布这 {len(valid)} 条吗？(y/N): ").strip().lower()
+        answer = input(f"\n确认向**蟹黄堡**发布吗？（至多发成功 {max_publish} 条；"
+                       f"本轮候选 {len(valid)} 条，坏封面会跳过）(y/N): ").strip().lower()
         if answer != "y":
             print("🚫 已取消，未向站点提交任何数据。")
             return
@@ -1976,28 +2247,50 @@ def run_crabpt(args):
 
     # ---- 提交（#23：**逐条循环** + 失败分级）--------------------------------
     #
-    # ★★ 为什么改成循环（#23 的**核心**，之前这里是 `t = valid[0]` 只发 1 条）：
-    #   旧行为"只发 1 条、任何失败就 `sys.exit(非0)`" ⇒ daemon 退避 ⇒ **每周期重试同一条**；
-    #   而转种队列 `ORDER BY updated_at`（确定性最老优先）⇒ 坏种子**恒在队首**
-    #   ⇒ 一条坏种子把**整条转种队列永久卡住**（比乌托邦更糟，乌托邦那条顺序是随机的）。
-    #   现在：被站点**明确拒**的种子标 `FAILED`（`CRABPT_QUEUE_WHERE` 不含它 ⇒ 出队）+
+    # ★★ 为什么是循环（#23 的**核心**，之前这里是 `t = valid[0]` 只发 1 条）：
+    #   被站点**明确拒**的种子标 `FAILED`（`CRABPT_QUEUE_WHERE` 不含它 ⇒ 出队）+
     #   **继续发下一条**；站点侧问题 / 无法判定 ⇒ 立即停 + 非 0（退避）。
-    # ★★ 不改 `--limit` 语义：`valid` 仍是一轮至多 `CRABPT_MAX_PER_CYCLE` 条**候选**，
-    #   本改动只决定"被拒后是否继续遍历**已选的** `valid`"，**不放大**候选集合。
-    ok = rejected = 0
+    #
+    # ★★★ 2026-10-10：`--limit` 语义订正为"**成功计数**"（见上面 `max_publish` 那段）。
+    #   旧代码 `valid = valid[:limit]`（**先截候选**）在这里**恰好**与 `continue` 打架：
+    #     `CRABPT_MAX_PER_CYCLE=1` ⇒ `valid` 只 1 条 ⇒ 队首封面坏 ⇒ `continue` 无处可去
+    #     ⇒ 一轮白跑 + 队首永不前进 ⇒ **永久卡死**（蟹黄堡 2026-10-07~10-10 三天零出种）。
+    #   ⇒ 现在 `valid` **不预截**；循环逐条往下试，**坏封面跳过、继续下一条**，直到
+    #     **成功发出 `max_publish` 条** 或候选耗尽。这正是用户要的「先发别的种子」。
+    #
+    #   ★ 遍历的是**已过预检**的 `valid`（都有 cover_url / 种子文件 / descr 非空壳），
+    #     所以"预检拦下的（如缺 cover_url 的队首）"**不会**占用名额 —— 它压根没进 valid。
+    ok = rejected = skipped = 0
+    scanned = 0                 # 本轮**试过**的候选数（含被跳过的坏封面）
+    published_this_round = 0    # 本轮**成功发出**的条数（= 真正消耗 `--limit` 名额的）
     site_down = False
+    dup_existing = 0            # ★ #13：查重命中 ⇒ 关联而非重复提交的条数
     for t in valid:
+        # ★★ 枚举软上限：坏封面会被跳过并继续；若坏封面极多，一轮可能横扫整队、
+        #   把 Lsky 打爆。撞上护栏就**如实**说清"因候选耗尽停在此处"（不许冒充"发完了"）。
+        if scanned >= max_scan:
+            print(f"\n⚠️  本轮已试 {scanned} 条、成功 {published_this_round} 条，"
+                  f"达枚举软上限（{max_scan}）⇒ 停在此处（队列里坏封面可能很多，"
+                  f"建议先 `python backfill_covers_opencd.py` 批量换封面）。")
+            break
+        scanned += 1
         # ★★ 封面必须在**渲染字段之前**解决 —— `descr` 是提交内容的一部分，
         #   而封面就写在 `descr` 里（`[img]…[/img]`）。顺序反了就等于没换。
-        #   ★ 封面准备失败是**本地设施**问题（`LSKY_TOKEN` 没配 / 图传不上去），
-        #     不是"这条种子坏" ⇒ **停 + 非 0**（同站点侧），**不**标 FAILED
-        #     （否则会把一整队列好种子误杀成 FAILED）。
-        crabpt_cover, cover_why = _crabpt_cover(t)
+        #   ★★ 失败分级（2026-10-09 修）——
+        #     · `CoverItemError`（**本条**封面不可用，如超图床大小上限 / 本地无源图）
+        #       ⇒ **跳过本条、继续下一条**（重试无效；否则一条坏封面永久卡死整队）。
+        #     · 其余返空 = **设施级**（token/配额/网络）⇒ 停整轮 + 非 0（保持原行为）。
+        try:
+            crabpt_cover, cover_why = _crabpt_cover(t)
+        except CoverItemError as _ce:
+            print(f"   · 封面 ← ❌ 本条封面不可用（跳过本条，继续下一条）：{_ce}")
+            print(f"     ★ 修法：`python backfill_covers_opencd.py` 给这条换一张封面后重试。")
+            skipped += 1
+            continue
         print(f"   · 封面 ← {cover_why}")
         if not crabpt_cover:
-            print("🛑 蟹黄堡封面没准备好 ⇒ 停止本轮（不标 FAILED —— 这是本地设施问题）。\n"
-                  "   ★ 修法：先让这条种子在本地有封面（`python backfill_covers_opencd.py`），\n"
-                  "     或检查 NAS `.env` 里的 `LSKY_TOKEN`（见 ERR-ENV-02）。")
+            print("🛑 蟹黄堡封面没准备好（设施级）⇒ 停止本轮（不标 FAILED —— 这是本地设施问题）。\n"
+                  "   ★ 修法：检查 NAS `.env` 里的 `LSKY_TOKEN`（见 ERR-ENV-02）。")
             site_down = True
             break
         # ★ 只覆盖**这一份 task 拷贝**的 `cover_url`，`build_fields` 会用它渲染 `descr`。
@@ -2006,6 +2299,43 @@ def run_crabpt(args):
         #   ★ 也**不**回写 `tasks.cover_url`（那是乌托邦那一份，别顶掉它）。
         t = dict(t)
         t["cover_url"] = crabpt_cover
+
+        # ★★★ 发布前跨站查重（#13 / #11 核心，2026-10-11 加）—— 蟹黄堡这一路。
+        #   ★ 为什么放在**封面之后**：查重命中 ⇒ 不提交 ⇒ 这一步的封面白算了，
+        #     但 `_crabpt_cover()` 还有"写 site_publish.cover_url"的副作用是**想要**的
+        #     （关联已有页时也把封面链记下）。★ 且蟹黄堡的 `UNKNOWN:` 停轮机制比乌托邦
+        #     更脆（重复提交回 HTTP200 无 id）⇒ 这里查重的价值更高。
+        #   ★★ 三态处置与乌托邦**逐字相同**（用户要求两站都做）：命中 ⇒ 只写
+        #     `site_publish_set(...SITE_CRABPT...)` + `save_task(PUBLISHED)`，
+        #     **绝不碰** `site_status`/`site_torrent_id`（那是乌托邦的两列，见下）；
+        #     未命中 ⇒ 照旧提交；出错 ⇒ 停轮非 0（`site_down`）。
+        if config.DEDUP_BEFORE_PUBLISH:
+            try:
+                _hit = _dedup_lookup(client,
+                                     search_name=t.get("formatted_title"),
+                                     local_name=_local_info_name(t),
+                                     site_label="蟹黄堡")
+            except LoginExpired as e:
+                print(f"    🛑 查重时登录失效，停止本轮（不标 FAILED）: {e}")
+                site_down = True
+                break
+            except SiteError as e:
+                print(f"    🛑 查重失败，停止本轮（不标 FAILED —— 站点侧问题）: {e}")
+                site_down = True
+                break
+            if _hit:
+                # ★★★ 只写**蟹黄堡那一行**，绝不碰 `site_status`/`site_torrent_id`
+                #   （与下面成功路径同一纪律 —— 那两列是乌托邦的，写它们会污染
+                #    发布队列 / 已发布集合 / scan 跳过 / 巡检计数四个判据）。
+                db.site_publish_set(t["info_hash"], db.SITE_CRABPT, _hit,
+                                    status="EXISTS",
+                                    cover_url=crabpt_cover or None)
+                db.save_task(info_hash=t["info_hash"], status="PUBLISHED",
+                             reason=f"crabpt_dup_existing:{_hit}")
+                db.mark_synced(t["info_hash"])
+                dup_existing += 1
+                print("    ✅ 已关联到蟹黄堡已有页（未重复提交）。")
+                continue
 
         fields = _crabpt_fields(t, args.anonymous)
         print(f"\n🚀 向蟹黄堡提交：《{t.get('formatted_title')}》")
@@ -2061,6 +2391,7 @@ def run_crabpt(args):
             break
 
         ok += 1
+        published_this_round += 1
         print(f"    🎉 已提交，站点 ID = {tid}")
         # ★★★ 落库：**只写蟹黄堡那一行**，绝不碰 `site_status`/`site_torrent_id`
         #   （2026-09-25 修 —— 这两列是**乌托邦**的）。
@@ -2099,6 +2430,15 @@ def run_crabpt(args):
               "而现在已经可达的东西（先得自己发过一条）。")
         print("★ 它同时是回填 `PLAN-crabpt.md` 附录 C.6 的依据。")
 
+        # ★★★ 成功计数到顶 ⇒ 停（`--limit` 的**新语义**，见上面 `max_publish` 那段）。
+        #   ★ 放在**整条处理完之后**才 break：落库 / 回加做种 / 回读都做完了，
+        #     不会漏掉那条已发的种子的收尾。
+        if published_this_round >= max_publish:
+            print(f"\n★ 本轮已成功发出 {published_this_round} 条"
+                  f"（= --limit / CRABPT_MAX_PER_CYCLE 上限）⇒ 停。"
+                  f"（共试 {scanned} 条，跳过坏封面 {skipped} 条）")
+            break
+
     # ---- 退出码分层（★ 与乌托邦 `main()` 末尾那段**同形**，见 ERR-PUBLISH-03）----
     if site_down:
         print("↩️  以非 0 退出：蟹黄堡站点侧/无法判定（已中止本轮），让 daemon 的退避生效")
@@ -2112,7 +2452,405 @@ def run_crabpt(args):
     if rejected:
         print(f"ℹ️  退出码 0：{rejected} 条坏种子已标 FAILED 出队（队列已推进），"
               f"其余 {ok} 条成功 ⇒ **不**触发退避")
+    if skipped:
+        # ★ 2026-10-09：封面属"本条不可用"而**跳过**的条数（不停整轮）。
+        # ★ 2026-10-10：现在"跳过"会**继续枚举下一条**（见 `max_publish` / 循环那段）
+        #   —— 所以跳过本身不再是"本轮白跑"，而是"名额让给了后面的种子"。
+        print(f"ℹ️  另有 {skipped} 条因**本条封面不可用**跳过（未标 FAILED，未停整轮）"
+              f"⇒ 想补：给这些条换封面后重跑（`python backfill_covers_opencd.py`）")
+    if ok == 0 and skipped > 0 and not site_down:
+        # ★ 鲜明区分两种"零出种"：
+        #   （a）**候选里有能发的、但都被前面的坏封面挡住了** —— 本改动后不会发生
+        #        （坏封面只跳过、不挡后面的）；若仍出现 ⇒ 说明**整队**候选封面都坏。
+        #   （b）本轮**所有**候选封面都不可用 ⇒ 一条没发。
+        #   两者都**不是**站点故障 ⇒ 退出码 0（不退避，避免每 30min 空敲），但要**说清**。
+        print(f"⚠️  本轮成功 0 条：试了 {scanned} 条候选，封面**全部**不可用"
+              f"（{skipped} 条跳过）—— 不是站点故障。"
+              f"⇒ 建议 `python backfill_covers_opencd.py --apply` 批量换封面。")
+    if dup_existing:
+        # ★ #13：查重命中 ⇒ 关联到蟹黄堡已有页（未重复提交）的条数。
+        print(f"ℹ️  另有 {dup_existing} 条**查重命中**（蟹黄堡已有同版本）⇒ "
+              f"已关联到已有页、未重复提交（退出码 0）。")
     return
+
+
+# ---- ★★ 自检（#13）：发布前查重的**结构性判据** + 判据的**运行时**验证 ----
+#
+# ★★★ 为什么需要它（#13 / #11 的核心，2026-10-11）：
+#   病根是 pipeline **只信本地 `site_status`**、从不问目标站点"有没有" ⇒ 同一专辑
+#   以不同 tid 再入库时就发重复种 ⇒ 站点用**不透明的**「上传失败！」拒绝。
+#   ⇒ 修法 = 发布**前**查一次站、命中就**不再提交**。
+#   ★ 这个修法**会静默失效**：把查重那一整段删掉，`upload_torrent` 照发、
+#     站点照拒、日志**看起来一样**（都是"上传失败"）—— 这正是它必须被自检钉住的理由。
+#   ★ 判据分两半：
+#     ① **结构性**（源码 AST）：`main` 与 `run_crabpt` 都必须**在 `upload_torrent`
+#        之前**调用 `_dedup_lookup`；命中分支必须 `continue`（不许落到提交）。
+#     ② **运行时**：`_dedup_lookup`/`_local_info_name`/`search_and_compare` 在**假 client**
+#        上真的能"命中 ⇒ 返回 tid"、"不重复 ⇒ 返回 None"、"搜索失败 ⇒ 抛异常"。
+#        ★ 含**阴性对照**：把 `local_name` 改一个字 ⇒ 必须**不命中**（证明命中不是空真）。
+def selftest_dedup_before_publish(verbose=True):
+    """断言两站发布路都**先查重、命中即不提交**；并运行时验判据可失败。返回 `(ok, 明细)`。
+
+    ★★ 阴性对照（能失败）：见 `_neg` —— 把本地名字改一个字，`search_and_compare`
+      必须**不命中**；若它仍命中，说明判据是空真（`ERR-META-32`）。
+    """
+    import io as _io
+    detail = []
+    fails = []
+
+    # ---------- ① 结构性：两站都必须在 upload_torrent 之前调 _dedup_lookup ----------
+    src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    tree = _ast.parse(src)
+
+    def _fn_node(name):
+        return next((n for n in _ast.walk(tree)
+                     if isinstance(n, _ast.FunctionDef) and n.name == name), None)
+
+    def _call_lineno(node, func_name):
+        """`node` 里第一次调 `func_name(...)` 的行号（按调用名匹配）。"""
+        for n in _ast.walk(node):
+            if isinstance(n, _ast.Call):
+                f = n.func
+                nm = f.attr if isinstance(f, _ast.Attribute) else getattr(f, "id", "")
+                if nm == func_name:
+                    return n.lineno
+        return None
+
+    for fname in ("main", "run_crabpt"):
+        fn = _fn_node(fname)
+        if fn is None:
+            fails.append(f"★ 找不到 {fname} —— 函数被改名了？本条自检失效")
+            continue
+        dedup_line = _call_lineno(fn, "_dedup_lookup")
+        upload_line = _call_lineno(fn, "upload_torrent")
+        if dedup_line is None:
+            fails.append(f"★★ {fname} 里**没有**调 `_dedup_lookup` ⇒ 发布前不查重"
+                         f"（重复种又被发出去了）")
+        elif upload_line is not None and dedup_line > upload_line:
+            fails.append(f"★★ {fname} 里 `_dedup_lookup`（行 {dedup_line}）在 "
+                         f"`upload_torrent`（行 {upload_line}）**之后** ⇒ 查重太晚")
+        else:
+            detail.append(f"① {fname}：先 `_dedup_lookup`（行 {dedup_line}）"
+                          f"后 `upload_torrent`（行 {upload_line}）✅")
+
+    # ---------- ② 结构性：命中分支必须 `continue`（不许落到提交）----------
+    #   ★ 判据：源码里命中分支的那段**必须**含 `continue`，且**不**含 `upload_torrent`。
+    #   ★ 用**源码文本**（不是 AST unparse）—— 这里要的是"那段长什么样"，
+    #     而且注释里正好写着"不再重复提交"，读起来对得上。
+    for label, anchor in (("乌托邦(main) ", "已关联到站点已有页"),
+                          ("蟹黄堡(run_crabpt) ", "已关联到蟹黄堡已有页")):
+        idx = src.find(anchor)
+        if idx < 0:
+            fails.append(f"★ 找不到 {label}命中分支的标记串 {anchor!r} —— 分支被改了？")
+            continue
+        seg = src[idx:idx + 700]        # 命中分支那几十行
+        if "continue" not in seg:
+            fails.append(f"★★ {label}命中分支里没有 `continue` ⇒ 会**落到提交**（重复发）")
+        else:
+            detail.append(f"② {label}命中分支 `continue` ✅")
+
+    # ---------- ③ 运行时：search_and_compare 判据（含阴性对照）----------
+    import musopia
+    import site_verify
+
+    def _benc(obj):
+        if isinstance(obj, int):
+            return b"i%de" % obj
+        if isinstance(obj, bytes):
+            return b"%d:%s" % (len(obj), obj)
+        if isinstance(obj, str):
+            return _benc(obj.encode())
+        if isinstance(obj, dict):
+            out = b"d"
+            for k in sorted(obj, key=lambda x: x.encode() if isinstance(x, str) else x):
+                out += _benc(k) + _benc(obj[k])
+            return out + b"e"
+        raise TypeError(type(obj))
+
+    def _tb(name):
+        return _benc({"announce": "http://x/announce",
+                      "info": {"name": name, "piece length": 16384,
+                               "pieces": b"\x00" * 20, "length": 1000}})
+
+    LOCAL = "Stravinsky; Chamber Works (2024) [FLAC]"
+
+    class _Resp:
+        def __init__(self, text="", status=200):
+            self.text, self.status_code = text, status
+
+    class _Fake:
+        """假客户端：`/torrents.php` 按**站点真实语义**作答（#23）。
+
+        ★★ 为什么不能像旧夹具那样"恒返回同一条链接"：那样**结构上不可能**发现 #23 的
+           召回 bug（单串/多串都返回同一结果 ⇒ 静默绿）。本假站点复刻实测到的站点语义：
+           **AND（每个空白 token 都必须是假站点标题的子串）** + 命中才吐链接。
+           站点假标题 = `SITE_TITLE`（与 LOCAL 的 `info.name` **不同** —— 正是现实）。
+        """
+        # 站点**显示标题**（本地 info.name 是另一串 —— 这正是判据必须用 info.name 的原因）
+        SITE_TITLE = "Various Artists - Stravinsky: Chamber Works 2024 - FLAC 分軌 - Orpheus"
+        SEARCH_PARAMS = staticmethod(lambda nm: musopia.SEARCH_PARAMS(nm))
+
+        def __init__(self, hit_map, *, site_title=None, target_tid="5998",
+                     decoys=()):
+            self.hit_map = hit_map
+            self.site_title = site_title or self.SITE_TITLE
+            self.target_tid = target_tid
+            self.decoys = list(decoys)      # 排在目标**之前**的诱饵 id（打"靠运气排序"）
+            self.queries = []               # ★ 记录**实际发过**的列表页查询（#31：验"命中即停"）
+
+        def _match(self, query):
+            toks = [t for t in str(query).split() if t]
+            return bool(toks) and all(t in self.site_title for t in toks)
+
+        def get(self, path, **kw):
+            if path.startswith("/torrents.php"):
+                q = (kw.get("params") or {}).get("search", "")
+                self.queries.append(q)      # ★ 记下每一条真正发出的查询
+                if not self._match(q):
+                    return _Resp("")           # AND 不成立 ⇒ **0 候选**（复刻实测）
+                links = "".join(f'<a href="details.php?id={d}">x</a>' for d in self.decoys)
+                links += f'<a href="details.php?id={self.target_tid}">x</a>'
+                return _Resp(links)
+            if path.startswith("/details.php"):
+                return _Resp("<html><h1>Album</h1></html>")
+            raise AssertionError(path)
+
+        def download_torrent(self, tid):
+            return self.hit_map.get(tid)
+
+        def find_existing_by_name(self, name, *, local_name, base_path="/torrents.php",
+                                  max_candidates=8):
+            # ★ 夹具显式给 8（镜像生产旧默认）；生产走 config（`find_existing_by_name` 默认 None）。
+            return musopia.search_and_compare(self, name, local_name=local_name,
+                                              base_path=base_path,
+                                              max_candidates=max_candidates)
+
+    # ---- #23 核心：AND-语义假站点上，「单串」必须**漏**、「多子查询」必须**中** ----
+    # 本地名与站点标题共享 token：`Stravinsky`、`Chamber`、`Works`、`2024`（站侧标题里也有）。
+    SITE_TITLE = _Fake.SITE_TITLE
+    LOCAL_FULL = ("Stravinsky; Royal Academy of Music and Juilliard School Ensemble, "
+                  "Barbara Hannigan - Chamber Works (2024) [FLAC]")
+    # 目标页挂的站点副本：其 info.name 与本地**相同**（= 真重复）
+    hit_map = {"5998": _tb(LOCAL_FULL)}
+
+    # ---- (#31 精准优先) 顺序 + 命中即停判据 ----
+    #   ★ 旧版这里是"#23 前修复对照：单串必须**漏**" —— **已废弃**：#31 把**高精度单 token**
+    #     （艺术家名）排最前，所以"单串"如今**本该命中**（那正是本修的目的）。
+    #     真问题是相反方向：顺序写反（宽查询在前）⇒ 噪声吃光预算 ⇒ 漏召回（13/20→11/20）。
+
+    # (c) ★ 顺序断言（纯函数、零网络）：`SEARCH_QUERY_PLAN` 必须**窄在前、宽在后**。
+    #   ★ 实测铁律：**单 token（哪怕 CJK）是宽的**（`Etre`/`群星` 单独查 109 条）
+    #     ⇒ 单 token 必须**排在多 token 窗口之后**；多 token 窗口（头3/头2）才是窄的。
+    _plan_full = musopia.SEARCH_QUERY_PLAN(LOCAL_FULL, max_queries=5)
+    if not _plan_full or _plan_full[0] != "Stravinsky Royal Academy":
+        fails.append(f"★★ #31 顺序：首条应是**多 token 窄窗** `Stravinsky Royal Academy`，"
+                     f"得到 {_plan_full[:1]!r}")
+    else:
+        detail.append("③ #31 顺序：多 token 窄窗（头3）排首条 ✅")
+    #   ★ **单 token 不许**出现在前两条（它们宽 ⇒ 会吃光预算）。
+    _plan_etre = musopia.SEARCH_QUERY_PLAN(
+        "Etre (2001.03.10) (album) One Day [FLAC] {PQCD-10004}", max_queries=5)
+    if not _plan_etre or _plan_etre[0] != "Etre 2001 03":
+        fails.append(f"★★ #31 顺序：`Etre` 行首条应是 `Etre 2001 03`（多 token 窄窗），"
+                     f"得到 {_plan_etre[:1]!r}")
+    elif "Etre" in _plan_etre[:2]:
+        fails.append(f"★★ #31 顺序：单 token `Etre`（宽，实测 109 条）不该排前两条：{_plan_etre[:2]}")
+    else:
+        detail.append("③ #31 顺序：`Etre` 行首条 = 多 token 窄窗（单 token 后置）✅")
+    _plan_cjk = musopia.SEARCH_QUERY_PLAN("[250813] 徐元白 - 古琴 [FLAC]", max_queries=5)
+    if not _plan_cjk or _plan_cjk[0] != "徐元白 古琴 FLAC":
+        fails.append(f"★★ #31 顺序：CJK 行首条应是去日期头窗 `徐元白 古琴 FLAC`，得到 {_plan_cjk[:1]!r}")
+    elif _plan_cjk[0] == "徐元白":
+        fails.append("★★ #31 顺序：CJK 单 token 不该排首条（宽）")
+    else:
+        detail.append("③ #31 顺序：CJK 行首条 = 去日期多 token 窗（非单 token）✅")
+    if musopia.SEARCH_QUERY_PLAN("x", search_name="S", max_queries=0) != ["S"]:
+        fails.append("★★ #31 杀开关失效：max_queries<=0 应只回 [search_name]")
+    else:
+        detail.append("③ #31 杀开关：`max_queries<=0 ⇒ [search_name]` ✅")
+    if musopia.SEARCH_QUERY_PLAN(LOCAL_FULL) != musopia.SEARCH_QUERY_PLAN(LOCAL_FULL):
+        fails.append("★★ #31 plan 不确定：两次调用结果不同 ⇒ 非纯函数")
+    else:
+        detail.append("③ #31 plan 确定性：两次调用一致 ✅")
+
+    # (a) ★ 命中即停：首条**窄**查询命中 ⇒ 后续宽查询**不得**发出。
+    ETRE_LOCAL = "Etre (2001.03.10) (album) One Day [FLAC] {PQCD-10004}"
+    ETRE_SITE = "Etre 2001 03 - One Day - FLAC - JPopsuki"
+    _etre_fake = _Fake({"5998": _tb(ETRE_LOCAL)}, site_title=ETRE_SITE)
+    _etre_hit = musopia.search_and_compare(_etre_fake, ETRE_LOCAL, local_name=ETRE_LOCAL)
+    _etre_forbidden = musopia.SEARCH_QUERY_PLAN(ETRE_LOCAL, max_queries=5)[-1]
+    if _etre_hit != "5998":
+        fails.append(f"★★ #31 命中即停：窄查询应命中 5998，得到 {_etre_hit!r} "
+                     f"（实发 {_etre_fake.queries}）")
+    elif _etre_forbidden in _etre_fake.queries:
+        fails.append(f"★★ #31 命中即停：命中后仍发了宽查询 {_etre_forbidden!r} "
+                     f"（实发 {_etre_fake.queries}）⇒ 没早停")
+    else:
+        detail.append("③ #31 命中即停：首条窄查询命中 ⇒ 宽查询未发 ✅")
+
+    # (a-阴性对照) 让**只有宽查询**（最后一条 `One Day`）能中 ⇒ 必须继续走（不早停）且**确实命中**。
+    #   ★ 证明上一条不是空真：记录器是真的、早停是"顺序"造成的（精准查询先命中才早停），
+    #     而不是"宽查询结构上不可能". 假站点题只含 `One Day` ⇒ 所有高精度/头尾查询都落空，
+    #     只有宽 tier 的 `One Day` 命中。
+    _neg_fake = _Fake({"5998": _tb(ETRE_LOCAL)}, site_title="One Day")
+    _neg_hit = musopia.search_and_compare(_neg_fake, ETRE_LOCAL, local_name=ETRE_LOCAL)
+    if _neg_hit != "5998":
+        fails.append(f"★★ #31 阴性对照：宽查询能中时应召回 5998，得到 {_neg_hit!r}"
+                     f"（实发 {_neg_fake.queries}）")
+    elif len(_neg_fake.queries) < 2:
+        fails.append(f"★★ #31 阴性对照：精准查询未中时应继续发后续查询，实发 {_neg_fake.queries}")
+    elif "One Day" not in _neg_fake.queries:
+        fails.append(f"★★ #31 阴性对照：应发出宽查询 `One Day`，实发 {_neg_fake.queries}")
+    else:
+        detail.append("③ #31 阴性对照：精准查询落空 ⇒ 继续发后续查询至 `One Day` 命中 ✅")
+
+    # (b) ★ 噪声不截断：目标 = **精准查询**首候选；20 诱饵挂**宽查询**，`max_candidates=8`。
+    _decoys20 = [f"8{i:04d}" for i in range(20)]
+
+    class _FakeSplit(_Fake):
+        """精准查询只吐目标；**宽查询**吐一堆诱饵（复刻"宽查询噪声淹预算"）。"""
+        def get(self, path, **kw):
+            if path.startswith("/torrents.php"):
+                q = (kw.get("params") or {}).get("search", "")
+                self.queries.append(q)
+                if q == "Etre 2001 03":                  # 首条窄查询 ⇒ 只有真目标
+                    return _Resp(f'<a href="details.php?id={self.target_tid}">x</a>')
+                links = "".join(f'<a href="details.php?id={d}">x</a>' for d in self.decoys)
+                links += f'<a href="details.php?id={self.target_tid}">x</a>'
+                return _Resp(links)
+            return super().get(path, **kw)
+
+    _split = _FakeSplit({**{d: _tb("Some Other Album") for d in _decoys20},
+                         "5998": _tb(ETRE_LOCAL)},
+                        site_title="Etre 2001 03 One Day FLAC PQCD 10004 JPopsuki",
+                        decoys=_decoys20)
+    _split_hit = musopia.search_and_compare(_split, ETRE_LOCAL, local_name=ETRE_LOCAL,
+                                            max_candidates=8)
+    if _split_hit != "5998":
+        fails.append(f"★★ #31 噪声不截断：精准查询的目标应先于宽查询噪声被验证，得到 {_split_hit!r}")
+    else:
+        detail.append("③ #31 噪声不截断：精准查询的目标先于宽查询噪声被验证 ⇒ 命中 ✅")
+
+    # 后修复（绿）：多子查询（精准优先）⇒ 必须命中 5998。
+    post = musopia.search_and_compare(_Fake(hit_map), LOCAL_FULL, local_name=LOCAL_FULL)
+    if post != "5998":
+        fails.append(f"★★ 多子查询应召回 5998，得到 {post!r} ⇒ 召回修复失效")
+    else:
+        detail.append("③ 多子查询（精准优先）⇒ 召回 tid=5998 ✅")
+
+    # 噪声位次：15 个诱饵排在目标**之前** ⇒ 仍必须命中（打掉"靠运气排序"）。
+    decoys = [f"9{i:04d}" for i in range(15)]
+    noisy_map = {**{d: _tb("Some Other Album") for d in decoys}, "5998": _tb(LOCAL_FULL)}
+    noisy = musopia.search_and_compare(
+        _Fake(noisy_map, decoys=decoys), LOCAL_FULL, local_name=LOCAL_FULL,
+        max_candidates=20)
+    if noisy != "5998":
+        fails.append(f"★★ 噪声位次：目标在 15 诱饵之后应仍命中，得到 {noisy!r}")
+    else:
+        detail.append("③ 噪声位次：15 诱饵在前仍命中 5998 ✅")
+
+    # 原有基础用例（保持）：同一 info.name ⇒ 命中；这里用一条**单 token** 名，
+    #   plan 只有 1 条，走的是与旧逻辑等价的路径。
+    _one = "Forever Now (2026)"
+    hit = musopia.search_and_compare(_Fake({"5998": _tb(_one)}, site_title=_one + " x"),
+                                     "t", local_name=_one)
+    if hit != "5998":
+        fails.append(f"★★ 运行时①: 同版本应命中 5998，得到 {hit!r}")
+    else:
+        detail.append("③ 运行时：info.name 相同 ⇒ 命中 tid=5998 ✅")
+
+    # ★ 阴性对照：本地名字改一个字 ⇒ 必须**不**命中（证明上一条不是空真）。
+    neg = musopia.search_and_compare(_Fake({"5998": _tb(_one)}, site_title=_one + " x"),
+                                     "t", local_name=_one + "Z")
+    if neg is not None:
+        fails.append(f"★★ 阴性对照失败：名字加 Z 仍命中 {neg!r} ⇒ 判据是空真")
+    else:
+        detail.append("③ ★ 阴性对照：名字改一字 ⇒ 不命中 ✅")
+
+    # 搜索失败（HTTP≠200）⇒ 必须**抛**（不是返回 None）—— 用户拍板"停轮非 0"。
+    class _Down(_Fake):
+        def get(self, path, **kw):
+            if path.startswith("/torrents.php"):
+                return _Resp(status=503)
+            return super().get(path, **kw)
+
+    try:
+        musopia.search_and_compare(_Down({}), LOCAL_FULL, local_name=LOCAL_FULL)
+        fails.append("★★ 搜索 HTTP 503 竟没抛 ⇒ '搜不了'会被当成'没重复'照发（危险）")
+    except musopia.SiteError:
+        detail.append("③ 搜索失败(HTTP503) ⇒ 抛 SiteError（调用方停轮非 0）✅")
+
+    # ★★ 阴性对照（纪律）：多子查询里**第 2 条**才 503 ⇒ 仍必须**抛**
+    #   （护住"绝不把**中途**的传输失败降级成'没匹配'"—— 这是本修复最危险的回归面）。
+    #   ★★ 命中即停带来的**空真陷阱**（#31 实测）：若第 1 条查询就命中，只会发 1 次请求，
+    #      "第 2 条 503"永远不发生 ⇒ 本判据会**空真通过**（绿得没意义）。故用
+    #      `site_title` 让**第 1 条精准查询也落空**（0 候选），**强制**走到第 2 条查询。
+    class _DownSecond(_Fake):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self._n = 0
+
+        def get(self, path, **kw):
+            if path.startswith("/torrents.php"):
+                self._n += 1
+                if self._n >= 2:
+                    return _Resp(status=503)
+            return super().get(path, **kw)
+
+    try:
+        # ★ site_title = 与 LOCAL_FULL 无交集 ⇒ 第 1 条精准查询 0 命中 ⇒ 才会走到第 2 条。
+        musopia.search_and_compare(_DownSecond(hit_map, site_title="ZZZ nomatch"),
+                                   LOCAL_FULL, local_name=LOCAL_FULL)
+        fails.append("★★ 中途(第2条查询)503 竟没抛 ⇒ 多查询会**吞**中途失败（危险）")
+    except musopia.SiteError:
+        detail.append("③ 中途第2条查询 503 ⇒ 仍抛 SiteError ✅（首条落空、非空真）")
+
+    # `_local_info_name` 从真实 .torrent 字节取权威名（复用 site_verify）。
+    import tempfile
+    _d = tempfile.mkdtemp(prefix="dedupless-")
+    _p = os.path.join(_d, "x.torrent")
+    with open(_p, "wb") as _fh:
+        _fh.write(_tb(LOCAL))
+    got_name = _local_info_name({"torrent_file": _p})
+    if site_verify.normalize_name(got_name) != site_verify.normalize_name(LOCAL):
+        fails.append(f"★★ _local_info_name 取出的名字不对：{got_name!r} != {LOCAL!r}")
+    else:
+        detail.append("③ `_local_info_name` 从 .torrent 取到权威 info.name ✅")
+    # 文件缺失 ⇒ 返回 ""（不抛；调用方据此"跳过查重、照旧提交"）。
+    if _local_info_name({"torrent_file": os.path.join(_d, "nope.torrent")}) != "":
+        fails.append("★★ 缺文件时 _local_info_name 竟非空 ⇒ 应返回 ''（跳过查重）")
+    else:
+        detail.append("③ `_local_info_name` 缺文件 ⇒ 返回 ''（不抛）✅")
+
+    # `_dedup_lookup`：选中开关时命中会返回 tid；关闭开关时短路返回 None。
+    #   ★ 用 `site_title=_one + " x"` 的假站点：查询串 `_one` 的 token 都成立 ⇒ 命中 5998。
+    _saved = config.DEDUP_BEFORE_PUBLISH
+    try:
+        config.DEDUP_BEFORE_PUBLISH = True
+        r = _dedup_lookup(_Fake({"5998": _tb(_one)}, site_title=_one + " x"),
+                          search_name=_one, local_name=_one, site_label="测试站")
+        if r != "5998":
+            fails.append(f"★★ _dedup_lookup 开关开、命中时应返回 5998，得到 {r!r}")
+        else:
+            detail.append("③ `_dedup_lookup` 命中返回 tid ✅")
+        config.DEDUP_BEFORE_PUBLISH = False
+        r2 = _dedup_lookup(_Fake({"5998": _tb(_one)}, site_title=_one + " x"),
+                           search_name=_one, local_name=_one, site_label="测试站")
+        if r2 is not None:
+            fails.append(f"★★ 开关关时 _dedup_lookup 竟返回 {r2!r} ⇒ 短路失效")
+        else:
+            detail.append("③ `_dedup_lookup` 开关关 ⇒ 短路 None（旧行为）✅")
+    finally:
+        config.DEDUP_BEFORE_PUBLISH = _saved
+
+    ok = not fails
+    if verbose:
+        print(f"{'✅' if ok else '❌'} 发布前查重自检（结构性 + 运行时，含阴性对照）")
+        for d in detail:
+            print(f"    {d}")
+        for f in fails:
+            print(f"    {f}")
+    return ok, (fails or detail)
 
 
 def main():
@@ -2142,7 +2880,19 @@ def main():
         #     第 5 条**不会**覆盖它（那条只扫 `main`）。简化回"任何失败 sys.exit"
         #     照样绿，而一条坏种子又把**转种队列**永久卡住（比乌托邦更糟）。
         ok6, _ = selftest_crabpt_failure_classification()
-        # ★ 六条判据**都要**跑（`and` 而不是 `or`）—— 它们是**独立**的失效模式：
+        # ★★ 第 7 条（2026-10-10 加，蟹黄堡三天零出种）：`--limit` 必须按**成功计数**
+        #   截断、坏封面跳过即继续 —— 而不是"先 `valid[:limit]` 预截、再只试那一条"。
+        #   ★ 独立失效模式：前六条都不查"**候选截断的时机**"。这条查的正是它
+        #     —— 旧形状 `valid = valid[:1]` 在 `CRABPT_MAX_PER_CYCLE=1` 下
+        #     会让队首坏封面**永久占掉唯一名额**（2026-10-07~10-10 实测）。
+        #     简化回预截照样绿前六条，而队列又卡死。见 `selftest_crabpt_limit_enumerates`。
+        ok7, _ = selftest_crabpt_limit_enumerates()
+        # ★★ 第 8 条（2026-10-11 加，#13）：**发布前查重**的结构 + 运行时判据。
+        #   ★ 独立失效模式：前七条都不查"**发布前有没有问站点'有没有'**"。
+        #     删掉查重那一整段，`upload_torrent` 照发、站点照拒、日志看起来一样
+        #     （都是"上传失败"）—— **完全静默**（这正是它必须被钉住的理由）。
+        ok8, _ = selftest_dedup_before_publish()
+        # ★ 七条判据**都要**跑（`and` 而不是 `or`）—— 它们是**独立**的失效模式：
         #   ① 碰了乌托邦的列（"发一条污染四个判据"）
         #   ② 队列取错（"静默多发、不可撤销"）
         #   ③ ★ 队列口径与**解释口径**分叉（"工具告诉你它在队列里、实际不发"
@@ -2150,9 +2900,13 @@ def main():
         #   ④ ★ 回加路里名字用在了绑定之前（"发布成功却永不做种"，`ERR-PUBLISH-02`）
         #   ⑤ ★ 失败不再分级 ⇒ 坏种子堵死队列（#21 复发，静默）
         #   ⑥ ★ 蟹黄堡那条路同样不再分级 ⇒ 坏种子堵死**转种**队列（#23 复发，静默）
+        #   ⑦ ★ `--limit` 又变回"预截候选" ⇒ 队首坏封面永久占名额、队列不动
+        #      （蟹黄堡 2026-10-07~10-10 三天零出种，静默）
+        #   ⑧ ★ 删掉/改坏**发布前查重** ⇒ 重复种又照发（站点用"上传失败！"静默拒绝）
         #   ★ 用 `or` 的话，一条报红时另一条**根本没跑**，而"没跑"与"通过"
         #     在输出上应当长得不一样（`ERR-META-14`：兜底不许冒充真结果）。
-        ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6
+        #   ★ 2026-10-11：修掉原先的 `ok7 and ok7` 笔误（应为 …and ok7），并接上 ok8。
+        ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8
         # ★★ 必须 `sys.exit`，**不能 `return`** —— `main()` 是被
         #   `if __name__ == "__main__": main()` 调的，那个写法的返回值**会被丢掉**
         #   ⇒ 退出码恒为 0 ⇒ **自检报红也没人看得见**（阴性对照实测踩到这一条）。
@@ -2363,6 +3117,8 @@ def main():
     #   ★ 为什么必须在循环外声明：`break` 之后要用它决定退出码（见函数末尾）。
     rejected = 0
     site_down = False
+    # ★★ #13（2026-10-11）：查重**命中**（站点已有同版本）⇒ 关联而非重复提交的条数。
+    dup_existing = 0
     # ★★ 上一次**上传**的时刻 —— `PUBLISH_MIN_GAP` 按它算"距上一条多久"。
     #   ★ 用 `None` 而不是 0：`time.time()` 是个大数，用 0 会让第一条算出
     #     "距上一条已有 50 年 ⇒ 不用等"——**结论对，但推理是假的**
@@ -2386,6 +3142,48 @@ def main():
 
         title = task.get("formatted_title")
         print(f"\n[{i}/{len(valid)}] 🚀 发布: {title}")
+
+        # ★★★ 发布前跨站查重（#13 / #11 核心，2026-10-11 加）——
+        #   在**提交之前**问一次目标站点"有没有同版本"（判据 = 站侧 .torrent 的
+        #   info.name 与本地 .torrent 的 info.name 精确相等）。
+        #   ★ 放在这里（`client` 已建、循环体内、`upload_torrent` 之前）：
+        #     查重要发搜索请求 ⇒ 不能放到 `:2573` 那段"零请求"的第二把钥匙区之前。
+        #   ★★ 三态处置（与用户拍板一致）：
+        #     · 命中 ⇒ **不提交**、关联已有页（`set_site_id EXISTS` + `site_publish_set`），
+        #       计入 `dup_existing`，`continue` 下一条；
+        #     · 未命中 ⇒ 落到下面**原样**提交（行为与从前逐字相同）；
+        #     · 出错（`LoginExpired`/`SiteError`，含"搜索 HTTP≠200"）⇒ **停轮 + 非 0**
+        #       （`site_down=True`），**绝不**把"搜不了"当"没重复"照发。
+        if config.DEDUP_BEFORE_PUBLISH:
+            try:
+                _hit = _dedup_lookup(client,
+                                     search_name=title,
+                                     local_name=_local_info_name(task),
+                                     site_label="乌托邦")
+            except LoginExpired as e:
+                print(f"    🛑 查重时登录失效，停止本轮（不标 FAILED）: {e}")
+                site_down = True
+                break
+            except SiteError as e:
+                # ★ 查重**本身**失败（搜索打不开 / 超时）⇒ 停轮非 0，让退避生效。
+                #   这是用户明确拍的："查重搜索失败 ⇒ 停轮非 0"（安全侧）。
+                print(f"    🛑 查重失败，停止本轮（不标 FAILED —— 这是站点侧问题）: {e}")
+                site_down = True
+                break
+            if _hit:
+                # 站点已有同版本 ⇒ 把本地行**关联**到已有页，**不再重复提交**。
+                # ★ 复用成功路径的写库形状（`set_site_id` + `site_publish_set`），
+                #   但 reason 标 `dup_existing` 以便事后能分辨"是发的还是查出来的"。
+                db.set_site_id(task["info_hash"], _hit, site_status="EXISTS",
+                               status="PUBLISHED",
+                               reason=f"dup_existing:{_hit}")
+                db.site_publish_set(task["info_hash"], db.SITE_MUSOPIA, _hit,
+                                    status="EXISTS",
+                                    cover_url=(task.get("cover_url") or None))
+                db.mark_synced(task["info_hash"])
+                dup_existing += 1
+                print("    ✅ 已关联到站点已有页（未重复提交）。")
+                continue
 
         fields = descr.build_form_fields(merge_mapped(task),
                                          anonymous=args.anonymous)
@@ -2497,6 +3295,7 @@ def main():
     print("\n" + "=" * 60)
     print(f"🎯 发布完成：成功 {ok} 条，失败 {fail} 条"
           f"（其中被拒标 FAILED {rejected} 条）"
+          + (f"，查重命中关联 {dup_existing} 条（未重复提交）" if dup_existing else "")
           + ("；⚠️ 站点侧问题已中止本轮" if site_down else ""))
 
     # ★ 说真话的退出码（2026-09-18；2026-10-04 按 #21 **重划判据**）。

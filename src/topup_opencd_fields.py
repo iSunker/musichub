@@ -315,6 +315,14 @@ def main():
         description="按 tid 直取详情页、补全皇后行内容（分小批，过 RateGate）")
     ap.add_argument("--apply", action="store_true",
                     help="★ 真抓真入库。不加 = 只读预览（默认）")
+    # ★★ 2026-10-12 补：`--dry-run` 此前**只写在 docstring / compose 示例里**，
+    #   argparse 里**根本没有**它 ⇒ `daemon.py` 的 crawl 阶段在
+    #   `OPENCD_CRAWL_DRY_RUN=true`（**默认值**）时传 `--dry-run` 会当场
+    #   `error: unrecognized arguments: --dry-run` **崩掉整个 crawl 阶段**。
+    #   这里补上（≡ 不加 `--apply`），与 docstring/compose 示例对齐；
+    #   显式提供它以让 daemon 传参不再报错。
+    ap.add_argument("--dry-run", action="store_true",
+                    help="≡ 不加 --apply（只读预览）。daemon 的 crawl 阶段会传它。")
     ap.add_argument("--limit", type=int, default=5,
                     help="本轮最多抓几条（默认 **5**；0 = 不限，只受配额约束）。"
                          "★ 抓一条 = 1 个皇后请求。")

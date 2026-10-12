@@ -103,6 +103,11 @@ HEARTBEAT_FRESH = 120        # 秒；仅用于"是否需要提醒"，**不是**�
 #       门控后进来的阶段，两个 false 就被它吃掉（拿它当"阶段列表"已经错过一次）。
 INTERVALS = {"scan": 1800, "publish": 5400, "sync": 86400,
              "covers": 21600, "edit": 21600, "vtid": 86400, "crawl": 1800,
+             # ★ 2026-10-12 加的 rss_tid（B12 RSS 反查补 tid）。默认**关**。
+             "rss_tid": 86400,
+             # ★ 2026-10-12 补：`free_window` 阶段（2026-10-06 #34）此前**漏登记**，
+             #   被 `--check-drift` 抓出（与 vtid 曾漏是同一类）。默认**关**。
+             "free_window": 3600,
              # ★★ 蟹黄堡（第二站，2026-09-27 接线）。默认**关**
              #    （`ENABLE_PUBLISH_CRABPT` 未设 = false），所以它通常不在
              #    快照里；在 `DISABLED_STAGES` 判据里会被判成"关着 = 预期不动"。
@@ -115,6 +120,10 @@ STAGE_INTERVAL_KEY = {"scan": "SCAN_INTERVAL", "publish": "PUBLISH_INTERVAL",
                       "sync": "SYNC_INTERVAL", "covers": "COVERS_INTERVAL",
                       "edit": "EDIT_INTERVAL", "vtid": "VTID_INTERVAL",
                       "crawl": "CRAWL_INTERVAL",
+                      # ★ 2026-10-12：rss_tid 的周期键（显式列出，不拼阶段名）。
+                      "rss_tid": "RSS_TID_INTERVAL",
+                      # ★ 2026-10-12 补：free_window 的周期键（此前漏登记）。
+                      "free_window": "FREE_WINDOW_INTERVAL",
                       "publish_crabpt": "CRABPT_INTERVAL"}
 EDIT_COOLDOWN = 60
 # ★ 旧的 `HEARTBEAT_FRESH = 120` 挪到上面（连同"为什么它不是生死判据"的实测依据）。
@@ -153,6 +162,10 @@ STAGE_ENABLE_KEY = {"scan": "ENABLE_SCAN", "publish": "ENABLE_PUBLISH",
                     #   ★ 是 `check_stage_table_consistent()`（本次新加的可执行判据）
                     #     第一次跑就把它抓出来的 —— 注释不会失败，判据会。
                     "vtid": "ENABLE_VTID",
+                    # ★ 2026-10-12：rss_tid 的开关键（B12）。
+                    "rss_tid": "ENABLE_RSS_TID",
+                    # ★ 2026-10-12 补：free_window 的开关键（此前漏登记）。
+                    "free_window": "ENABLE_FREE_WINDOW",
                     # ★ 蟹黄堡的开关键是 `ENABLE_PUBLISH_CRABPT`，与阶段名
                     #   `publish_crabpt` **不同** ⇒ 同样必须显式列出。
                     "publish_crabpt": "ENABLE_PUBLISH_CRABPT"}
@@ -904,7 +917,7 @@ def main():
         if stage == "crawl":
             qt = db.get("crawl_todo")
             qu, qk = db.get("quota_used"), db.get("quota_known")
-            _max = os.getenv("OPENCD_MAX_PER_DAY", "50")
+            _max = os.getenv("OPENCD_MAX_PER_DAY", "500")
             try:
                 _maxn = int(float(_max))
             except ValueError:
@@ -1320,7 +1333,7 @@ def main():
     print(f"  crawl 目标    {db['crawl_todo']}   (有 opencd_tid 但 mapped_json 空"
           f"的皇后行 ⇒ ★ 这是 crawl 的**待办**；★ 上面阶段表里 crawl 那行会判它在不在推进)")
     print(f"  配额(今天)    "
-          + (f"{_q} / {os.getenv('OPENCD_MAX_PER_DAY', '50')}"
+          + (f"{_q} / {os.getenv('OPENCD_MAX_PER_DAY', '500')}"
              f"   (账本 = data.db:opencd_quota，**按容器口径** day_key="
              f"{db.get('quota_day_key') or '?'}"
              + (f"；★ 巡检机本地日是 {db.get('quota_day_key_local')}，"

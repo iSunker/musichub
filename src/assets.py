@@ -13,6 +13,31 @@ import requests
 
 import config
 
+# ★ 2026-10-09：最近一次 `upload_to_lsky` 失败的**原始原因串**（成功时清空）。
+#   ★ 用途：让调用方（`publish._crabpt_cover`）区分「本条封面的问题」（如超大小上限）
+#     与「设施级问题」（token/配额/网络）—— 前者跳过本条、后者停整轮。
+#     原先只有 `print`，调用方拿不到原因 ⇒ 只能一律当"设施坏"⇒ 一条坏封面卡死整队。
+LAST_LSKY_ERROR = ""
+
+# 单条级（item）的失败特征：换个更小的图/补一张封面就能过，**重试无效**。
+#   ★ 命中这些 ⇒ 属「本条封面不可用」⇒ 跳过该条，**不停整轮**。
+_ITEM_LEVEL_LSKY_HINTS = (
+    "图片大小超出限制", "超出限制", "size", "too large", "文件过大", "格式",
+    "不支持", "mime", "invalid image", "不是有效",
+)
+
+
+def lsky_error_is_item_level(err=None):
+    """`upload_to_lsky` 的失败原因是否属**单条级**（该条种子/这张图自身的问题）。
+
+    True  ⇒ 只这一条过不去（重试无效）⇒ 调用方**跳过本条、继续下一条**。
+    False ⇒ 设施级（token/配额/网络/403/429/超时…）⇒ 调用方**停整轮**（退避后再来）。
+    """
+    s = (LAST_LSKY_ERROR if err is None else err) or ""
+    low = s.lower()
+    return any(h.lower() in low for h in _ITEM_LEVEL_LSKY_HINTS)
+
+
 # 按优先级排列：cover/folder/front 是通行命名，放前面优先命中
 COVER_PATTERNS = [
     re.compile(r"^(cover|folder|front|frontal)\.(jpg|jpeg|png|webp)$", re.I),
@@ -25,6 +50,28 @@ IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 
 # 图床有大小限制，太大的原始扫图先跳过而不是上传失败
 MAX_COVER_BYTES = 15 * 1024 * 1024
+
+# ★★★ 2026-10-10：Lsky（蟹黄堡专用图床）的**单图上限目标**（仅用于"传前压图"）。
+#
+#   ★ 为什么另开一个常量、**不动** `MAX_COVER_BYTES`：
+#     两者管**不同阶段**、语义不同（同一个值会漂移成两个意思，`ERR-META-13`）：
+#       · `MAX_COVER_BYTES`（15 MiB）= **pick/预检**阶段的地板：太离谱的原始扫图
+#         干脆不选，别拿去送死。
+#       · `LSKY_MAX_BYTES`（本项）= **上传**阶段的目标：**超了就压到它以下再传**
+#         （而不是跳过）。压图是"尽力救回"，不是"再设一道墙"。
+#
+#   ★ 实测（2026-10-10，用当前 NAS 的 Lsky token 打 `/api/v1/upload`）：
+#     · 15.6 MB 的 `1e39f05940b6.jpg` ⇒ `{"status":false,"message":"图片大小超出限制"}`
+#     · 0.7 MB 的图 ⇒ `{"status":true,"message":"上传成功"}`
+#     ⇒ 上限落在 (0.7MB, 15.6MB) 之间。用户 2026-10-10 拍板取 **5 MB** 作目标值
+#       （Lsky Pro 常见默认 5MB；压到 5MB 以下足以覆盖绝大多数封面）。
+#   ★ 可被 `.env` 的 `LSKY_MAX_BYTES` 覆盖（运维按本站真实上限调）。
+LSKY_MAX_BYTES = int(os.getenv("LSKY_MAX_BYTES", "") or (5 * 1024 * 1024))
+# 压图尺寸上限（最长边，像素）：多半用不到那么细，但给个上限防止"降质量也降不下来"。
+LSKY_SHRINK_MAX_DIM = 2400
+# 压缩后文件的**后缀**（与 `cover_fetch._cached_file` 的 `<sha1>.<ext>` 命名区分开，
+# 免得"原图缓存"与"压过的图"互相覆盖）。
+LSKY_SHRINK_SUFFIX = ".lsky.jpg"
 
 LOG_ENCODINGS = ("utf-8-sig", "utf-8", "gb18030", "gbk", "utf-16", "latin-1")
 
@@ -445,6 +492,98 @@ def lsky_get_token(force=False, allow_login=True, api_url=None):
     return "", "既没有缓存 token、也换不到、`.env` 里的 LSKY_TOKEN 也是空"
 
 
+def _shrink_for_lsky(image_path, max_bytes=None, max_dim=None):
+    """把一张**过大**的封面压到 `max_bytes` 以下，返回**可上传的本地路径**或 `""`。
+
+    ★★ 为什么要它（2026-10-10）：蟹黄堡专用图床 Lsky 有单图大小上限，而本地封面
+      缓存里可能是 **15MB 级的原始扫图**（实测 `1e39f05940b6.jpg` = 15,593,260 字节）
+      ⇒ 直接传被 `图片大小超出限制` 拒收 ⇒ `CoverItemError` ⇒ 该条发不出去。
+      ⇒ 与其"跳过这条"，不如**当场压小再传**（用户 2026-10-10 拍板：压图，别送死）。
+
+    ★★ 返回值语义（调用方据此分流，**别混**）：
+      · 返回**非空路径**  ⇒ 可上传（可能是原图，也可能是压过的那份）。
+      · 返回 `""`        ⇒ **压也压不下去**（连缩放+最低质量都超 `max_bytes`）
+                            ⇒ 调用方当"本条封面不可用"处理（item 级，跳过本条）。
+
+    ★★★ 三条铁律：
+      ① **绝不覆盖原图**：压过的图写到一个**独立后缀**文件（`<原路径>.lsky.jpg`）。
+         原图是**乌托邦那份**的来源（`ERR-META-13`：一个值在两个位置含义不同），
+         覆盖它 = 把乌托邦页面上的封面也换掉了。
+      ② **不联网**：只用本地已有文件重编码，不重新下载（下载由 `cover_fetch` 负责）。
+      ③ **能不动就不动**：`size <= max_bytes` ⇒ **原样返回**，不重编码
+         （避免无谓的二次有损压缩，也省 CPU）。
+
+    ★ 依赖 Pillow。★ 若 Pillow **不可用**（旧镜像还没重建）⇒ 本函数**如实降级**：
+      不假装压成功，而是把原图原样返回（让上传去撞 Lsky 的墙、得到真实报错），
+      并打印一条**明确**的"Pillow 缺失、压图未生效"提示（`ERR-META-14`：兜底不许冒充结果）。
+    """
+    if not image_path or not os.path.exists(image_path):
+        return ""
+    max_bytes = LSKY_MAX_BYTES if max_bytes is None else max_bytes
+    max_dim = LSKY_SHRINK_MAX_DIM if max_dim is None else max_dim
+
+    try:
+        size = os.path.getsize(image_path)
+    except OSError:
+        return image_path            # 拿不到大小 ⇒ 交给上传去报真实错
+
+    # ③ 没超 ⇒ 原样用（零开销，不重编码）。
+    if size <= max_bytes:
+        return image_path
+
+    try:
+        from PIL import Image            # noqa: PLC0415  (延迟导入：旧镜像可能没有)
+    except Exception:                    # noqa: BLE001
+        print(f"    [压图] ★ Pillow 不可用（镜像未重建？）⇒ **压图未生效**，"
+              f"原图 {size} 字节 > 上限 {max_bytes} 字节，仍按原样上传（会撞 Lsky 的墙）")
+        return image_path
+
+    # 压过的图写到独立文件（① 不覆盖原图）。
+    out_path = image_path + LSKY_SHRINK_SUFFIX
+    # 已压过且仍然 ≤ 上限 ⇒ 直接复用（幂等，省一轮重编码）。
+    try:
+        if os.path.exists(out_path) and os.path.getsize(out_path) <= max_bytes:
+            return out_path
+    except OSError:
+        pass
+
+    try:
+        with Image.open(image_path) as im:
+            # EXIF 方向要先应用，否则压完可能横竖颠倒。
+            try:
+                from PIL import ImageOps
+                im = ImageOps.exif_transpose(im)
+            except Exception:            # noqa: BLE001
+                pass
+            # 缩放到最长边 ≤ max_dim（只缩不放）。
+            w, h = im.size
+            longest = max(w, h)
+            if longest > max_dim:
+                scale = max_dim / float(longest)
+                im = im.resize((max(1, int(w * scale)), max(1, int(h * scale))),
+                               Image.LANCZOS)
+            # ★ 统一转 RGB 再存 JPEG（PNG/带 alpha 的图直接存 JPEG 会报错）。
+            rgb = im.convert("RGB")
+            # 逐级降质量，直到 ≤ 上限或到底。
+            for q in (92, 88, 85, 80, 75, 70, 65, 60, 55, 50, 45, 40):
+                rgb.save(out_path, format="JPEG", quality=q, optimize=True)
+                if os.path.getsize(out_path) <= max_bytes:
+                    print(f"    [压图] {os.path.basename(image_path)} "
+                          f"{size} → {os.path.getsize(out_path)} 字节 (q={q}) ⇒ {out_path}")
+                    return out_path
+    except Exception as e:               # noqa: BLE001
+        print(f"    [压图] 重编码失败 {type(e).__name__}: {e}；原图 {image_path}")
+        return ""
+
+    # 连最低质量都压不下去 ⇒ 如实返空（调用方当"本条不可用"）。
+    try:
+        _final = os.path.getsize(out_path)
+    except OSError:
+        _final = -1
+    print(f"    [压图] ★ 压到最低仍超上限（{_final} > {max_bytes}）⇒ 放弃本条")
+    return ""
+
+
 def upload_to_lsky(image_path, retries=2, api_url=None, token=None,
                    allow_retoken=True):
     """上传图片到**蟹黄堡的专用图床**（Lsky Pro），返回 URL 或 ""。
@@ -476,9 +615,34 @@ def upload_to_lsky(image_path, retries=2, api_url=None, token=None,
       （不带鉴权头去传 = 站点按「游客上传」处理，行为不明、且可能把图传到
        别人的账下 ⇒ 宁可不传）。★ token **绝不打印**（同 `guard_auto_key` 的纪律：
       值不进日志，而 docker logs 是本项目最容易被抄走的那份）。
+
+    ★★★ 2026-10-10：上传**之前**先 `_shrink_for_lsky()` 把过大的封面压到
+      `LSKY_MAX_BYTES` 以下（用户拍板：压图，别让 15MB 级扫图送死）。
+      · 压过 ⇒ 传的是压过的那份（原图不动）。
+      · 压不下去（返 `""`）⇒ 设 `LAST_LSKY_ERROR` 为 **item 级**文案后返 `""`
+        ⇒ 调用方（`publish._crabpt_cover`）据此抛 `CoverItemError` ⇒ 跳过本条、
+        继续下一条（不是设施级、不停整轮）。
     """
+    # ★ `global` 必须出现在函数体**任何对该名的引用之前**（Python 语法）⇒ 提到最前，
+    #   后面（压图早返分支 + 底部失败分支）都复用这一处声明。
+    global LAST_LSKY_ERROR
+
     if not image_path or not os.path.exists(image_path):
         return ""
+
+    # ★★ 传前压图（2026-10-10）。★ 放在**取 token 之前**：压图是纯本地操作，
+    #   不该为了一张注定传不上的图去换 token / 扣配额。
+    shrunk = _shrink_for_lsky(image_path)
+    if not shrunk:
+        # 压到最低仍超上限 ⇒ item 级失败（这张图本身太大）。
+        # ★ 必须**显式**设 LAST_LSKY_ERROR：调用方 `assets.lsky_error_is_item_level()`
+        #   靠它分流（"跳过本条" vs "停整轮"）。
+        LAST_LSKY_ERROR = (f"图片大小超出限制：压到最低仍 > {LSKY_MAX_BYTES} 字节"
+                           f"（本地图 {image_path}）")
+        print(f"    [Lsky 图床] {os.path.basename(image_path)} -> {LAST_LSKY_ERROR}")
+        return ""
+    # 压过了就传压过的那份（原图不动）；没压过时 `shrunk == image_path`（零开销）。
+    image_path = shrunk
 
     # ★ `token_arg` 记下"调用方**有没有**显式传" —— 这个区分**必须**留着：
     #   显式传时我们不能替他换 token（会让传进来的值静默失效），
@@ -577,6 +741,7 @@ def upload_to_lsky(image_path, retries=2, api_url=None, token=None,
             last_err = f"{type(e).__name__}: {e}"
 
     print(f"    [Lsky 图床失败] {os.path.basename(image_path)} -> {last_err}")
+    LAST_LSKY_ERROR = last_err
     return ""
 
 

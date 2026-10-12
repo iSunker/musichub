@@ -4,7 +4,7 @@
 用户 2026-10-07 定稿的流程（逐字意图）：
     ① 发种前：把成品从 HDD(`/volume1/video/music/<专辑>`，= 3020 的 `/downloads`)
        **复制**到 **3040 看得见的 SSD 发种区**（`<PUBLISH_CONTAINER_DIR>/<专辑>`，
-       宿主 = `/volume2/docker_ssd/qbittorrent-publish/Download/<专辑>`）。
+       宿主 = `/volume2/docker_ssd/qbit-publish/Download/<专辑>`）。
     ② 3040(publish，SSD) 用**站点 .torrent** 加种 + 校验 + 发种 + 做种。
     ③ 满足「**出种≥N** 或 **做种≥D 天**」⇒ 把**种子任务**从 3040 交棒到 3020。
     ④ 清盘：删 3040 任务 + 删 SSD 副本。
@@ -419,7 +419,39 @@ def pick_handoff_candidates(torrents, now=None, seeders_min=None, seed_days=None
     return out
 
 
-def eligible_on_3040(qb_src, info_hash, now=None, seeders_min=None, seed_days=None):
+def _find_on_3040(qb_src, info_hash, name=None):
+    """在 3040 上找一条种，返回 `(torrent|None, how)`。
+
+    ★★★ #45（2026-10-08 实测钉死）：**3040 上挂的是"站点那份 .torrent"(B)，其 infohash
+      与 DB 的 `tasks.info_hash`（皇后原种 A）**不同**！原因：站点会重写 announce/passkey
+      ⇒ 同一专辑在 3040 的 hash ≠ 队列里记的 hash。
+      实测：队列 3 条全 `PENDING` / `3040 上还没有这条种`，而 3040 **明明有**这些专辑
+      （`金装小曲` queue=`59810e5b…` vs 3040=`8c36a039…`；`十年经典` `6cb9ffd8…` vs
+      `86cd30bc…`；`Massive CircleZ 6` `874b5989…` vs `fa416246…`）⇒ **判据用了错的 hash
+      ⇒ 够格种永不交棒**（`已交棒到 3020` 恒 0）。
+    ★ 正解：先按 `info_hash` 查；**查不到**再用 **name 精确匹配**（3040 的 `name` 就是
+      站点 .torrent 的 `info.name`，= 队列里的 `name`/`album`）⇒ 两种身份都能命中。
+      ★ 为什么不下载站点 .torrent 拿 hash：那要连站点、还要 I/O，而**名字就在手上**
+        （队列 item 的 `name`），且 3040 的 `torrents_info()` 一次就能拿全表按名索引。
+    ★ 返回 `how` ∈ `{"hash","name",""}}`（""=没找到）—— 便于日志区分"按 hash 找到"
+      还是"按名字找到"（后者提示身份不一致，值得记一笔）。
+    """
+    try:
+        info = qb_src.torrents_info(torrent_hashes=info_hash)
+    except Exception as e:                                        # noqa: BLE001
+        raise RuntimeError(f"查 3040 失败: {type(e).__name__}: {e}") from e
+    if info:
+        return info[0], "hash"
+    if name:
+        want = str(name).strip()
+        for t in qb_src.torrents_info():
+            if str(_torrent_field(t, "name", "") or "").strip() == want:
+                return t, "name"
+    return None, ""
+
+
+def eligible_on_3040(qb_src, info_hash, name=None, now=None,
+                     seeders_min=None, seed_days=None):
     """★★ #136：判"3040 上这条是否**够格交棒**"。返回 `(present, eligible, why)`。
 
     ★★ 为什么（用户 2026-10-07 拍板）：交棒语义 = **够格才交棒**（出种≥N 或 做种≥D 天），
@@ -430,25 +462,29 @@ def eligible_on_3040(qb_src, info_hash, now=None, seeders_min=None, seed_days=No
       · `present=False` ⇒ 3040 上**还没这条种**（延迟回加还没到点/失败了）⇒ **等**，不交棒。
       · `present=True, eligible=False` ⇒ 在做种但**还不**够格 ⇒ **等**，不交棒。
       · `present=True, eligible=True` ⇒ 够格 ⇒ 交棒。
+    ★★★ #45：`name` 用于"按站点 .torrent 的 name 兜底命中"（hash 用 A/皇后原种、
+      3040 挂的是 B/站点种，两者 hash 不同）。见 `_find_on_3040`。
     ★ `qb_src is None` ⇒ 返回 `(False, False, "无 3040 连接")`（dry-run 无客户端时也走这）。
     """
     now = _now() if now is None else now
     if qb_src is None:
         return False, False, "无 3040 连接"
     try:
-        info = qb_src.torrents_info(torrent_hashes=info_hash)
+        t, how = _find_on_3040(qb_src, info_hash, name=name)
     except Exception as e:                                        # noqa: BLE001
-        return False, False, f"查 3040 失败: {type(e).__name__}: {e}"
-    if not info:
+        return False, False, str(e)
+    if t is None:
         return False, False, "3040 上还没有这条种（延迟回加未到/失败）⇒ 等"
-    t = info[0]
     # ★ 先要 progress≥1（做完种）才有资格谈"出种/做种天数"。
     progress = float(_torrent_field(t, "progress", 0) or 0)
     if progress < 1.0:
         return True, False, f"3040 上还没做完种（progress={progress:.2f}）⇒ 等"
-    ok, why = judge(_torrent_field(t, "num_complete", 0),
-                    _torrent_field(t, "added_on", 0),
-                    now=now, seeders_min=seeders_min, seed_days=seed_days)
+    nc = _torrent_field(t, "num_complete", 0)
+    added = _torrent_field(t, "added_on", 0)
+    ok, why = judge(nc, added, now=now, seeders_min=seeders_min, seed_days=seed_days)
+    if how == "name":
+        # 提示身份不一致（值得记一笔）：hash 没找到、按名字才找到。
+        why = f"[按名字命中 3040] {why}"
     return True, ok, why
 
 
@@ -463,7 +499,7 @@ def export_torrent_bytes(qb, info_hash):
 
 
 def handoff_to_3020(qb_src, qb_dst, info_hash, target_save_path, dry_run=True,
-                   target_category=None, own_categories=None):
+                   target_category=None, own_categories=None, name=None):
     """把种的**任务**从 3040 交棒到 3020：export → add(3020, save_path) → recheck。
 
     ★★ **零拷贝**：不搬数据 —— 3020 的 `/downloads` 就是 `/volume1/video/music`，
@@ -474,12 +510,23 @@ def handoff_to_3020(qb_src, qb_dst, info_hash, target_save_path, dry_run=True,
     ★ `target_category` = 交棒到 3020 后打哪个分类。★ **只能取白名单之一**；
       缺省 = `config.PUBLISH_CATEGORY`。传给非白名单值 ⇒ 拒（防污染 3020 分类体系）。
     ★ `dry_run=True` ⇒ 只打印计划，不 add、不 recheck。
+    ★★★ #45：`name` 用于"按站点 .torrent 的 name 兜底命中"（3040 挂 B/站点种，其 hash
+      与 `info_hash`(A/皇后原种) **不同**）。**export 与 recheck 必须用 3040 上的真实 hash**
+      （`real_hash`），否则 export 用 A ⇒ 导出的是皇后原种（报 open.cd）⇒ 交棒给它 = 交错了种。
     ★ 返回 `(成功, 原因)`。**不删任何东西**（删是下一步 `finalize_source`）。
     """
     # ---- 隔离闸门：先确认"这是本项目种的分类"（查 3040 实况）----
-    cat, gate_err = _source_category(qb_src, info_hash, dry_run=dry_run)
+    cat, gate_err = _source_category(qb_src, info_hash, dry_run=dry_run, name=name)
     if gate_err:
         return False, gate_err
+    # ★ #45：拿 3040 上的**真实 hash**（可能是 B，与 info_hash=A 不同）。
+    real_hash = info_hash
+    try:
+        _t, _how = _find_on_3040(qb_src, info_hash, name=name)
+        if _t is not None:
+            real_hash = str(_torrent_field(_t, "hash", "") or info_hash)
+    except Exception:                                             # noqa: BLE001
+        _how = ""
     if not is_own_project(cat, own_categories):
         return False, (f"拒交棒：3040 分类 {cat!r} 不在本项目白名单 "
                        f"{config.HANDOFF_OWN_CATEGORIES}（疑似非本项目种，不碰）")
@@ -488,11 +535,11 @@ def handoff_to_3020(qb_src, qb_dst, info_hash, target_save_path, dry_run=True,
     if not is_own_project(tcat, own_categories):
         return False, f"拒交棒：目标分类 {tcat!r} 不在本项目白名单"
     if dry_run:
-        print(f"🅿️  [handoff][dry-run] 将交棒 {info_hash[:12]}… → 3020 "
+        print(f"🅿️  [handoff][dry-run] 将交棒 {real_hash[:12]}… → 3020 "
               f"save_path={target_save_path} category={tcat}（3040分类={cat}）")
         return True, "dry-run"
     try:
-        content = export_torrent_bytes(qb_src, info_hash)
+        content = export_torrent_bytes(qb_src, real_hash)
     except Exception as e:                                        # noqa: BLE001
         return False, f"从 3040 导出 .torrent 失败: {type(e).__name__}: {e}"
     if not content:
@@ -505,23 +552,24 @@ def handoff_to_3020(qb_src, qb_dst, info_hash, target_save_path, dry_run=True,
             is_paused=False,
             category=tcat,
         )
-        qb_dst.torrents_recheck(torrent_hashes=info_hash)
+        qb_dst.torrents_recheck(torrent_hashes=real_hash)
     except Exception as e:                                        # noqa: BLE001
-        name = type(e).__name__
+        name_e = type(e).__name__
         # 409 = 3020 上已有这条种（多半是别的容器辅种抢先加了）⇒ 视为"已在做种"。
-        if name == "Conflict409Error":
-            print(f"ℹ️  [handoff] 3020 已有该种（409）= 视为已交棒: {info_hash[:12]}…")
+        if name_e == "Conflict409Error":
+            print(f"ℹ️  [handoff] 3020 已有该种（409）= 视为已交棒: {real_hash[:12]}…")
             return True, "409 已存在"
-        return False, f"add 3020 失败: {name}: {e}"
-    print(f"✅ [handoff] 已交棒到 3020（待 3020 校验）: {info_hash[:12]}… category={tcat}")
+        return False, f"add 3020 失败: {name_e}: {e}"
+    print(f"✅ [handoff] 已交棒到 3020（待 3020 校验）: {real_hash[:12]}… category={tcat}")
     return True, "added+recheck"
 
 
-def _source_category(qb_src, info_hash, dry_run=False):
+def _source_category(qb_src, info_hash, dry_run=False, name=None):
     """查 3040 上该种的 `category`（隔离判据的来源）。返回 `(分类, 错误)`。
 
     ★ 查不到该种 ⇒ 返回错误（**不当成"没分类"**），因为"查不到"与"未分类"必须分开
       —— 前者说明种不在 3040（还没发/已被删），此时**绝不能**往下走。
+    ★★★ #45：`name` 兜底 —— 3040 挂的是站点种(B)，hash 与 `info_hash`(A) 不同 ⇒ 按名字找。
     ★★ `dry_run=True` 时**仍然真查**（NAS-92g 实测修）：本查询是**只读 GET**，dry-run 下
       做了也**不改任何状态**；而闸门 `is_own_project(cat)` 依赖它拿到真分类。
       ★★★ 原先 `dry_run` 短路返回 `("","")` ⇒ 闸门拿空串比白名单 ⇒ **恒判 False**
@@ -532,25 +580,37 @@ def _source_category(qb_src, info_hash, dry_run=False):
     if qb_src is None:
         return "", ""
     try:
-        info = qb_src.torrents_info(torrent_hashes=info_hash)
+        t, how = _find_on_3040(qb_src, info_hash, name=name)
     except Exception as e:                                        # noqa: BLE001
         return "", f"查 3040 分类失败: {type(e).__name__}: {e}"
-    if not info:
+    if t is None:
         return "", f"3040 上找不到该种 {info_hash[:12]}…（已删？）⇒ 不交棒"
-    return str(_torrent_field(info[0], "category", "") or ""), ""
+    return str(_torrent_field(t, "category", "") or ""), ""
 
 
-def verify_3020_seeding(qb_dst, info_hash):
+def verify_3020_seeding(qb_dst, info_hash, name=None):
     """查 3020 上该种是否已"校验通过且在做种"。返回 `(是否就绪, 明细)`。
 
     ★ 判据（与 NAS-92 §1.5 一致）：`progress >= 1.0` 且 state ∈
       {stalledUP, uploading, forcedUP, queuedUP}。★ 只在这些都成立时才允许删源。
     ★★ 这是"删 SSD"前的**唯一**安全门 —— 门没通过 ⇒ 绝不进 `finalize_source`。
+    ★★★ #45：`name` 兜底 —— 交棒到 3020 的是站点种(B)，其 hash 与 `info_hash`(A) 不同
+      ⇒ 按 hash 查不到时，必须按 3020 上的 **name** 再找一次，否则会误判"3020 上还没有"
+      ⇒ 永远卡在 HANDOFF_RECHECK（交棒了却永不 DONE）。
     """
     try:
         info = qb_dst.torrents_info(torrent_hashes=info_hash)
     except Exception as e:                                        # noqa: BLE001
         return False, f"查 3020 失败: {type(e).__name__}: {e}"
+    if not info and name:
+        want = str(name).strip()
+        try:
+            for t in qb_dst.torrents_info():
+                if str(_torrent_field(t, "name", "") or "").strip() == want:
+                    info = [t]
+                    break
+        except Exception:                                         # noqa: BLE001
+            pass
     if not info:
         return False, "3020 上还没有这条种"
     t = info[0]
@@ -594,7 +654,8 @@ def _safe_rmtree(path):
     return True
 
 
-def finalize_source(qb_src, info_hash, ssd_dir, dry_run=True, own_categories=None):
+def finalize_source(qb_src, info_hash, ssd_dir, dry_run=True, own_categories=None,
+                    name=None):
     """删除 3040 任务 + 删 SSD 副本。**只有在 3020 已确认做种后**才可调用本函数。
 
     ★★ 严格时序（NAS-92 §1.5）：① 3020 add+recheck 成功 → ② 删 3040 任务
@@ -605,9 +666,19 @@ def finalize_source(qb_src, info_hash, ssd_dir, dry_run=True, own_categories=Non
       而删是**唯一不可逆**的一步 ⇒ 宁可多查一次，也不误删用户的种。
     ★ `deleteFiles=False` 删 3040 任务 —— **不**让 3040 顺手删盘；盘由 `_safe_rmtree` 管，
       这样"删任务"和"删盘"是**两个显式动作**，中间有日志可查。
+    ★★★ #45：`name` 兜底 —— 3040 上的是站点种(B)，其 hash 与 `info_hash`(A) 不同 ⇒
+      **删 3040 任务必须用 3040 上的真实 hash**（否则删不掉 B，留下"已交棒但 3040 还在种"）。
     """
     # ---- 隔离闸门：删之前再确认"这是本项目种的分类"（查 3040 实况）----
-    cat, gate_err = _source_category(qb_src, info_hash, dry_run=dry_run)
+    cat, gate_err = _source_category(qb_src, info_hash, dry_run=dry_run, name=name)
+    # ★ #45：解析 3040 上的真实 hash（B），删它（而不是 A）。
+    del_hash = info_hash
+    try:
+        _t, _ = _find_on_3040(qb_src, info_hash, name=name)
+        if _t is not None:
+            del_hash = str(_torrent_field(_t, "hash", "") or info_hash)
+    except Exception:                                             # noqa: BLE001
+        pass
     if gate_err:
         # ★ 查不到该种：可能是"已经被删了"（幂等）⇒ 只要盘在，仍可安全清盘。
         print(f"⚠️  [handoff] 清盘前查分类失败: {gate_err}")
@@ -619,11 +690,11 @@ def finalize_source(qb_src, info_hash, ssd_dir, dry_run=True, own_categories=Non
               f"{config.HANDOFF_OWN_CATEGORIES}（疑似非本项目种，不碰）")
         return False
     if dry_run:
-        print(f"🅿️  [handoff][dry-run] 将删 3040 任务 {info_hash[:12]}… + SSD 副本 {ssd_dir}")
+        print(f"🅿️  [handoff][dry-run] 将删 3040 任务 {del_hash[:12]}… + SSD 副本 {ssd_dir}")
         return True
     try:
-        qb_src.torrents_delete(delete_files=False, torrent_hashes=info_hash)
-        print(f"✅ [handoff] 已删 3040 任务: {info_hash[:12]}…")
+        qb_src.torrents_delete(delete_files=False, torrent_hashes=del_hash)
+        print(f"✅ [handoff] 已删 3040 任务: {del_hash[:12]}…")
     except Exception as e:                                        # noqa: BLE001
         print(f"⚠️  [handoff] 删 3040 任务失败（继续删盘？不 —— 先停）: "
               f"{type(e).__name__}: {e}")
@@ -675,7 +746,8 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
             #     "出种≥N 才交棒"从未生效（实测 `已交棒到 3020` 计数=0）。
             #   ★ 不够格 ⇒ **停在 PENDING**（不交棒、不标 FAILED、不动源）⇒ 下轮再看。
             if item.get("state") == "PENDING" and not dry_run:
-                _present, _elig, _ewhy = eligible_on_3040(qb_src, info_hash)
+                _present, _elig, _ewhy = eligible_on_3040(qb_src, info_hash,
+                                                          name=item.get("name") or item.get("album"))
                 if not _elig:
                     update_item(info_hash, state="PENDING",
                                 last_error=f"等够格交棒: {_ewhy}")
@@ -696,7 +768,8 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
                                     first_failed_at=item.get("first_failed_at") or _now())
                         return "FAILED"
             ok, why = handoff_to_3020(qb_src, qb_dst, info_hash, target, dry_run=dry_run,
-                                     target_category=target_cat or None)
+                                     target_category=target_cat or None,
+                                     name=item.get("name") or item.get("album"))
             if not ok:
                 update_item(info_hash, state="FAILED", last_error=why,
                             first_failed_at=item.get("first_failed_at") or _now())
@@ -707,7 +780,9 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
                 return "HANDOFF_ADDED"
             item = dict(item, state="HANDOFF_ADDED")
         # ---- 校验 3020 是否已做种 ----
-        ready, why = (True, "dry-run") if dry_run else verify_3020_seeding(qb_dst, info_hash)
+        _nm = item.get("name") or item.get("album")
+        ready, why = ((True, "dry-run") if dry_run
+                      else verify_3020_seeding(qb_dst, info_hash, name=_nm))
         if not ready:
             # 3020 还没校验完 ⇒ 停在这一步，下轮再看（**不**删源）
             update_item(info_hash, state="HANDOFF_RECHECK", last_error=why)
@@ -721,7 +796,7 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
             update_item(info_hash, state="FAILED",
                         last_error="未完成交棒却走到清盘（已拦，拒删源）⇒ 需人工核")
             return "FAILED"
-        if finalize_source(qb_src, info_hash, ssd_dir, dry_run=dry_run):
+        if finalize_source(qb_src, info_hash, ssd_dir, dry_run=dry_run, name=_nm):
             if not dry_run:
                 remove_item(info_hash)
             # ★ 清 last_error：进 DONE 是"成功终态"，不该再留上一轮的路过标签

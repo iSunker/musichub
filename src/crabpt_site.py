@@ -625,6 +625,31 @@ class CrabptClient:
             return r.content
         return None
 
+    # ---------- 发布前跨站查重（#13 / #11 核心）----------
+
+    def find_existing_by_name(self, name, *, local_name, base_path="/torrents.php",
+                              max_candidates=None):
+        """在**蟹黄堡全站范围**搜 `name`，返回**已存在同版本**的 tid 或 `None`。
+
+        ★★ 与 `musopia.MusopiaClient.find_existing_by_name` 是**同一套判据**（复用
+          `musopia.search_and_compare`，`ERR-META-03`：两站共用一处核心，绝不各写一份）。
+          判据 = 站侧 `.torrent` 的 `info.name` 与本地 `local_name` 精确相等（非标题）。
+        ★★ **召回**（#23/#31）也在**同一处**：`search_and_compare` 按 `musopia.SEARCH_QUERY_PLAN`
+          发**多条子查询**、精准优先、命中即停（修长名/标点名/CJK 名的漏召回）—— 蟹黄堡**自动**继承。
+        ★★ `max_candidates` 默认 **`None`** ⇒ 读 `config.DEDUP_MAX_CANDIDATES`（与乌托邦同源）。
+          ★ 旧版硬编码 `8`，**永不读 config** ⇒ 蟹黄堡实际跑的是 #31 之前那套预算（8），
+            与 area=1（#31 之后的口径）错配 —— 那正是 20 行回归 11/20 的配置（`ERR-META-03`：口径漂移）。
+            预算是 #31 的**安全阀**，两站该取同一个值、同一个旋钮。
+        ★ 本类**不继承** `MusopiaClient`（见类头注释：乌托邦那条是主发布线，
+          共用连接会有回归风险）⇒ 只复用**函数**，不复用**连接与提交**。
+        ★★ 任何网络/解析异常**向上抛**（`publish._dedup_lookup` 按"停轮非 0"处理）；
+          `None` 的语义**只有**"搜到了、但不重复"。
+        """
+        import musopia
+        return musopia.search_and_compare(self, name, local_name=local_name,
+                                          base_path=base_path,
+                                          max_candidates=max_candidates)
+
     def have_cookie(self):
         return bool((self.cookie or "").strip())
 

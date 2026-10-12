@@ -903,7 +903,8 @@ def selftest():
                     for _k in _n.keywords:
                         if _k.arg == "target" and isinstance(_k.value, _ast.Name):
                             _targets.add(_k.value.id)
-            for _want in ("_readd_thread_loop", "_handoff_thread_loop"):
+            for _want in ("_readd_thread_loop", "_handoff_thread_loop",
+                          "_seed_patrol_thread_loop"):
                 if _want not in _targets:
                     ok[0] = False
                     detail.append(f"✗ ⑨f daemon.py 没有 `Thread(target={_want}...)` 调用点 "
@@ -911,7 +912,8 @@ def selftest():
             # ★ 且这两个函数真的**有定义**（防止 target 指向不存在的名字：只在运行期炸）
             _defs = {_n.name for _n in _ast9.walk(_dtree)
                      if isinstance(_n, _ast.FunctionDef)}
-            for _want in ("_readd_thread_loop", "_handoff_thread_loop"):
+            for _want in ("_readd_thread_loop", "_handoff_thread_loop",
+                          "_seed_patrol_thread_loop"):
                 if _want not in _defs:
                     ok[0] = False
                     detail.append(f"✗ ⑨f `{_want}` 在 daemon.py 里**没有定义** "
@@ -1250,13 +1252,40 @@ def selftest():
             chk("⑨l progress<1 即便出种多 ⇒ 不交棒（等）", _e4, False)
             # (b) 源码护栏：`process_one` 必须真调 `eligible_on_3040`（**调用点**，
             #     ★ 别只搜 `eligible_on_3040(` —— 那是 `def` 行也含的子串，会恒为真）。
-            if "eligible_on_3040(qb_src, info_hash)" not in _ho_src:
+            # ★★★ #45：调用现在带 `name=` 兜底（3040 挂站点种 B、hash 与 A 不同）
+            #     ⇒ 判据放宽为"出现 `eligible_on_3040(qb_src, info_hash`"（含前缀即可）。
+            if "eligible_on_3040(qb_src, info_hash" not in _ho_src:
                 ok[0] = False
                 detail.append("✗ ⑨l handoff.py 里**没有调用** `eligible_on_3040(qb_src, "
-                              "info_hash)` ⇒ 「够格才交棒」仍是死代码（#136 病根）")
+                              "info_hash…)` ⇒ 「够格才交棒」仍是死代码（#136 病根）")
             if "def eligible_on_3040(" not in _ho_src:
                 ok[0] = False
                 detail.append("✗ ⑨l handoff.py 里没有 `def eligible_on_3040(`")
+            # ★★★ #45 回归：`_find_on_3040` 必须存在，且 `eligible_on_3040` 用它
+            #     （否则"hash 用 A、3040 挂 B"永远查不到 ⇒ 够格种永不交棒）。
+            if "def _find_on_3040(" not in _ho_src:
+                ok[0] = False
+                detail.append("✗ ⑨l#45 缺 `_find_on_3040`（hash/名字双查）")
+            if "_find_on_3040(qb_src, info_hash" not in _ho_src:
+                ok[0] = False
+                detail.append("✗ ⑨l#45 `eligible_on_3040` 未用 `_find_on_3040` ⇒ "
+                              "3040 挂站点种(B) 时仍查不到（够格种永不交棒）")
+            # 行为：#45 用 name 兜底命中（hash 不匹配但名字匹配 ⇒ 视为 present）。
+            class _FakeSrc45:
+                def __init__(self, info):
+                    self._info = info
+                def torrents_info(self, **kw):
+                    if kw.get("torrent_hashes"):
+                        return []                       # 按 hash（A）查不到
+                    return self._info                    # 全表（含 B，按名字）
+            _p5, _e5, _w5 = _ho.eligible_on_3040(
+                _FakeSrc45([{"hash": "bb", "name": "专辑X", "progress": 1.0,
+                             "num_complete": 4, "added_on": _NOW9L}]),
+                "aa", name="专辑X", now=_NOW9L, seeders_min=3, seed_days=3)
+            chk("⑨l#45 hash 不匹配·按 name 兜底命中 ⇒ 够格", (_p5, _e5), (True, True))
+            if "按名字命中" not in str(_w5):
+                ok[0] = False
+                detail.append(f"✗ ⑨l#45 按名字命中时应标注 why，实为 {_w5!r}")
         except Exception as _e9l:                                # noqa: BLE001
             ok[0] = False
             detail.append(f"✗ ⑨l 执行失败: {type(_e9l).__name__}: {_e9l}")
@@ -1346,9 +1375,242 @@ def selftest():
         if "output_sidecar_paths(" not in _run_code:
             ok[0] = False
             detail.append("✗ ⑨n run.py 里没有 `output_sidecar_paths(` ⇒ 消歧护栏没接线")
+
+        # ⑨o 源码护栏（2026-10-07 / #33 / ERR-PUBLISH-12）：`edit_torrent` **绝不许**
+        #    假装能换挂的 `.torrent`。判据 = musopia.py 里必须同时出现：
+        #      (a) 常量 `EDIT_CANNOT_CHANGE_TORRENT = True`（把这条事实写成真值；
+        #          ★ 必须断言 **= True**，不是"名字出现过"——否则把它改成 `= False`
+        #            这种"事实被反转"的回归会**静默通过**，本站守卫就成了摆设）；
+        #      (b) `edit_torrent` 里对 `EDIT_FILE_LIKE_KEYS` 的**拒绝**（不是静默忽略）。
+        #    ★ 先剥注释再搜（同 ⑨n 的教训）：本守卫自己的说明里就写了这些标识符。
+        _mus_py = _pl9i.Path(__file__).resolve().parent / "musopia.py"
+        _mus_src = _mus_py.read_text(encoding="utf-8") if _mus_py.exists() else ""
+        _mus_code = "\n".join(_l.split("#", 1)[0] for _l in _mus_src.splitlines())
+        if not re.search(r"EDIT_CANNOT_CHANGE_TORRENT\s*=\s*True\b", _mus_code):
+            ok[0] = False
+            detail.append("✗ ⑨o musopia.py 没有 `EDIT_CANNOT_CHANGE_TORRENT = True` ⇒ "
+                          "『edit 改不了挂的种子』这条事实没被钉住（ERR-PUBLISH-12）")
+        if "EDIT_FILE_LIKE_KEYS" not in _mus_code:
+            ok[0] = False
+            detail.append("✗ ⑨o `edit_torrent` 未拒绝 file 类 overrides ⇒ "
+                          "改种子会**静默假成功**（ERR-PUBLISH-12）")
+
+        # ── ⑨p ★ scan 必须连皇后源实例，不许无条件 `qb_client.build(config)` ──
+        #   （2026-10-10 #16；根因见 ERRATA 的 ERR-ORCH-02）
+        #   ★ 病根：`config.QB_HOST` 是**发种实例**（生产 3010，0 个 opencd），而皇后源是
+        #     `QB_HOST_OPENCD`（生产 3260，1376 个 opencd）。scan 原先直读 QB_HOST ⇒ 每轮
+        #     「找到 0 个分类为 [opencd] 的种子」⇒ 队列表饿死。
+        #   ★★ 判据走 **AST**（不许 `"qb_client.build(config)" in 源码文本` —— 那种写法会被
+        #     **字符串字面量 / docstring** 里的同名字样骗成**假红**：本判据第一版正是栽在这
+        #     上面，⑧ 的告警串里就有一句 `qb_client.build(config)`；见 ⑦ 那段同样的坑）。
+        #   ★ 判据三条：
+        #     (a) `main()` 里**不许**有 `qb_client.build(<裸 config>)` 调用；
+        #     (b) `main()` 里**必须**出现 `_scan_source_host` 这个 Name（取地址的唯一入口）；
+        #     (c) `_scan_source_host()` 的 `or` 链里 `QB_HOST_OPENCD` 必须排在裸 `QB_HOST` 前
+        #         （显式 override `QB_HOST_SCAN` 最前不算错）。
+        import ast as _ast9p
+        _run_tree = _ast9p.parse(_pl9i.Path(__file__).resolve().read_text(encoding="utf-8"))
+
+        def _find_func(tree, name):
+            for node in _ast9p.walk(tree):
+                if isinstance(node, _ast9p.FunctionDef) and node.name == name:
+                    return node
+            return None
+
+        # (a) scan 主流程里不许 `qb_client.build(config)`
+        #   ★★ 2026-10-10（#17f）：scan 主体已从 `main()` 抽到 `_scan_main(args)`
+        #     （`main()` 现在只负责**取单实例锁**再调 `_scan_main`）。⇒ 本判据要覆盖
+        #     **两个**函数体：抽函数是重构，不该让护栏"看空"（`ERR-META-01`：判据失效
+        #     比不判更危险 —— 改完名字它仍恒绿，但真回归也看不见了）。
+        _scan_fns = [f for f in (_find_func(_run_tree, "main"),
+                                 _find_func(_run_tree, "_scan_main")) if f is not None]
+        _bad_build = []
+        for _fn in _scan_fns:
+            for node in _ast9p.walk(_fn):
+                if (isinstance(node, _ast9p.Call)
+                        and isinstance(node.func, _ast9p.Attribute)
+                        and node.func.attr == "build"
+                        and isinstance(node.func.value, _ast9p.Name)
+                        and node.func.value.id == "qb_client"
+                        and len(node.args) == 1
+                        and isinstance(node.args[0], _ast9p.Name)
+                        and node.args[0].id == "config"):
+                    _bad_build.append(node.lineno)
+        if _bad_build:
+            ok[0] = False
+            detail.append(f"✗ ⑨p scan 主流程里仍有 `qb_client.build(config)`（行 {_bad_build}）⇒ "
+                          "scan 会无条件读 config.QB_HOST（发种实例，0 个 opencd）⇒ "
+                          "队列饿死（ERR-ORCH-02）")
+
+        # (b) scan 主流程里必须出现 `_scan_source_host` 这个名字
+        _uses_scan_host = False
+        for _fn in _scan_fns:
+            for node in _ast9p.walk(_fn):
+                if isinstance(node, _ast9p.Name) and node.id == "_scan_source_host":
+                    _uses_scan_host = True
+        if not _uses_scan_host:
+            ok[0] = False
+            detail.append("✗ ⑨p scan 主流程未经 `_scan_source_host()` 取地址 ⇒ "
+                          "scan 源不再被单独钉住（ERR-ORCH-02）")
+
+        # (c) `_scan_source_host()` 的 or 链里 `QB_HOST_OPENCD` 必须排在裸 `QB_HOST` 前
+        _ssh_fn = _find_func(_run_tree, "_scan_source_host")
+        if _ssh_fn is None:
+            ok[0] = False
+            detail.append("✗ ⑨p 找不到 `_scan_source_host()`（ERR-ORCH-02）")
+        else:
+            # ★★★ 只看 **return 表达式**里的字符串字面量（★ 不看 docstring —— 本函数的
+            #   docstring 正文里就写着 `QB_HOST_OPENCD`，会把它当成"链里出现过"，从而把
+            #   顺序判据骗过。本判据第一版正是栽在这里；见 ⑦ 的同一个坑）。
+            _ret = None
+            for node in _ast9p.walk(_ssh_fn):
+                if isinstance(node, _ast9p.Return):
+                    _ret = node.value
+                    break
+            _names = []
+            if _ret is not None:
+                for node in _ast9p.walk(_ret):
+                    if isinstance(node, _ast9p.Constant) and isinstance(node.value, str):
+                        _names.append((node.lineno, node.col_offset, node.value))
+            _lit = [v for _, _, v in sorted(_names)]
+            _has_opencd = any("QB_HOST_OPENCD" in v for v in _lit)
+            if not _has_opencd:
+                ok[0] = False
+                detail.append("✗ ⑨p `_scan_source_host()` 的 return 未引用 `QB_HOST_OPENCD` ⇒ "
+                              "scan 会用发种实例当源（ERR-ORCH-02）")
+            # 裸 QB_HOST（逐字，排除 QB_HOST_SCAN / QB_HOST_OPENCD）若出现，必须在 OPENCD 之后
+            _idx_opencd = next((i for i, v in enumerate(_lit) if "QB_HOST_OPENCD" in v), None)
+            _idx_bare = next((i for i, v in enumerate(_lit) if v == "QB_HOST"), None)
+            if _idx_opencd is not None and _idx_bare is not None and _idx_bare < _idx_opencd:
+                ok[0] = False
+                detail.append("✗ ⑨p `_scan_source_host()` 的 return 里裸 `QB_HOST` 排在 "
+                              "`QB_HOST_OPENCD` 之前 ⇒ 源优先级反了（ERR-ORCH-02）")
     except Exception as e:                                        # noqa: BLE001
         ok[0] = False
         detail.append(f"✗ ⑨ 交棒自检执行失败: {type(e).__name__}: {e}")
+
+    # ── ⑨q ★ scan 单实例锁（2026-10-10 #17f；根因 ERR-ORCH-03）──────────────
+    #   ★ 判据（三条，含**阴性对照**——没有它就是"测了个寂寞"）：
+    #     (a) 冷启动能拿到锁（第一个 acquire 必须成功）；
+    #     (b) 已持锁时**再 acquire 同一个锁文件必须失败**（返回 None）—— 这是核心：
+    #         若把 `LOCK_NB` 去掉、或改成"只检查文件存在"，这条会变绿 ⇒ 护栏失效；
+    #     (c) 释放后**又能拿到**（证明锁真随释放/进程退出而解，不是"永久占死"）。
+    #   ★ 只在本机有 fcntl 时做 (b)(c)（Windows 上 `acquire_scan_lock` 走无锁分支，
+    #     恒返回句柄 ⇒ (b) 会假红）。判据 = 能不能 import fcntl。
+    try:
+        import tempfile as _tf9q
+        try:
+            import fcntl as _has_fcntl  # noqa: F401
+            _fcntl_ok = True
+        except ImportError:
+            _fcntl_ok = False
+        with _tf9q.TemporaryDirectory() as _d9q:
+            _lp = os.path.join(_d9q, "scan.lock")
+            _h1, _p1 = acquire_scan_lock(_lp)
+            chk("⑨q(a) 冷启动拿到锁", _h1 is not None, True)
+            chk("⑨q(a) 锁路径回传", _p1, _lp)
+            if _fcntl_ok:
+                _h2, _ = acquire_scan_lock(_lp)
+                chk("⑨q(b) 已持锁⇒第二个拿不到（阴性对照）", _h2, None)
+                _release_scan_lock(_h1)
+                _h3, _ = acquire_scan_lock(_lp)
+                chk("⑨q(c) 释放后又能拿到", _h3 is not None, True)
+                _release_scan_lock(_h3)
+            else:
+                # 无 fcntl（Windows）：至少证明"拿到东西、且不抛"。
+                _release_scan_lock(_h1)
+                detail.append("ℹ ⑨q(b)(c)(d) 跳过：本机无 fcntl（生产 Linux 容器有）")
+            if _fcntl_ok:
+                # 打不开锁文件 ⇒ 不抛、返回 None（护栏失效但不连累整轮）。
+                _h_bad, _ = acquire_scan_lock(os.path.join(_d9q, "no_such_dir", "x.lock"))
+                chk("⑨q(d) 坏路径不抛、返回 None", _h_bad, None)
+    except Exception as e:                                        # noqa: BLE001
+        ok[0] = False
+        detail.append(f"✗ ⑨q 锁自检执行失败: {type(e).__name__}: {e}")
+
+    # ── ⑨r ★ 皇后种识别 = tracker 精确匹配（2026-10-11 #10/#172；根因 ERR-ORCH-04）──
+    #   ★ 判据（含**阴性对照**——没有它就是"测了个寂寞"）：
+    #     (a) 真皇后 tracker ⇒ 判是；
+    #     (b) 别站 tracker（musopia/crabpt）⇒ 判否（核心：口径没放宽成"任意有 tracker 的种"）；
+    #     (c) **子串形近**（`evil-tracker.open.cd` / `tracker.open.cd.evil.com`）⇒ 判否
+    #         （核心：证明是**精确主机名**比较，不是 `in` 子串）；
+    #     (d) 空 tracker / 拿不到 ⇒ 判否（"不可知"不当成"是"）；
+    #     (e) 大小写不敏感；
+    #     (f) `_opencd_tracker_host()` 的默认值 == 实测主机名（口径没被改飘）。
+    class _T:  # 极简 torrent 替身（只要 `.tracker`）
+        def __init__(self, url):
+            self.tracker = url
+    try:
+        _th = _opencd_tracker_host()
+        chk("⑨r(f) 默认 tracker 主机 = tracker.open.cd", _th, "tracker.open.cd")
+        chk("⑨r(a) 真皇后 tracker ⇒ 是",
+            _torrent_is_opencd(_T("https://tracker.open.cd/announce.php?passkey=x"), _th), True)
+        chk("⑨r(a) http 也认",
+            _torrent_is_opencd(_T("http://tracker.open.cd/announce"), _th), True)
+        for _bad in ("https://www.musopia.vip/announce.php?passkey=x",
+                     "https://crabpt.vip/announce.php?passkey=x"):
+            chk(f"⑨r(b) 别站⇒否({_bad[8:20]})",
+                _torrent_is_opencd(_T(_bad), _th), False)
+        for _sub in ("https://evil-tracker.open.cd/announce",
+                     "https://tracker.open.cd.evil.com/announce",
+                     "https://tracker.open.cdx/announce"):
+            chk(f"⑨r(c) 形近子串⇒否({_sub[8:24]})",
+                _torrent_is_opencd(_T(_sub), _th), False)
+        chk("⑨r(d) 空 tracker⇒否", _torrent_is_opencd(_T(""), _th), False)
+        chk("⑨r(d) 拿不到 tracker⇒否", _torrent_is_opencd(object(), _th), False)
+        chk("⑨r(e) 大小写不敏感",
+            _torrent_is_opencd(_T("https://TRACKER.OPEN.CD/announce"), _th), True)
+        # ★ 端到端：给一串混合 torrent，过滤后**只剩**皇后那一个（证明"过滤真发生"）。
+        _mixed = [_T("https://tracker.open.cd/a"), _T("https://crabpt.vip/b"),
+                  _T(""), _T("https://www.musopia.vip/c"), _T("https://tracker.open.cd/d")]
+        _kept = [t for t in _mixed if _torrent_is_opencd(t, _th)]
+        chk("⑨r 混合样本过滤后只剩 2 个皇后种", len(_kept), 2)
+    except Exception as e:                                        # noqa: BLE001
+        ok[0] = False
+        detail.append(f"✗ ⑨r 皇后种识别自检执行失败: {type(e).__name__}: {e}")
+
+    # ── ⑨s ★ #31 查重"精准优先 + 命中即停"的**结构**护栏（2026-10-11）──────
+    #   ★★ 独立失效模式：有人把 `search_and_compare` 从"逐条查询→立即验证→命中即停"
+    #     简化回"先跑完所有查询取并集、再验证"（= 13/20→11/20 的病），或把两条 `raise`
+    #     挪出循环（"中途失败被吞"）。行为断言在**夹具宽松时**可能漏掉（`ERR-META-14`：
+    #     失效的检测比不检测更危险）⇒ 这里钉**结构**。
+    #   ★ 判据（源码文本；先剥注释，免得本守卫自己的说明里就写了这些标识符）：
+    #     (a) 函数体内**同时**有 `raise SiteError` 与 `raise LoginExpired`（绝不降级）；
+    #     (b) 引用 `DEDUP_MAX_CANDIDATES`（预算是全局的、读 config）；
+    #     (c) 命中即停：函数体里有 `return tid`（命中即返回、不继续跑宽查询）。
+    try:
+        import ast as _ast9s
+        _mus_py9 = _pl9i.Path(__file__).resolve().parent / "musopia.py"
+        _mus_txt9 = _mus_py9.read_text(encoding="utf-8") if _mus_py9.exists() else ""
+        if not _mus_txt9:
+            ok[0] = False
+            detail.append("✗ ⑨s 找不到 musopia.py ⇒ 判据没测到东西（ERR-META-14）")
+        else:
+            _sac_src = ""
+            for _n in _ast9s.walk(_ast9s.parse(_mus_txt9)):
+                if isinstance(_n, _ast9s.FunctionDef) and _n.name == "search_and_compare":
+                    _seg = _ast9s.get_source_segment(_mus_txt9, _n) or ""
+                    _sac_src = "\n".join(l.split("#", 1)[0] for l in _seg.splitlines())
+                    break
+            if not _sac_src:
+                ok[0] = False
+                detail.append("✗ ⑨s 找不到 search_and_compare 函数体（ERR-META-14）")
+            else:
+                for _mark in ("raise SiteError", "raise LoginExpired"):
+                    if _mark not in _sac_src:
+                        ok[0] = False
+                        detail.append(f"✗ ⑨s search_and_compare 缺 `{_mark}` ⇒ "
+                                      "中途失败可能被静默降级成'没重复'（危险）")
+                if "DEDUP_MAX_CANDIDATES" not in _sac_src:
+                    ok[0] = False
+                    detail.append("✗ ⑨s search_and_compare 未引用 `DEDUP_MAX_CANDIDATES` ⇒ "
+                                  "全局候选预算可能已失效")
+                if "return tid" not in _sac_src:
+                    ok[0] = False
+                    detail.append("✗ ⑨s search_and_compare 缺 `return tid` ⇒ 命中即停可能已失效")
+    except Exception as e:                                        # noqa: BLE001
+        ok[0] = False
+        detail.append(f"✗ ⑨s 查重结构护栏执行失败: {type(e).__name__}: {e}")
 
     return ok[0], detail
 
@@ -1436,21 +1698,209 @@ def create_musopia_torrent(content_path, save_path):
     t.write(save_path)
 
 
+def _scan_source_host():
+    """★ scan 要连的 qB 实例 = **皇后源**（`opencd` 分类原种/数据所在），一处口径。
+
+    ★ 为什么单列（别在构造点再写 `config.QB_HOST`）—— 本 bug 的根因（`ERR-ORCH-02`）：
+      `config.QB_HOST` 是**发种实例**（生产 3010 qbit-publish，只有 4 个种、**0 个 opencd**），
+      而皇后的 `opencd` 分类种子在**另一个实例**（生产 3260 qbit-music3，1376 个 opencd）。
+      原先 scan 直接 `qb_client.build(config)` ⇒ 读 `config.QB_HOST` ⇒ 每轮
+      「找到 0 个分类为 [opencd] 的种子」⇒ **队列只出不进、见底**。
+    ★ 口径与 `publish._opencd_content_host()` / `daemon.HANDOFF_HOST_3020` **同源**：
+      优先 `config.QB_HOST_OPENCD`（唯一真值来源），退 `env`，皆无 ⇒ 兜底 **3260**（正确默认）；
+      显式 override 再加一个 `QB_HOST_SCAN` 在最前（向后兼容旧双容器时代的键名）。
+    ★ 它**不是凭据**（只是地址），可打印。
+    """
+    return (os.getenv("QB_HOST_SCAN")
+            or getattr(config, "QB_HOST_OPENCD", "")
+            or os.getenv("QB_HOST_OPENCD", "")
+            or "http://127.0.0.1:3260")
+
+
+def _opencd_tracker_host():
+    """★ 识别皇后种要匹配的 **tracker 主机名**（唯一口径）。
+
+    ★ 为什么改用 tracker 而不是 category（用户 2026-10-11 拍板，`#10 / #172`）：
+      生产 3260（皇后源）上 **1433 个种里只有 6 个带 `opencd` 分类**（`category` 口径
+      早已失效，`ERR-ORCH-04`）⇒ scan 每轮「找到 6 个」⇒ 队列虽未被饿死但**口径是错的**，
+      任何新增的皇后种只要不带分类就会**永久漏扫**。
+      ★ 实测三种信号覆盖（3260，2026-10-11）：
+        · `tracker=tracker.open.cd` = **1292**（最全且语义最准 = "这个种来自皇后"）
+        · qB tag `opencd`          = **0**（该实例的 tag 实际叫 `tracker.open.cd`，不是 `opencd`）
+        · `category=opencd`        = **6**（旧口径）
+      ⇒ 选 tracker。
+    ★★ **qB 服务端的 `tracker=` 参数在本版本是**无效**的**（实测：传任何值都返回全部 1433）
+      —— 所以**必须**在 Python 侧按 `torrent.tracker` 过滤，别指望 `torrents_info(tracker=…)`。
+      这条是本次实打实踩出来的（`ERR-QB-09`）：**参数收下了、过滤没发生**，
+      症状是"看起来过滤了，其实一条没滤"，与 `ERR-META-03` 同族（口径与实现漂移且不报错）。
+    ★ 口径单列在这里（别在调用点再写字符串），并给 `OPENCD_TRACKER` 一个 env override
+      以便日后皇后换 tracker 域名时不动代码。默认值 = 实测的 tracker 主机名。
+    """
+    return os.getenv("OPENCD_TRACKER") or getattr(config, "OPENCD_TRACKER", "") \
+        or "tracker.open.cd"
+
+
+def _torrent_is_opencd(torrent, tracker_host):
+    """★ 判一个 qB torrent 是不是皇后种 = 它的 tracker URL 主机名等于 `tracker_host`。
+
+    ★ 取**主机名**而不是子串：`"tracker.open.cd" in url` 会被
+      `evil-tracker.open.cd` 之类的子串误命中（`ERR-META-06`：宽松匹配把"像"当成"是"）。
+      ⇒ 用正则从 `announce.php` 的 URL 里抠出 `host`，再**精确相等**比较。
+    ★ 拿不到 tracker（空/解析不出）⇒ **判否**（不是皇后种）：不可知的**不是**"是"。
+      实测这类空 tracker 的行在 3260 上都**已在库**（115/115），判否**今天一条也漏不掉**;
+      而一旦哪天真的新增了"tracker 丢了"的皇后种，它会显式不出现在列表里（可见），
+      比"当成皇后种发出去"安全（同 `PENDING_PUBLISH_WHERE` 里"不知道 ⇒ 拦"的纪律）。
+    """
+    url = getattr(torrent, "tracker", "") or ""
+    m = re.match(r"\s*https?://([^/:]+)", url)
+    return bool(m) and m.group(1).lower() == (tracker_host or "").lower()
+
+
+class _NoopLockHandle:
+    """无 `fcntl` 平台（本机 Windows）的**空操作锁句柄**。
+
+    ★ 只为让 `_release_scan_lock()` 有一个可 `.close()` 的对象（实测：裸 `object()`
+      会让本机 selftest 在 `finally` 里 `AttributeError`）。它**不提供任何互斥** ——
+      本机从不真扫，所以无所谓；生产走真 `fcntl.flock`。
+    """
+
+    def close(self):
+        pass
+
+
+def _scan_lock_path(data_dir=None):
+    """算 scan 单实例锁文件路径。**纯函数**（可脱库单测），一处口径。
+
+    ★ 放 `DATA_DIR` 下（= 容器内 `/data`，compose 里 bind mount 的那个目录）——
+      与 `data.db` / `daemon_state.json` 同级：**同一份状态目录里的东西，才随容器一起
+      持久/迁移**，也才不会落在镜像里（`ERR-DOCKER-05`）。
+    """
+    d = data_dir if data_dir is not None else getattr(config, "DATA_DIR", ".")
+    return os.path.join(d, "scan.lock")
+
+
+def acquire_scan_lock(lock_path=None, *, _fcntl=None, _open=None):
+    """尝试拿 scan 的**单实例锁**。返回 `(fd, path)`；拿不到返回 `(None, path)`。
+
+    ★★★ 为什么需要它（`ERR-ORCH-03`，2026-10-10 实测踩到）：
+      `run.py`（scan）**没有单实例约束** —— daemon 每 30 分钟按周期跑一次，
+      **人手动 `docker exec … python run.py` 又能再起一个**。两者**并发**时：
+        · 各扫一遍 1377 个种（重复劳动，`create_musopia_torrent` 逐个全量哈希）；
+        · 同时读同一台 NAS 盘上的**同一个 16GB 蓝光原盘** ⇒ 单条从数秒拖到 >7 分钟；
+        · 同时写库 / 同时重写 `output_torrents/` 里**同名**的 `.torrent`/`.json`。
+      实测：一次误操作起了 **3 个** 并发 scan，整轮迟迟跑不完。
+
+    ★ 用 `fcntl.flock(LOCK_EX | LOCK_NB)`（**内核对文件句柄**加锁），而不是"写个 PID 文件
+      再检查存在"——后者有 **TOCTOU 竞态**（两个进程同时"看到没有、然后都去写"），
+      而且**进程被 kill 后 PID 文件会残留**、把下一轮误判成"已在跑"（`ERR-META-01`
+      同族：一个会自己变脏的判据）。`flock` 随进程退出**由内核自动释放**，无残留。
+
+    ★ 拿不到**不抛**、返回 `None` —— 由调用方决定怎么报（这里是"礼貌跳过"，不是错误；
+      见 `main()`）。判据与动作分开：调用方要"跳过并打印"，本函数只答"拿到了没"。
+
+    ★ `_fcntl` / `_open` 两个参数**只**为单测注入（默认走真 `fcntl`/真文件），
+      让本函数在**没有 fcntl 的平台**（如本机 Windows 跑 selftest）也能被判定。
+    """
+    path = lock_path if lock_path is not None else _scan_lock_path()
+    _f = _fcntl
+    if _f is None:
+        try:
+            import fcntl as _f  # noqa: PLC0415  （函数内 import：本机 Windows 无 fcntl）
+        except ImportError:
+            # 没有 fcntl（本机 Windows 跑 selftest）⇒ **不装锁**、恒"拿到"。
+            #   ★ 这不是"静默降级"：生产在 Linux 容器里**一定**有 fcntl，
+            #     而本机跑 selftest 从不真扫（不连 qB）⇒ 无并发可言。
+            #   ★ 返回**专用的无操作句柄**（有 `close()`），不要裸 `object()` ——
+            #     否则 `_release_scan_lock()` 在 `finally` 里 `.close()` 会 AttributeError
+            #     （实测踩到：本机 selftest 直接红）。
+            return (_NoopLockHandle(), path)
+    _op = _open or open
+    try:
+        fd = _op(path, "a+")
+    except OSError:
+        # 打不开锁文件（目录不存在/只读）⇒ **不因为锁而让整轮 scan 失败**
+        #   （锁是护栏、不是前置条件；`ERR-META-14`：护栏失效不许静默，故由调用方打印）。
+        return (None, path)
+    try:
+        _f.flock(fd, _f.LOCK_EX | _f.LOCK_NB)
+    except OSError:
+        try:
+            fd.close()
+        except OSError:
+            pass
+        return (None, path)
+    return (fd, path)
+
+
+def _release_scan_lock(handle):
+    """释放 `acquire_scan_lock()` 拿到的锁（进程退出时内核也会自动放，这里是显式收尾）。"""
+    if handle is None:
+        return
+    try:
+        handle.close()
+    except OSError:
+        pass
+
+
 def main():
     args = parse_args()
 
     config.print_runtime_info()
     db.init_db()
 
-    # ★★ 唯一构造点 `qb_client.build`（`ERR-QB-08`）：优先 API Key，回退账号密码。
-    #   ★ 这里**刻意不加 try/except** —— 老代码也是硬崩（本阶段要 qB 才能干活，
-    #     连不上就该让整条 main 停），`build()` 连不上会抛 ⇒ 契约不变。
+    # ★★★ 单实例锁（`ERR-ORCH-03`）：daemon 的周期 scan 与人手动起的 scan
+    #   **绝不许并发** —— 否则重复扫 1377 个种、同读一个 16GB 原盘、同写同名产物。
+    #   ★ 先锁再干活：拿不到就**礼貌退出（exit 0）**，不是错误（另一个 scan 正在干同一件事）。
+    #   ★ 拿不到时**必须显式打印**（`ERR-META-14`：护栏触发不许静默）。
+    #   ★ 成功路径把 handle 留在进程里（`flock` 随进程退出由内核释放，无需显式 unlock）。
+    _lock_handle, _lock_path = acquire_scan_lock()
+    if _lock_handle is None:
+        print(f"⏭️  已有 scan 在跑（锁 {_lock_path}）⇒ 本轮跳过，不并发。"
+              f"（`ERR-ORCH-03`）")
+        return 0
+
+    try:
+        return _scan_main(args)
+    finally:
+        _release_scan_lock(_lock_handle)
+
+
+def _scan_main(args):
+    # ★★ scan **必须**连皇后源实例（不是发种实例！）—— `config.QB_HOST`（生产 3010）
+    #   是发种实例，**没有** opencd 分类的种子；皇后源是 `QB_HOST_OPENCD`（生产 3260）。
+    #   见 `_scan_source_host()` 与 ERRATA 的 ERR-ORCH-02（本 bug 的根因）。
+    #   ★ 构造仍走**唯一构造点** `qb_client.build`（`ERR-QB-08`）：优先 API Key，回退账号密码。
+    #   ★★ opencd 实例要用**它自己的** API Key（`QB_API_KEY_OPENCD`，与 `QB_API_KEY`=发种实例的
+    #     不是同一把 —— 拿发种实例的 key 打皇后源会 403，同 `_opencd_content_host` 的教训）。
+    #   ★ 用 `types.SimpleNamespace` 造一个**局部** config，**不动**全局 config.QB_HOST
+    #     （那会被发种回加等其它路径读到 ⇒ 会踩坏别处）。
+    import types
     import qb_client
-    qb = qb_client.build(config)
+    scan_host = _scan_source_host()
+    scan_cfg = types.SimpleNamespace(
+        QB_HOST=scan_host,
+        QB_USER=getattr(config, "QB_USER", "admin"),
+        QB_PASS=getattr(config, "QB_PASS", ""),
+        QB_API_KEY=getattr(config, "OPENCD_QB_API_KEY", ""),
+    )
+    print(f"🔗 scan 连皇后源实例：{scan_host}")
+    qb = qb_client.build(scan_cfg)
     print("✅ 已连通 qBittorrent")
 
-    torrents = qb.torrents_info(category=config.OPENCD_CATEGORY)
-    print(f"找到 {len(torrents)} 个分类为 [{config.OPENCD_CATEGORY}] 的种子\n")
+    # ★★ 识别口径 = **tracker 主机名**，不是 category（用户 2026-10-11 拍板，#10/#172）。
+    #   `category` 口径在 3260 上只剩 6/1433（早已失效）；tracker 才 1292（最全、语义最准）。
+    #   ★ **必须在 Python 侧过滤**：qB 服务端的 `tracker=` 参数在本版本**无效**
+    #     （实测传任何值都返回全部）—— 见 `_opencd_tracker_host()` 的 ERR-QB-09。
+    _tracker_host = _opencd_tracker_host()
+    _all = qb.torrents_info()
+    torrents = [t for t in _all if _torrent_is_opencd(t, _tracker_host)]
+    print(f"找到 {len(torrents)} 个 tracker=[{_tracker_host}] 的皇后种"
+          f"（本实例共 {len(_all)} 个）\n")
+    # ★ 阴性哨兵：若过滤后为 0 而实例非空 ⇒ **口径又漂了**（category 那次就是这样静默的）。
+    #   `ERR-META-14`：0 是个必须能被看见的数字，不能只印在滚动日志里。
+    if _all and not torrents:
+        print(f"⚠️  ⚠️  皇后种为 0 但实例有 {len(_all)} 个种 —— 识别口径可能已失效"
+              f"（tracker=[{_tracker_host}] 一个都没匹配上）\n")
 
     if args.limit:
         torrents = torrents[:args.limit]

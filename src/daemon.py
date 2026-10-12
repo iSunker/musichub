@@ -301,6 +301,51 @@ def build_stages():
             #    每 30s tick 去 join 一次别人家的库，代价与收益完全不成比例。
         })
 
+    # 6b) RSS 反查补 tid（`opencd_tid` 为空的行 → 按名字搜 RSS → 逐字节比 hash 回填）。
+    #
+    #    ★★ 2026-10-12 新增（B12）。为什么需要它：`opencd_tid` 目前**只**来自
+    #      `sync_opencd_tid.py`（读 vertex2 外库），**vertex2 没收的种子永远拿不到 tid**
+    #      ⇒ 抓不了页面、发不出或发错。本阶段用皇后 RSS 的 `search=<名字>` 反查：
+    #      每条 item 自带 `<guid>`=真 infohash 与 `<link>`→tid ⇒ 1 请求/条即可回填
+    #      （精确不中再退一步模糊搜，均摊 ≈1.3~1.5 请求/条）。
+    #
+    #    ★ 与 `vtid` 的分工：`vtid` 走**外部库**（零请求，先跑）；本阶段走**站点 RSS**
+    #      （出网、花配额，后跑）⇒ 放 `vtid` 之后，把免费的先用完。
+    #    ★ 写库复用 `sync_opencd_tid.apply_tids()`（**唯一** tid 写口）——
+    #      只填空白、绝不覆盖非空、**不碰 `updated_at`**（纪律 2/3）。
+    #    ★ 命中靠**逐字节比 infohash**（本地比），模糊只是"换个词再搜一次"
+    #      ⇒ 不因模糊而放宽安全性（绝不发错）。
+    #
+    #    ★ 为什么默认关（`ENABLE_RSS_TID` 默认 **False**）：
+    #      它是**会主动出网访问别人站点**的阶段（同 crawl）⇒ 默认关 =
+    #      升级镜像不会改变对外行为，要开必须显式加一行 .env。安全默认。
+    if env_bool("ENABLE_RSS_TID", False):
+        rlimit = env_int("RSS_TID_LIMIT_PER_ROUND", 5)
+        cmd = ["python", "rss_backfill_tid.py", "--limit", str(rlimit)]
+        # ★★ 同 crawl：dry-run 用**专用**变量 `RSS_TID_DRY_RUN`（默认 **True**），
+        #    不复用 `DRY_RUN`。两个理由（照抄 crawl 段）：
+        #    ① `DRY_RUN=false` 会同时打开 publish/edit 的写操作，而"补 tid"与
+        #       "往 Musopia 发种"是两个风险面，必须各自可控；
+        #    ② 极性相反：`DRY_RUN` 默认 false（=写），而本阶段要求默认 true
+        #       （=不写，"部署时先观察"），一个变量不可能有两个默认值。
+        #    ★ `rss_backfill_tid.py` **从一开始就接受 `--dry-run`**（不像 topup 曾漏），
+        #      所以这里传它不会崩。
+        if env_bool("RSS_TID_DRY_RUN", True):
+            cmd.append("--dry-run")
+        else:
+            cmd.append("--apply")
+        stages.append({
+            "name": "rss_tid",
+            "cmd": cmd,
+            # ★ 24h（同 vtid）：它没有"每天变"的东西，一天一次足够；
+            #   真闸是 `OPENCD_MAX_PER_DAY`（配额账本），周期只决定"多久尝试一次"。
+            "interval": env_int("RSS_TID_INTERVAL", 86400),
+            # ★★ **故意不加 `pending` 探针**（同 crawl）：配额用尽时"还有多少行没 tid"
+            #    会连续几小时 > 0 ⇒ 每 cooldown 起一轮 ⇒ 每轮敲一次皇后 RSS ——
+            #    正是 `_wait_seconds()` docstring 警告的"站点被悄悄敲得更勤"。
+            #    幂等性由 `rss_tried.jsonl` 台账 + `raw_html/rss/` 缓存保证。
+        })
+
     # 7) 按 tid 抓皇后详情页（补 `mapped_json` 等页面内容）。
     #
     #    ★★ 2026-09-23 改造：原来这里跑 `crawl.py --from-qb`
@@ -493,6 +538,8 @@ ENV_SNAPSHOT_KEYS = (
     # ★ 2026-09-23 加的 vtid 阶段。**白名单漏加 = 巡检看不见它是开是关**
     #   （见上面的选白名单理由：宁可看得见地缺，不要静默地漏）。
     "ENABLE_VTID",
+    # ★ 2026-10-12 加的 rss_tid 阶段（B12 用 RSS 反查补 tid）。理由同 vtid/crawl。
+    "ENABLE_RSS_TID", "RSS_TID_DRY_RUN", "RSS_TID_INTERVAL", "RSS_TID_LIMIT_PER_ROUND",
     "OPENCD_CRAWL_DRY_RUN", "ALLOW_EMPTY_DB",
     # ★★ 2026-10-06（#34）：免费窗口阶段。进白名单的理由与 crawl 那条完全相同 ——
     #   "看不见的开关 = 会被当成没配"；且本机读不到 NAS 的 `.env`（ERR-ENV-02），
@@ -512,6 +559,10 @@ ENV_SNAPSHOT_KEYS = (
     "ENABLE_HANDOFF", "HANDOFF_DRY_RUN", "HANDOFF_SEEDERS_MIN",
     "HANDOFF_SEED_DAYS", "HANDOFF_THREAD_TICK", "HANDOFF_MAX_PER_ROUND",
     "QB_HOST_OPENCD",
+    # ★★ C 类护栏巡检（#51）：同样必须进白名单 —— 巡检要能回答"护栏现在是开是关、
+    #   是不是只巡不修(dry_run)"。★ 全是普通布尔/整数，**不含任何凭据** ⇒ 无外溢问题。
+    "ENABLE_SEED_PATROL", "SEED_PATROL_DRY_RUN",
+    "SEED_PATROL_THREAD_TICK", "SEED_PATROL_MAX_PER_ROUND",
     # ★★ 2026-09-24 加的自动发布钥匙。**它必须进白名单**，理由与 ENABLE_PUBLISH
     #   完全相同 —— 而恰恰是"判据要用的"：
     #   · 巡检要能回答"**自动发布现在能不能发**"，而不必去读容器日志；
@@ -530,6 +581,11 @@ ENV_SNAPSHOT_KEYS = (
     #     `每日上限 = 86400/PUBLISH_INTERVAL × PUBLISH_MAX_PER_CYCLE` 直接印出来
     #     —— 本轮用户问"现在每天最多发多少条"，那个数字不该靠人算。
     "PUBLISH_MAX_PER_CYCLE", "PUBLISH_MIN_GAP",
+    # ★★ 2026-10-08（#75）：**发种时段门**。进白名单理由与上面几个发布旋钮完全一致
+    #   （"看不见的开关 = 会被当成没配"，ERR-ENV-02）：巡检必须能从快照直接回答
+    #   "现在发文受不受时段限制、窗口是几点到几点"，而不必登 NAS 读 .env。
+    #   ★ 值形如 `"00:30-10:00"`，**不含任何凭据** ⇒ 无外溢问题。
+    "PUBLISH_WINDOW",
     # ══════════════════════════════════════════════════════════════════════
     # ★★★ 2026-09-27 加的：**调度语义**那两个族 —— `RUN_ON_START` + 全部 `*_INTERVAL`。
     #
@@ -554,7 +610,7 @@ ENV_SNAPSHOT_KEYS = (
     # ══════════════════════════════════════════════════════════════════════
     "RUN_ON_START",
     "SCAN_INTERVAL", "PUBLISH_INTERVAL", "SYNC_INTERVAL", "COVERS_INTERVAL",
-    "EDIT_INTERVAL", "VTID_INTERVAL", "CRAWL_INTERVAL",
+    "EDIT_INTERVAL", "VTID_INTERVAL", "RSS_TID_INTERVAL", "CRAWL_INTERVAL",
     # ══════════════════════════════════════════════════════════════════════
     # ★★★ 2026-09-27：**蟹黄堡（第二站）**那三个键。
     #
@@ -693,6 +749,56 @@ def _skip_reason(age, wait):
       写上去就是把"我猜的"当成"我查到的"（`ERR-META-14`）。
     """
     return f"未到期：距上次 {age:.0f}s < 周期 {wait:.0f}s"
+
+
+# ★★ 2026-10-08（全 docker 重构 #75）：**发种时段门** `PUBLISH_WINDOW`。
+#
+# 用户诉求：**每天 0:30–10:00 每半小时发 1 条，白天不发**。
+#   · 「每半小时」= `PUBLISH_INTERVAL=1800` + `PUBLISH_MAX_PER_CYCLE=1`（现成，无需改码）；
+#   · 「限 0:30–10:00」= **本函数**（调度层闸门，窗口外不发）。
+#
+# ★ 设计原则（保守、可观测、默认可关）：
+#   ① **缺省 = 全天**（`PUBLISH_WINDOW` 不设/空 ⇒ 永远"在窗口内"）⇒ **不改现行为**，
+#      部署时没填也不会把发种静默停掉（ERR-ENV-02：缺键默认值必须中性）。
+#   ② **只"减少"发布机会、绝不增加放行** ⇒ 护栏方向安全：窗口外只是**不发**，
+#      闸门与两把钥匙（`--yes`/`--auto` + `PUBLISH_I_AM_HERE`）一概不动。
+#   ③ 窗口外**不碰 `last_run`** ⇒ 窗口一开、且 `now-last ≥ interval`，立刻在下一个
+#      tick（≤SCHED_TICK）发一条 —— 不会因为"干等满一个周期"而漏掉窗口开头的名额。
+#   ④ **支持跨零点**：如 `22:00-06:00`（`start > end` ⇒ 视为跨天）。
+#   ⑤ 格式非法 ⇒ 记一条告警并**按全天**处理（退回安全默认，绝不因配置笔误停摆）。
+def _parse_publish_window(spec):
+    """解析 `"HH:MM-HH:MM"` ⇒ `(start_min, end_min)`（分钟）；无效/空 ⇒ None（=全天）。"""
+    if not spec:
+        return None
+    s = str(spec).strip()
+    if not s:
+        return None
+    try:
+        a, b = s.split("-", 1)
+        sh, sm = a.strip().split(":", 1)
+        eh, em = b.strip().split(":", 1)
+        start = int(sh) * 60 + int(sm)
+        end = int(eh) * 60 + int(em)
+        if not (0 <= start < 1440 and 0 <= end < 1440):
+            raise ValueError("超出 00:00-23:59")
+        return (start, end)
+    except Exception as e:
+        log(f"⚠️  PUBLISH_WINDOW={spec!r} 解析失败（{e}），按『全天』处理")
+        return None
+
+
+def in_publish_window(now=None):
+    """当前是否处于 `PUBLISH_WINDOW` 允许发种的时段内。缺省/非法 ⇒ 永远 True。"""
+    win = _parse_publish_window(os.getenv("PUBLISH_WINDOW"))
+    if win is None:
+        return True
+    start, end = win
+    dt = datetime.fromtimestamp(now if now is not None else time.time())
+    cur = dt.hour * 60 + dt.minute
+    if start <= end:
+        return start <= cur < end
+    # 跨零点：如 22:00-06:00
+    return cur >= start or cur < end
 
 
 def _wait_seconds(stage, st, n_fail, max_backoff, pending_now):
@@ -877,6 +983,50 @@ def _alive_line(state, stages, now):
         else:
             parts.append(f"{name} 未跑过")
     return "[存活] " + " · ".join(parts)
+
+
+# ★★ O-6 漏洞 b（2026-10-10，用户定「仅告警」）：**漏做种账本摘要**。
+#   病：handoff 未就位 ⇒ 拒回加 + `record_missing_data` 入账，但**账本没人消费** ⇒
+#       要么人肉 grep，要么"漏了"永远不被发现（§11 实证：4 条躺了几天）。
+#   解（**只做告警**，不做自动重试——用户定）：daemon 每轮存活行里附一句
+#       `漏做种: N 条（近 M 条: <album>…）` ⇒ 一眼可见、可 grep、可人工补。
+#   ★ 判据：读 `handoff_missing_data.jsonl`（JSONL，追加式）；文件不在/空 ⇒ 不打这句（保持清爽）。
+#   ★ 纯函数、绝不 raise（账本读坏不能带走调度器）。
+MISSING_ALERT_TAIL = env_int("MISSING_ALERT_TAIL", 3)   # 摘要里最多列几条 album
+
+
+def _missing_seed_alert(limit=None):
+    """读漏做种账本，拼一句告警（无账 ⇒ 返回 ""）。★ 纯函数 ⇒ 可单测。"""
+    import json
+    import os as _os
+    limit = MISSING_ALERT_TAIL if limit is None else limit
+    try:
+        path = getattr(handoff, "MISSING_LOG", "")
+    except Exception:                                             # noqa: BLE001
+        try:
+            path = _os.path.join(config.DATA_DIR, "handoff_missing_data.jsonl")
+        except Exception:                                         # noqa: BLE001
+            return ""
+    if not path or not _os.path.isfile(path):
+        return ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            rows = [ln for ln in (s.strip() for s in f) if ln]
+    except OSError:
+        return ""
+    if not rows:
+        return ""
+    albums = []
+    for ln in rows[-limit:]:
+        try:
+            rec = json.loads(ln)
+            name = rec.get("album") or (str(rec.get("infohash") or "")[:12] + "…")
+        except Exception:                                         # noqa: BLE001
+            name = "?"
+        albums.append(str(name)[:28])
+    tail = " · ".join(albums)
+    return f"⚠️ 漏做种: {len(rows)} 条（近 {len(albums)}: {tail}）"
+
 
 
 def _qb_ready_once(host, timeout=3):
@@ -1220,6 +1370,230 @@ def _handoff_thread_loop():
     log("🧵 [handoff] 交棒线程退出")
 
 
+# ==================== ★★ C 类护栏巡检线程（#39/#49/#50/#51，2026-10-08）====================
+#
+# 干什么：周期性（默认 1h）只读巡检每条 `site_publish`(EXISTS) 行 —— **站点页面挂的那条
+#   种子(B) 现在到底有没有在做种**（`site_seed_patrol`）—— 对判定为 **MISSING**（B 丢了）
+#   的行，用 `site_readd` 把 B 加回 3020（走延迟回加队列 `readd_queue`，复用既有的
+#   发种区就位闸门 + 退避重试）。这是 `#39`（眼睛）+ `#49`（执行臂）接进 daemon 的那一步。
+#
+# ★★★ 为什么是**独立线程**（照抄 readd/handoff 的理由）：主循环单线程同步，scan/crawl
+#   一跑就占满一整轮 ⇒ 巡检放主循环里会被长 stage 饿住。独立线程与 stage 时长解耦。
+#
+# ★★★ 默认**不开**（`ENABLE_SEED_PATROL=false`）⇒ 线程函数**第一件事就 return**，
+#   老行为一字不改。要开必须显式在 `.env` 加 `ENABLE_SEED_PATROL=true`（`ERR-ENV-02`）。
+#   ★ 即使开了，**默认也是 dry-run**（`SEED_PATROL_DRY_RUN=true`）：只巡 + 只记日志
+#     "将要加回 X 条"，**不真 add**。要真修必须再显式把 `SEED_PATROL_DRY_RUN=false`。
+#     这是给这套新护栏的**双重显式开关**（防"一开就动生产"）。
+#
+# ★★ 自动化边界（`#50` 诊断定论）：本线程**只做本地加回**（把丢的 B 加回 3020）。
+#   · `MISSING`（B 丢了）⇒ 加回（本线程做的）。
+#   · `AMBIGUOUS`（同 B 命中多条 ⇒ 同位置多客户端/交棒残留）⇒ **只记日志**，不自动删
+#     （删 qB 实例是不可逆操作；且 `#50` 已证 stale peer 来源是我们自己，本地去重属另一事）。
+#   · `PRESENT`（还没校验完）⇒ 等下一轮。
+#   · `NO_SITE_TORRENT`（缺 id / 下载失败 / 壳页）⇒ 不碰（属 `#52` A 组页面纠正，另开）。
+#   ⇒ 本线程**绝不**碰站点（不改页、不删种、不重发）—— 只读巡检 + 本地 qB 加回。
+#
+# ★★ 线程安全：本线程**不写** `readd_queue.json` —— 它把要加回的 B 交给**既有的 readd
+#   线程**（`readd_queue.enqueue` 由 readd 线程独占地 `pop_due`/`ack`；两个线程访问同一
+#   文件是既有设计里 readd 线程为**唯一写者**的部分 ⇒ 本线程只调用 `enqueue`，
+#   而 `enqueue` 是那把"唯一写者"纪律允许的**入队**动作，见 `readd_queue.py`）。
+#   ★ qB 连接：本线程**自己** build（3020 = `HANDOFF_HOST_3020`，3040 = `config.QB_HOST`），
+#     与各 stage、与 readd/handoff 线程的 Client 互不共享（qB WebAPI 无状态 HTTP）。
+#   ★ 站点客户端：本线程**自己**建（`MusopiaClient`/`CrabptClient`），只用来
+#     `download_torrent`（下 B 的字节）；与发布路径的客户端互不共享。
+
+SEED_PATROL_THREAD_TICK = env_int("SEED_PATROL_THREAD_TICK", 3600)   # 1h：慢巡检，不必高频
+SEED_PATROL_MAX_PER_ROUND = env_int("SEED_PATROL_MAX_PER_ROUND", 300)  # 一轮最多巡多少行
+
+
+def _seed_patrol_dry_run():
+    return env_bool("SEED_PATROL_DRY_RUN", True)      # ★ 默认 dry-run（要真修须显式 false）
+
+
+def _seed_patrol_build_clients():
+    """build `(qb_3020, qb_3040, sites, cats)`。任一失败 ⇒ 抛（调用方记日志跳过本轮）。"""
+    import types
+    import db
+    import qb_client
+    from musopia import MusopiaClient
+    from crabpt_site import CrabptClient
+    cfg3020 = types.SimpleNamespace(
+        QB_HOST=HANDOFF_HOST_3020,
+        QB_USER=getattr(config, "QB_USER", "admin"),
+        QB_PASS=config.QB_PASS,
+        # ★★★ 3020 用它**自己的** key（绝不用 config.QB_API_KEY —— 那是 3040 的，见 #129）
+        QB_API_KEY=getattr(config, "OPENCD_QB_API_KEY", ""),
+    )
+    qb_3020 = qb_client.build(cfg3020)
+    qb_3040 = qb_client.build(config)
+    sites = {db.SITE_MUSOPIA: MusopiaClient(), db.SITE_CRABPT: CrabptClient()}
+    cats = {db.SITE_MUSOPIA: getattr(config, "PUBLISH_CATEGORY", None),
+            db.SITE_CRABPT: getattr(config, "CRABPT_PUBLISH_CATEGORY", None)}
+    return qb_3020, qb_3040, sites, cats
+
+
+def _seed_patrol_retry(fn, *, tries=3, delay=2):
+    """小重试（站点请求偶抖）。**绝不 raise**，返回 `(ok, val)`。"""
+    last = None
+    for _ in range(tries):
+        try:
+            return True, fn()
+        except Exception as e:                                      # noqa: BLE001
+            last = e
+            time.sleep(delay)
+    return False, last
+
+
+def _drain_seed_patrol():
+    """推进一轮 C 类护栏巡检（只读照 + 对 MISSING 入队加回）。**绝不 raise**。
+
+    ★ 这是 `#39`（`site_seed_patrol`）+ `#49`（`site_readd`）接进 daemon 的**唯一入口**；
+      与 `tools/check_site_seeding.py` / `tools/readd_missing_from_patrol.py` **同一份库
+      逻辑**（`ERR-META-03`：别各写一份判据）。
+    ★ 加回**不直接 add**，而是 `readd_queue.enqueue`（带 `.torrent` 字节）⇒ 交给既有
+      readd 线程，复用其"发种区就位闸门"（`_readd_area_ready`）+ 退避重试（`#136` 纪律）。
+    """
+    import db
+    try:
+        import site_seed_patrol as ssp
+        import site_readd as sr
+        import readd_queue
+    except Exception as e:                                          # noqa: BLE001
+        log(f"⚠️  [patrol] 无法 import 巡检/加回库，跳过本轮: {e}")
+        return
+
+    try:
+        qb_3020, qb_3040, sites, cats = _seed_patrol_build_clients()
+    except Exception as e:                                          # noqa: BLE001
+        log(f"⚠️  [patrol] build 客户端失败，跳过本轮: {type(e).__name__}: {e}")
+        return
+
+    try:
+        conn = db.connect()
+    except Exception as e:                                          # noqa: BLE001
+        log(f"⚠️  [patrol] 连库失败，跳过本轮: {type(e).__name__}: {e}")
+        return
+    try:
+        rows = ssp.iter_exists_rows(conn)
+    except Exception as e:                                          # noqa: BLE001
+        log(f"⚠️  [patrol] 取待巡行失败: {type(e).__name__}: {e}")
+        return
+    finally:
+        conn.close()
+
+    rows = rows[:SEED_PATROL_MAX_PER_ROUND]
+    dry = _seed_patrol_dry_run()
+
+    # 3020 WebUI 有间歇 SSL 抖动（#43 实测）⇒ 用带重试的取数器，否则一次抖动会把
+    # 整行误判成 NO_SITE_TORRENT（看着像"没 B"，其实是"连不上"）。见 patrol_row 注释。
+    def _lister(qb):
+        ok, val = _seed_patrol_retry(lambda: qb.torrents_info(), tries=5, delay=3)
+        if not ok:
+            raise RuntimeError(f"取 qB 全表失败: {val}")
+        return val
+
+    from collections import Counter
+    verdicts = Counter()
+    missing = []
+    ambiguous = []                                    # ★ #50：同 B 多处持有 ⇒ 本地去重候选
+    for row in rows:
+        cli = sites.get(row.get("site"))
+        if cli is None:
+            continue
+        ok, raw = _seed_patrol_retry(lambda: cli.download_torrent(row.get("torrent_id")),
+                                     tries=3, delay=2)
+        raw = raw if ok else None
+        try:
+            r = ssp.patrol_row(row, download=lambda _t, _r=raw: _r,
+                               qb_3020=qb_3020, qb_3040=qb_3040,
+                               own_categories=set(c for c in cats.values() if c),
+                               qb_list=_lister)
+        except RuntimeError as e:
+            # ★ qB 连不上 = 环境问题，**不是**"这条种丢了" ⇒ 本轮整体不可信，跳过本轮
+            log(f"⚠️  [patrol] 巡检中 qB 连接失败，本轮作废（不写任何队列）: {e}")
+            return
+        verdicts[r["verdict"]] += 1
+        if r["verdict"] == ssp.MISSING:
+            r["_raw"] = raw            # 带上 B 的字节（加回要用）
+            missing.append(r)
+        elif r["verdict"] == ssp.AMBIGUOUS:
+            r["_raw"] = raw
+            ambiguous.append(r)
+
+    _order = [ssp.SEEDING, ssp.PRESENT, ssp.MISSING, ssp.AMBIGUOUS, ssp.NO_SITE_TORRENT]
+    summ = "  ".join(f"{k}={verdicts[k]}" for k in _order if verdicts.get(k))
+    log(f"🩺 [patrol] 巡 {len(rows)} 行: {summ}  dry_run={dry}")
+
+    # ★ (#50 边界) AMBIGUOUS = 同一 B 在**多个** qB 实例里都持有 ⇒ 站点会回
+    #   `same-location`（同账号同种只许 1 个做种者，`ERR-PUBLISH-14`）。
+    #   ★ 本机**只做本地去重**：保留 3020（长期保种盘）、删 **3040** 的那条重复
+    #     （`delete_files=False` —— 只摘任务，不动盘上文件）。**不碰站点**（无踢 peer 权限）。
+    #   ★ 默认 dry-run ⇒ 只记日志；要真删须 `SEED_PATROL_DRY_RUN=false`。
+    for r in ambiguous:
+        note = (f"{r['site']} id={r['torrent_id']} B={str(r.get('b_ih'))[:12]}… "
+                f"found_in={r.get('found_in')}")
+        dup_3040 = any(w == "3040" for w in (r.get("found_in") or []))
+        if dry:
+            log(f"  · [patrol][dry-run] AMBIGUOUS（same-location 隐患）{note}"
+                + ("  ⇒ 将删 3040 重复实例（仅去重、不删文件）" if dup_3040 else ""))
+            continue
+        if not dup_3040:
+            # 3020 内部重复（同一 qB 两条同 hash，qB 一般不允许）⇒ 只能记，无法选删
+            log(f"  ⚠️ [patrol] AMBIGUOUS 但不在 3040 ⇒ 只记录（本地无从下手）{note}")
+            continue
+        try:
+            qb_3040.torrents_delete(delete_files=False, torrent_hashes=str(r.get("b_ih")))
+            log(f"  🧹 [patrol] 已删 3040 重复实例（去重，不删文件）{note}")
+        except Exception as e:                                      # noqa: BLE001
+            log(f"  ⚠️ [patrol] 删 3040 重复失败 {note}: {type(e).__name__}: {e}")
+
+    if not missing:
+        return
+
+    # ★ 加回：dry ⇒ 只记日志（不 enqueue）；否则 enqueue 交给 readd 线程
+    #   ★★ 为什么走 `readd_queue` 而不是直接 `torrents_add`：复用既有 readd 线程的
+    #     "发种区数据就位闸门"（`_readd_area_ready`，`#136`/`#134` 教训）+ 指数退避重试。
+    #   ★ 注意 `enqueue(torrent_bytes, save_path, category, delay_min, ...)` 的位置参数：
+    #     B 与 A 同盘同目录 ⇒ save_path 恒为 `/downloads`（`ERR-PUBLISH-13`：给专辑目录会错一层）。
+    enq = 0
+    for r in missing:
+        note = f"{r['site']} id={r['torrent_id']} B={str(r.get('b_ih'))[:12]}…"
+        if dry:
+            log(f"  · [patrol][dry-run] 将加回 {note}  {r.get('info_name')!r}")
+            continue
+        cat = cats.get(r["site"]) or ""
+        try:
+            readd_queue.enqueue(r["_raw"], "/downloads", cat, 1,
+                                note=f"patrol 加回 {r['site']} id={r['torrent_id']}",
+                                album=r.get("info_name") or "")
+            enq += 1
+        except Exception as e:                                      # noqa: BLE001
+            log(f"  ⚠️ [patrol] 入队失败 {note}: {type(e).__name__}: {e}")
+    if not dry:
+        log(f"  ↪ [patrol] 已把 {enq}/{len(missing)} 条 MISSING 入队（readd 线程将加回 3020）")
+    _ = sr  # （`sr` 仅作 import 存在性护栏：加回逻辑复用 readd_queue，不在此直接 add）
+
+def _seed_patrol_thread_loop():
+    """独立线程：每 `SEED_PATROL_THREAD_TICK` 秒巡一次 C 类护栏。**绝不退出到线程外**。"""
+    if os.getenv("ENABLE_SEED_PATROL", "false").strip().lower() not in ("1", "true", "yes", "y", "on"):
+        log("🧵 [patrol] ENABLE_SEED_PATROL 未开 ⇒ 巡检线程不起（C 类护栏不接管）")
+        return
+    log(f"🧵 [patrol] C 类护栏巡检线程启动（每 {SEED_PATROL_THREAD_TICK}s 巡一次；"
+        f"dry_run={_seed_patrol_dry_run()}）")
+    while not _shutdown:
+        try:
+            _drain_seed_patrol()
+        except Exception as e:                                      # noqa: BLE001
+            # 双保险：`_drain_seed_patrol` 本身已"绝不 raise"。
+            log(f"⚠️  [patrol] 线程本轮异常（吞掉，继续）: {type(e).__name__}: {e}")
+        slept = 0.0
+        while slept < SEED_PATROL_THREAD_TICK and not _shutdown:
+            time.sleep(min(1.0, SEED_PATROL_THREAD_TICK - slept))
+            slept += 1.0
+    log("🧵 [patrol] C 类护栏巡检线程退出")
+
+
 def main():
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
@@ -1295,6 +1669,12 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
     #     所以"起了个空线程"没有副作用，且"开没开"在日志里一眼可辨。
     threading.Thread(target=_handoff_thread_loop, name="handoff", daemon=True).start()
 
+    # ★★★ 启动 **C 类护栏巡检独立线程**（#39/#49/#50 接进 daemon，2026-10-08 #51）——
+    #   同样必须在主循环之前起。★ 默认 `ENABLE_SEED_PATROL=false` ⇒ 线程函数**第一件事
+    #   就 return**（日志说明），所以"起了个空线程"没有副作用，且"开没开"一眼可辨。
+    #   ★ 即使开了也默认 `SEED_PATROL_DRY_RUN=true`（只巡 + 只记日志，不真动 qB）。
+    threading.Thread(target=_seed_patrol_thread_loop, name="patrol", daemon=True).start()
+
     while not _shutdown:
         beat()
         now = time.time()
@@ -1324,6 +1704,16 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
             name = stage["name"]
             st = state.setdefault(name, {"last_run": 0})
             last = st.get("last_run", 0) or 0
+
+            # ★★ 2026-10-08（#75）：**发种时段门**。只对两个"对外写站点"的发布阶段生效。
+            #   ★ 窗口外**不碰 `last_run`**（见 `in_publish_window` 上方注释③）⇒
+            #     窗口一开立刻补发，而不是干等一个完整周期。
+            #   ★ 只影响 publish / publish_crabpt；scan/crawl/edit/... 一概不受影响。
+            if name in ("publish", "publish_crabpt") and not in_publish_window(now):
+                st["last_skip_at"] = datetime.now().isoformat(timespec="seconds")
+                st["skip_reason"] = f"窗口外：PUBLISH_WINDOW={os.getenv('PUBLISH_WINDOW')}"
+                skipped = True
+                continue
 
             # 连续失败退避：1x, 2x, 4x... 上限 MAX_BACKOFF
             n_fail = fails.get(name, 0)
@@ -1414,6 +1804,10 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
         #     又不会像原先那条 readd 重试那样把日志刷屏。见 `_alive_line` 的注释。
         if now - last_alive_log >= ALIVE_LOG_EVERY:
             log(_alive_line(state, stages, now))
+            # ★ O-6 漏洞 b（2026-10-10，仅告警）：有漏做种就**紧跟一行**告警（无则不打）。
+            _alert = _missing_seed_alert()
+            if _alert:
+                log(_alert + "  ← 见 data/handoff_missing_data.jsonl（人工补做种）")
             last_alive_log = now
 
         # ★ 延迟回加队列排空已移到本轮**开头**（见 `skipped = False` 之后那段注释）：

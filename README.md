@@ -346,6 +346,28 @@ daemon 的 edit 阶段带 `--stale-only`，只处理
 
 ---
 
+## 发布前跨站查重（乌托邦 / 蟹黄堡，默认开）
+
+发种**之前**先在目标站点搜一遍，比对**站侧 `.torrent` 的 `info.name`** 与**本地 `.torrent`
+的 `info.name`**（归一化后**精确相等**）。相等 ⇒ 站点已有同版本 ⇒ **不再重复提交**，
+改为把本地行**关联**到已有站点页（乌托邦写 `site_status=EXISTS` + `site_publish` tid；
+蟹黄堡只写 `site_publish`）。开关：`config.DEDUP_BEFORE_PUBLISH`（默认**开**，`false` 回旧行为）。
+
+- ★ 判据**绝不用标题**（带发布者/编曲/分轨口径等可变前缀）——用两端 `.torrent` 的
+  `info.name`（`site_verify.extract_info_name`）。
+- ★★ **召回按"精准优先"排序 + 命中即停**（`musopia.SEARCH_QUERY_PLAN` +
+  `search_and_compare`）：**多 token 窗口在前、单 token 在后**——因为真站上
+  **单 token 是"宽"的**（`Etre` 单独查 109 条），多 token 窗口才"窄"（`Etre 2001 03` 18 条）。
+  宽查询排前会以噪声**吃光候选预算**、把真目标挤出 ⇒ 漏召回（详见 `ERRATA.md` 的
+  `ERR-PUBLISH-18`）。命中即停 ⇒ 宽查询在精确命中时**根本不发**（省配额）。
+- ★ **搜索本身失败**（HTTP≠200 / 退回登录页）⇒ **停轮 + 非 0**（触发 daemon 退避），
+  **绝不**降级成"没重复"照发。
+- ★ 相关旋钮：`DEDUP_MAX_SEARCH_QUERIES`（每条专辑最多发几条子查询，默认 5）；
+  候选验证全局上限 `DEDUP_MAX_CANDIDATES`（默认 16，**安全阀**、非召回杠杆——别靠调大它救召回）。
+- ★ 判据：`publish.py --selftest`（结构 + 运行时 + 阴性对照）；`run.py --selftest` ⑨s（结构护栏）。
+
+
+
 ## 封面绝不重复上传，丢了会自动找回（三层防护）
 
 1. `run.py` 对已发布（`site_status='EXISTS'`）的任务直接跳过，不再因本地 `.torrent`
@@ -355,6 +377,22 @@ daemon 的 edit 阶段带 `--stale-only`，只处理
 3. `update_metadata.py` 发现本地 `cover_url` 为空时，先读站点表单从现有简介里
    把封面 URL **抠回来**（回写本地库修复历史数据），再渲染新简介提交 ——
    避免用空封面渲染 descr 把站点上仅剩的封面也抹掉。
+
+### 传前压图（蟹黄堡 Lsky 图床有体积上限）
+
+Lsky（`img.crabpt.vip`）对单图有体积上限，**超限会整条拒收**。若把这种「必然失败」
+当成「本条暂时不可用 ⇒ 跳过重试」，会与「整条发布队列按最老优先、确定性排序」叠成
+**永久卡死**（队首那条每轮都撞同一堵墙）—— 这正是「蟹黄堡连续数日零出种」的真凶，
+详见 `ERRATA.md` 的 `ERR-PUBLISH-16`。两道防护：
+
+- **传前压图**：`assets.py::upload_to_lsky` 上传前调 `_shrink_for_lsky` —— 不超限**原样传**
+  （零开销、不重编码）；超限则用 Pillow 按最长边缩放 + 逐级降 quality 压到上限之下，
+  写**独立后缀**文件（`.lsky.jpg`，**绝不覆盖原图** —— 原图是乌托邦那份的来源）。
+  压不下去才判本条封面不可用。上限由 `LSKY_MAX_BYTES` 控制（**默认 5 MiB**，可 `.env` 覆盖）；
+  ★ 这个键是**上传目标**，与 pick 阶段的 `MAX_COVER_BYTES`（15 MiB，管「太离谱的先跳过」）**不是一回事**。
+- **发布循环「跳过即枚举下一条」**：`--limit` / `CRABPT_MAX_PER_CYCLE` 现在是**成功计数**上限，
+  **不再**预先截断候选。某条封面不可用 ⇒ **当场跳过、继续试下一条**（把名额让给能发的），
+  坏封面那条**留队首、不标 FAILED**（换图/压图后自然能发）。
 
 ---
 
@@ -379,6 +417,44 @@ crawl（扫 qB 反查皇后、抓详情页入库）★ 默认关（ENABLE_CRAWL=
 ★ `crawl` 与上面五个是**两条独立流水线**（只共用 `tasks` 表、不互为前置），
 放最后只是因为它是新增的、最可能被关掉的那个 —— **与依赖无关**。
 它**只入库、不会产生新发布**（闸门①未打通，理由见下面「OpenCD 转载流水线」）。
+
+### ★★ scan 读的 qB 实例 ≠ 发种回加的实例（两个真值来源，别合并）
+
+本项目在 NAS 上用了**多个** qB 实例，其中**两个**与流水线相关，且**必须分开配置**：
+
+| 阶段 | 读哪个实例 | `.env` 键 | 生产值 |
+|---|---|---|---|
+| **scan**（扫皇后的 `opencd` 分类） | **皇后源**（原种/数据所在） | `QB_HOST_OPENCD` | `3260`（qbit-music3，**1376 个 opencd**） |
+| **发种回加**（`readd_to_qb*`） | **发种实例** | `QB_HOST` | `3010`（qbit-publish） |
+
+★ 为什么非要两个键：**一个变量若有"该指向不同东西"的两个消费者，就必须有两个真值来源**
+（`ERRATA.md` 的 `ERR-ORCH-02`）。曾经 `QB_HOST` 一个变量被 scan 与回加**共用**，
+2026-10-08 为发种把 `QB_HOST` 改到 3010 时，**scan 被一起带偏** ⇒ 去 3010（0 个 opencd）
+找皇后种子 ⇒ 每轮「找到 0 个分类为 [opencd] 的种子」⇒ **队列只出不进、见底** ⇒ 站点"不发种了"，
+**全程不报错**（0 行是合法空集，看着像"这轮没新种"）。
+
+★ 判据：`run.py --selftest` 的 ⑨p（走 AST）钉住 scan **不**读 `config.QB_HOST`、且
+`_scan_source_host()` 的 `QB_HOST_OPENCD` 优先于裸 `QB_HOST`（两条阴性对照）。
+★ 若某轮 scan 日志出现「找到 **0** 个分类为 [opencd] 的种子」而**不是** 0 时，
+第一顺位怀疑**连错了实例**（而不是"真没新种"）。
+
+### ★ scan 是**单实例**的（不许并发）
+
+`run.py` 一轮 scan 会**逐个**对种子内容目录做全量哈希（`create_musopia_torrent`），
+遇到巨型原种（如带蓝光 `BDMV/` 的整盘）**单条**就可能要很久 ⇒ 整轮很慢。因此 scan
+**有单实例锁**：锁文件 `DATA_DIR/scan.lock`（`fcntl.flock`，进程退出自动释放）。
+
+- **daemon 每 30 分钟**会自动拉起一轮 scan；**你也可以**手动跑：
+  ```bash
+  docker exec -w /app opencd2musopia python3 run.py
+  ```
+- 若**已有**一个 scan 在跑，新起的那个会打印
+  `⏭️ 已有 scan 在跑（锁 …）⇒ 本轮跳过，不并发。` 并**立刻退出（exit 0）**——
+  这是**正常**，不是错误（另一个 scan 正在干同一件事）。
+- ★ **绝不要**为了"快一点"而并发起两个 scan：两者会重复扫同一批、**同时读同一个巨型目录**
+  （令单条从数秒拖到十几分钟）、并发重写 `output_torrents/` 里的同名产物。
+  详见 `ERRATA.md` 的 `ERR-ORCH-03`。
+- ★ 判据：`run.py --selftest` 的 ⑨q（含阴性对照：已持锁时第二个 acquire 必须失败）。
 
 ### 部署
 
@@ -782,7 +858,8 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 ```
 
 `network_mode: host` 下容器直接共享宿主机网络栈，所以 qB 用宿主机自己的地址
-（`QB_HOST=http://127.0.0.1:3020`）—— host 网络里没有 `host.docker.internal` 这条 DNS 记录。
+（发种实例 `QB_HOST=http://127.0.0.1:3010`、皇后源 `QB_HOST_OPENCD=http://127.0.0.1:3260`）
+—— host 网络里没有 `host.docker.internal` 这条 DNS 记录。
 
 ---
 
@@ -806,7 +883,10 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 | 改了代码但行为没变 | 忘了本机构建/推送，或 NAS 没 `pull`。本机 `bash build-push.sh` → NAS `docker compose pull && up -d`（`restart` 跑的还是旧镜像） |
 | **站点打回「請更正曲目列表，使其易於閱讀」** | 源 CUE 被**西欧单页码页**写坏（非 ASCII 字符整体变成 `.`），或码页不在 `LOG_ENCODINGS` 里、被兜底解成**私用区乱码**。先看本地 `tracklist` 是不是整片点号/乱码。`read_tracklist()` 已按**每份 CUE** 判退化并回退到音频文件名（见「曲目列表兜底」）|
 | **多碟页面出现两个同名 `CDx` 折叠块** | 有张碟的目录名不符合 `CD/DISC/DISK+数字`，补号与已有碟号撞了。已修（补号避开已占用编号），见上文「多碟日志的存储」 |
+| **手动跑 scan 没反应 / 日志说「已有 scan 在跑」** | 单实例锁生效了（`ERR-ORCH-03`）：daemon 的周期 scan 正在跑，或你已起过一个。**正常**，等它跑完即可（看 `docker logs -f opencd2musopia` 里的 `🎯 扫描完成`）。**别**再去起第二个 |
+| **scan 卡在某个种子很久（十几分钟）** | 该种子的内容目录是**巨型原种**（如带蓝光 `BDMV/` 的整盘、几 GB~十几 GB），`create_musopia_torrent` 要对整目录全量哈希 ⇒ **慢，不是死**（看日志行数是否还在涨）。★ 若同时有**两个** scan 在跑会更慢 ⇒ 先确认只有一个（见上一行） |
 | `database is locked` | 有别的进程在并发写库。检查是否有孤儿容器（`docker ps`），见「清理孤儿容器」 |
+| **scan 每轮「找到 0 个分类为 [opencd] 的种子」、队列见底、站点不发种** | scan **连错了 qB 实例**（连了发种实例 `QB_HOST`=3010，那里 **0 个 opencd**）。scan 应连**皇后源** `QB_HOST_OPENCD`=3260（**1376 个 opencd**）。见上文「scan 读的 qB 实例 ≠ 发种回加的实例」与 `ERRATA.md` 的 `ERR-ORCH-02`。★ 0 行是合法空集、**不报错**，所以"看着像没新种"，实为配置错 |
 | `docker logs` 报 requires exactly 1 argument | 后面要跟容器名：`docker logs -f opencd2musopia` |
 
 ---

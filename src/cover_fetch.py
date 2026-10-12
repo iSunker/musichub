@@ -171,7 +171,15 @@ def download(url, *, client=None, dest_dir=None, logger=None):
     external = is_external(u)
     try:
         if external:
-            r = requests.get(u, timeout=DOWNLOAD_TIMEOUT, headers={"User-Agent": "Mozilla/5.0"})
+            # ★★ 2026-10-11（#15）：外站图走**可选代理**（`COVER_PROXY`）——
+            #   外站（pixhost 等）对本 NAS 出口 IP 间歇 reset；NAS 上有可用代理。
+            #   `proxies_for()` 没配代理时返回 `None` ⇒ **直连**（行为零变化）。
+            import net
+            _proxies = net.proxies_for(u)
+            if _proxies:
+                say(f"      🔀 经代理下载：{_proxies.get('https') or _proxies.get('http')}")
+            r = requests.get(u, timeout=DOWNLOAD_TIMEOUT, proxies=_proxies,
+                             headers={"User-Agent": "Mozilla/5.0"})
         else:
             if client is None:
                 say("      ⚠️ 站内图需要 client（拿 RateGate 用），但没有 ⇒ 跳过")
@@ -387,6 +395,42 @@ def _check():
     chk("第一次下载成功", bool(first))
     chk("★ 第二次**不增加** client 调用", len(c.calls) == n1, f"{n1} → {len(c.calls)}")
     chk("两次拿到同一个文件", first == second)
+
+    print("\n⑤b ★ #15 外站图走可选代理（COVER_PROXY）：默认直连、配了才走")
+    # ★ 用**假 requests** 替掉 `requests.get`，既不出网，又能断言"传了什么 proxies"。
+    import net as _net
+    _saved_get = requests.get
+    _seen = {}
+
+    def _fake_get(url, **kw):
+        _seen["url"] = url
+        _seen["proxies"] = kw.get("proxies")
+        return _FakeResp(JPEG_BYTES)
+
+    try:
+        requests.get = _fake_get
+        # (a) 没配代理（默认）⇒ proxies 必须是 None（直连，行为零变化）
+        _net.COVER_PROXY = ""
+        _seen.clear()
+        download("https://img2.pixhost.to/1/cover.jpg", dest_dir=cache, logger=lambda m: None)
+        chk("★ 未配代理 ⇒ proxies=None（直连）", _seen.get("proxies") is None,
+            f"{_seen.get('proxies')!r}")
+        # (b) 配了代理 ⇒ proxies 必须是补好 scheme 的 dict（阴性对照：证明(a)不是空真）
+        _net.COVER_PROXY = "192.168.0.7:7894"
+        _seen.clear()
+        download("https://img2.pixhost.to/2/cover.jpg", dest_dir=cache, logger=lambda m: None)
+        got = _seen.get("proxies")
+        chk("★ 配代理 ⇒ proxies={'http'/'https': http://192.168.0.7:7894}",
+            got == {"http": "http://192.168.0.7:7894",
+                    "https": "http://192.168.0.7:7894"}, f"{got!r}")
+        # (c) 站内附件**不**走代理参数（它走 client，不经 requests.get）—— 阴性对照另一半
+        _seen.clear()
+        c3 = _FakeClient()
+        download("attachments/a/station2.jpg", client=c3, dest_dir=cache)
+        chk("★ 站内附件不经 requests.get（proxies 未被用到）", _seen == {}, f"{_seen}")
+    finally:
+        requests.get = _saved_get
+        _net.COVER_PROXY = ""
 
     print("\n⑥ pick_candidates：本地最优先")
     info = {"cover_candidates": [("cover.jpg", "attachments/a/p.jpg")]}

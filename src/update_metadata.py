@@ -22,6 +22,7 @@
     python update_metadata.py --apply --verify     # 提交后回读详情页校验
 """
 import argparse
+import os
 import sys
 import time
 
@@ -30,6 +31,14 @@ import config
 import db
 import descr
 from musopia import LoginExpired, MusopiaClient, SiteError
+
+# ★ 名字规范化**复用** `site_verify.normalize_name`（唯一实现，`ERR-META-03`）：
+#   两处各写一份折空白/NFC 的逻辑，迟早会漂，而这里漂的后果是"版本不符"报错/漏报。
+try:
+    from site_verify import normalize_name as _norm_name
+except Exception:                                    # noqa: BLE001 —— 兼容旧镜像
+    def _norm_name(s):                               # 兜底：只去首尾空白
+        return (s or "").strip()
 
 
 def parse_args():
@@ -90,6 +99,10 @@ def parse_args():
                     help="限速：每分钟处理多少个种子（例如 10）。0 = 不限速。"
                          "按「种子」计，比 --interval 按「请求」计更贴合实际需求，"
                          "因为一个种子要发 2~3 个请求（读表单/提交/校验）")
+    ap.add_argument("--selftest", action="store_true",
+                    help="跑本文件的自检（#173 编辑身份护栏：判据 + 接线），然后退出")
+    ap.add_argument("--json", action="store_true",
+                    help="自检结果以 JSON 打到末行（给 tools/gen_counts.py 读）")
     return ap.parse_args()
 
 
@@ -109,8 +122,84 @@ def describe(task):
             f" | 日志 {len(task.get('log_content') or '')} 字符")
 
 
+def selftest(verbose=True):
+    """#173 编辑身份护栏的自检：判据（含阴性对照）+ **接线**（`ERR-META-01`）。
+
+    ★ 独立失效模式：护栏**写了但没接**（判据在 `site_verify` 里，`main()` 却不调它）
+      ⇒ 仍是"假安全"。故分两半：
+        ① 纯判据 `site_verify.edit_target_ok`（含阴性对照：名字不符必须拒）；
+        ② 结构：`main()` 里必须在 `edit_torrent(` **之前**出现 `edit_target_ok(`。
+    ★ 零网络、零库、零 .env（只用纯函数 + 读本文件源码）。
+    """
+    import ast
+    import site_verify as sv
+
+    fails = []
+    detail = []
+
+    def chk(label, cond):
+        if cond:
+            detail.append(f"  ✅ {label}")
+        else:
+            fails.append(f"❌ {label}")
+
+    # ① 判据（含阴性对照）
+    ok, _ = sv.edit_target_ok("Album X", "Album X")
+    chk("同名 ⇒ 放行", ok is True)
+    ok, why = sv.edit_target_ok("Album X", "CTRL.2024.1080p.NF.WEB-DL")
+    chk("站侧是**别人的页**（名字不符）⇒ 拒改", ok is False)
+    ok, _ = sv.edit_target_ok("Album X", None)
+    chk("站侧取不到名 ⇒ 拒改（不可知≠是我的）", ok is False)
+    ok, _ = sv.edit_target_ok("", "Album X")
+    chk("本地名为空 ⇒ 拒改", ok is False)
+    # 空白折叠加阴性对照（复用 normalize_name 口径）
+    ok, _ = sv.edit_target_ok("Album  X", "Album X")
+    chk("仅空白差异 ⇒ 放行（归一化后相等）", ok is True)
+
+    # ② 接线（结构性，AST —— 不看文本，免得注释里的标识符骗过判据）
+    src = open(__file__, encoding="utf-8").read()
+    tree = ast.parse(src)
+    main_fn = next((n for n in ast.walk(tree)
+                    if isinstance(n, ast.FunctionDef) and n.name == "main"), None)
+    if main_fn is None:
+        fails.append("❌ 找不到 main() ⇒ 判据没测到东西（ERR-META-14）")
+    else:
+        call_lines = {}
+        for n in ast.walk(main_fn):
+            if isinstance(n, ast.Call):
+                fn = n.func
+                name = getattr(fn, "attr", None) or getattr(fn, "id", None)
+                if name in ("edit_target_ok", "edit_torrent"):
+                    call_lines.setdefault(name, []).append(n.lineno)
+        chk("main() 调用 edit_target_ok（护栏接线）", bool(call_lines.get("edit_target_ok")))
+        chk("main() 调用 edit_torrent（被测动作仍在）", bool(call_lines.get("edit_torrent")))
+        if call_lines.get("edit_target_ok") and call_lines.get("edit_torrent"):
+            chk("护栏在 edit_torrent **之前**（行号）",
+                min(call_lines["edit_target_ok"]) < min(call_lines["edit_torrent"]))
+
+    if verbose:
+        print(f"{'✅' if not fails else '❌'} update_metadata 自检（#173 编辑身份护栏）")
+        for d in detail:
+            print(d)
+        for f in fails:
+            print(f)
+    return (not fails), (fails or detail)
+
+
 def main():
     args = parse_args()
+
+    if args.selftest:
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:                            # noqa: BLE001 —— 老 Python/无此属性
+            pass
+        ok, _info = selftest(verbose=not args.json)
+        if args.json:
+            import json as _json
+            print(_json.dumps({"script": "update_metadata.py --selftest", "ok": bool(ok),
+                               "total": 8, "exit": 0 if ok else 1}, ensure_ascii=False))
+        sys.exit(0 if ok else 1)
 
     config.print_runtime_info()
     db.init_db()
@@ -208,8 +297,9 @@ def main():
     except SiteError as e:
         sys.exit(f"❌ {e}")
 
-    ok = failed = skipped = 0
+    ok = failed = skipped = warnings = refused = 0
     failures = []
+    refused_rows = []
 
     # --rate 10 → 每个种子至少占 6 秒。注意这是「每分钟几个种子」，
     # 而 --interval 是「每次 HTTP 请求的间隔」：一个种子要发 2~3 个请求
@@ -234,6 +324,37 @@ def main():
         tid = task.get("site_torrent_id")
         title = task.get("formatted_title") or task.get("torrent_name")
         print(f"[{i}/{len(tasks)}] id={tid} {title}")
+
+        # ★★★ `#173` 编辑护栏（**在动站点之前**）：核"这个 tid 真是我的页吗"。
+        #   ★ 为什么必须有：`site_torrent_id` 可能是**错值**（#173 实测 21 条 crabpt
+        #     行指向**别人的**电影/音乐页）⇒ 若照改，会把本地音乐任务的元数据
+        #     **写进别人的页**（不可逆）。判据 = 站侧 `.torrent` 的 `info.name`
+        #     == 本地 `.torrent` 的 `info.name`（`site_verify.edit_target_ok`）。
+        #   ★ 拿不到站侧名 / 本地名为空 ⇒ 拒改（"不可知"不是"是我的"，`ERR-PUBLISH-14`）。
+        #   ★ 放在**最前**（读表单/回收封面之前）：拒改是本地判据，不该先敲站点。
+        #   ★ dry-run 也要拦：dry-run 打印的"将要改什么"若基于错页就是误导。
+        _local_name = ""
+        try:
+            _tf = task.get("torrent_file") or ""
+            if _tf and os.path.exists(_tf):
+                import site_verify as _sv
+                _local_name, _ = _sv.extract_info_name(open(_tf, "rb").read())
+        except Exception:                                # noqa: BLE001 —— 取不到名 ⇒ 交由护栏拒改
+            _local_name = ""
+        try:
+            _tb = client.download_torrent(tid)
+            _hosted_name, _ = (_sv.extract_info_name(_tb) if _tb else (None, ""))
+        except SiteError as e:
+            print(f"    ❌ 取站侧 .torrent 失败 ⇒ 拒改：{e}")
+            refused += 1
+            refused_rows.append((tid, str(e)))
+            continue
+        _ok, _why = _sv.edit_target_ok(_local_name, _hosted_name)
+        if not _ok:
+            print(f"    🛑 拒改（#173 护栏）：{_why}")
+            refused += 1
+            refused_rows.append((tid, _why))
+            continue
 
         # 本地封面为空（历史 bug：run.py 重做任务时重复上传封面，图床报
         # Duplicated upload 400，空值写回把 URL 抹掉了）——先读站点表单，
@@ -326,6 +447,20 @@ def main():
                             flag = "ℹ️ 本地无封面（backfill_covers 补齐后会自动重编辑）"
                         print(f"    🔎 校验: {flag} | 标题《{info['title'][:50]}》"
                               f" | 页面图片 {info['image_count']} 张")
+                        # ★★ 名字一致性断言（#33 / `ERR-PUBLISH-12`）。
+                        #   为什么**必须**在这里断言：`edit_torrent` 只改**元数据**，
+                        #   页面上那个 `h1`（= 站点渲染的种子名）反映的是**挂的种子**。
+                        #   若 `h1` 与本地 `torrent_name` 对不上，说明这页**挂的是别的版本**
+                        #   （`#136` 的多版本同名碰撞，见 #32 报告里 8 个 MISMATCH）
+                        #   —— 那是 edit **修不了**的，必须**重发**。
+                        #   ⇒ 让 edit 的"校验"把它喊出来，而不是让编辑**静默成功**。
+                        db_name = (task.get("torrent_name") or "").strip()
+                        h1 = (info.get("title") or "").strip()
+                        if db_name and h1 and _norm_name(h1) != _norm_name(db_name):
+                            print(f"    ❌ 版本不符（挂的可能是别的版本，edit 改不了，需重发）:\n"
+                                  f"        DB  : {db_name}\n"
+                                  f"        页面h1: {h1}")
+                            warnings += 1
                     except SiteError as e:
                         print(f"    ⚠️  校验失败: {e}")
         else:
@@ -335,7 +470,14 @@ def main():
 
     print("\n" + "=" * 60)
     verb = "已提交" if args.apply else "将修改"
-    print(f"🎯 完成：{verb} {ok} 条 | 无变化 {skipped} 条 | 失败 {failed} 条")
+    print(f"🎯 完成：{verb} {ok} 条 | 无变化 {skipped} 条 | 失败 {failed} 条 | 🛑 拒改 {refused} 条"
+          + (f" | ⚠️ 版本不符 {warnings} 条" if warnings else ""))
+    if warnings:
+        print("   ⚠️  有页面**挂的版本与 DB 不符**（edit 改不了，需重发；见 #32 报告 / #34）")
+    if refused:
+        print("   🛑 有页面**被 #173 身份护栏拒改**（`site_torrent_id` 可能指向别人的页）：")
+        for tid, msg in refused_rows[:20]:
+            print(f"      id={tid}: {msg}")
     if failures:
         print("失败明细：")
         for tid, msg in failures[:20]:

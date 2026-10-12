@@ -42,6 +42,22 @@ def require_env(key: str) -> str:
 #   直接 `python run.py`，旧的 `host.docker.internal` 会给出一个**看起来像配置问题、
 #   其实是"这条域名根本不存在"**的报错。改成与 compose 同形，错了也错得一致。
 QB_HOST = os.getenv("QB_HOST", "http://127.0.0.1:3040")
+# ★★★ 2026-10-10（#16）：**皇后源实例**（opencd 分类的原种/数据所在）的地址 —— 第二个真值来源。
+#   ★ 为什么**必须**是独立一个键（本 bug 的根因，见 ERRATA 的 ERR-ORCH-02）：
+#     `QB_HOST` 被**两个语义不同的消费者**共用 ——
+#       · **scan 阶段**（`run.py`）：读皇后的 `opencd` 分类 ⇒ 必须连**皇后源**（生产 = 3260 qbit-music3）；
+#       · **发种回加**（`publish.py` 的 `readd_to_*`）：把发出去的种加回**发种实例**
+#                （生产 = 3010 qbit-publish；见本文件上方 `QB_HOST` 那段）。
+#     单容器重构时把旧的 `QB_HOST_SCAN`/`QB_HOST_PUBLISH` 双钥匙删掉了，注释还写"现已无任何
+#     代码读取"——但 scan 的源**没有**消失。于是 .env 把 `QB_HOST` 从 3040 改成 3010（给发种用）
+#     时，**scan 跟着一起被带偏**：它去 3010（发种实例，0 个 opencd）找皇后种子 ⇒ 每轮
+#     「找到 0 个分类为 [opencd] 的种子」⇒ **队列只出不进、见底** ⇒ 站点"不发种"。
+#   ★★ 生产 `.env` 里 `QB_HOST_OPENCD=http://127.0.0.1:3260` ⇒ 本键 = 3260。兜底也给 3260
+#      （与 `publish._opencd_content_host()` 同源同名，语义 = "皇后源实例"）。
+#   ★★★ 它**同时**是交棒链路的口径来源：`publish._opencd_content_host()` 与
+#      `daemon.HANDOFF_HOST_3020` 都优先读本键（旧名 `QB_HOST_OPENCD` 在 .env 里一字不改）。
+#   ★ 它**不是凭据**，可打印、可进 daemon env 快照（白名单 `ENV_SNAPSHOT_KEYS` 已含本键名）。
+QB_HOST_OPENCD = os.getenv("QB_HOST_OPENCD", "http://127.0.0.1:3260")
 QB_USER = os.getenv("QB_USER", "admin")
 QB_PASS = require_env("QB_PASS")
 
@@ -70,7 +86,70 @@ QB_API_KEY = os.getenv("QB_API_KEY", "")
 OPENCD_QB_API_KEY = os.getenv("QB_API_KEY_OPENCD", "")
 
 OPENCD_CATEGORY = os.getenv("OPENCD_CATEGORY", "opencd")
+# ★★ 皇后种识别口径 —— 2026-10-11 从 category 改为 **tracker 主机名**（#10/#172）。
+#   ★ 为什么弃 category：生产 3260（皇后源）1433 个种里**只有 6 个**带 `opencd` 分类
+#     ⇒ 用 category 会漏掉所有不带分类的新皇后种（`ERR-ORCH-03`）。
+#   ★ 为什么是 tracker：`tracker=tracker.open.cd` 覆盖 **1292** 个（最全、语义最准
+#     = "这个种来自皇后"）；该实例的 qB tag 实际叫 `tracker.open.cd` 而**不是** `opencd`。
+#   ★ 值是 **tracker 主机名**（不含 `https://`、不含路径），匹配用精确相等（见
+#     `run._torrent_is_opencd`）。换域名时改这个键即可，不动代码。
+OPENCD_TRACKER = os.getenv("OPENCD_TRACKER", "tracker.open.cd")
 PUBLISH_CATEGORY = os.getenv("PUBLISH_CATEGORY", "Musopia")
+
+# ---- ★★ 发布前跨站查重（#13 / #11 核心，2026-10-11 加）----
+# ★ 干什么：发布**之前**先在目标站点搜一遍，比对站侧 `.torrent` 的 `info.name`
+#   与本地 `.torrent` 的 `info.name`；**相等 ⇒ 站点已有同版本** ⇒ 不重复提交，
+#   改为把本地行**关联**到已有站点页（musopia 写 site_publish tid + EXISTS；
+#   crabpt 只写 site_publish）。
+# ★★ 为什么必须有它（根因）：pipeline 原先**只信本地 `site_status`**、从不问
+#   目标站点"有没有" ⇒ 同一专辑以不同 tid/路径再入库时就发重复种 ⇒ 站点用
+#   **不透明的**「上传失败！」（正文零消息）拒绝 ⇒ 近 15 条 FAILED 里 ≈11 条是重复。
+# ★★★ 默认 **开**（用户 2026-10-11 拍板）。为什么默认开是安全的：
+#   · 它**只多读、不多写** —— 查重不命中就**照旧提交**（行为与从前逐字相同）；
+#   · 命中才改动作（关联而非重复提交）—— 那正是我们要的；
+#   · 查重**搜索本身失败** ⇒ 停轮 + 非 0（`site_down` 通道，触发 daemon 退避），
+#     **绝不**把"搜不了"静默降级成"没重复"（否则又会发出一条重复种）。
+# ★ 要回旧行为：`.env` 里显式设 `DEDUP_BEFORE_PUBLISH=false`（如站点搜索接口
+#   临时不可用、你想临时绕开时）。
+DEDUP_BEFORE_PUBLISH = (os.getenv("DEDUP_BEFORE_PUBLISH", "true").strip().lower()
+                        not in ("0", "false", "no", "off"))
+
+# ---- ★★（#23，2026-10-11）查重「召回」子查询上限 ----
+# ★ 为什么需要它：#13 初版**只发一条**搜索串（`formatted_title`），而站点搜索是
+#   **AND + 对标点敏感**（对「显示标题」匹配）⇒ 长名/带标点的标题**整串返回 0 候选**
+#   ⇒ **假阴性** ⇒ 站点上明明有、却当"没有" ⇒ 照旧提交 ⇒ 又一条重复种
+#   （实测：3 条已知重复里只有 1 条单串能召回；CJK 长名任何单串都 0 候选）。
+# ⇒ #23 改为按 `musopia.SEARCH_QUERY_PLAN` 发**多条子查询**；#31 起**精准优先 + 命中即停**
+#   （高精度短串在前、命中就返回，宽查询不发）。
+# ★ 值 = **每条专辑**最多发几次搜索请求。**默认 5**。
+# ★★ 召回**宽**只多花请求，**不会**制造假阳性 —— "是不是同一版本"由
+#   `site_verify.compare_hosted_vs_db` 的**精确** `info.name` 相等判定。
+#   ★ 但"宽"会经**预算截断**制造**假阴性**（`ERR-PUBLISH-17`）⇒ 所以**顺序承重**
+#     （`SEARCH_QUERY_PLAN` 必须精准优先）；本值调大是 R1 回归（head/tail 窗口被截掉）的首选缓解。
+# ★ `<=0` ⇒ 只发 1 条（= #13 初版行为，**不回退** 到"不查重"）—— 站点搜索接口
+#   吃紧时可用它临时收窄；真要整条关掉用上面的 `DEDUP_BEFORE_PUBLISH=false`。
+# ★ 候选验证另有**全局**上限 `DEDUP_MAX_CANDIDATES`（下面那条）。
+try:
+    DEDUP_MAX_SEARCH_QUERIES = int(float(os.getenv("DEDUP_MAX_SEARCH_QUERIES", "5")))
+except ValueError:
+    DEDUP_MAX_SEARCH_QUERIES = 5
+
+# ---- ★★（#31，2026-10-11）候选验证**全局**上限 ----
+# ★ 为什么需要它：#31 把 `search_area` 0→1（最宽、唯一能召回**中文艺术家**），
+#   但 area=1 让候选数**暴涨**（实测 `Etre` 21→109、`徐元白` 0→2）——
+#   若候选预算**太小**，真目标页会在**验证前**被截断 ⇒ 反而**漏召回**（实测
+#   area=1 + 预算 8 = 11/20，比旧 area=0 的 13/20 **更差**）。
+# ★★ 但"调大预算"**治不了本**：噪声随宽召回**线性**增长（要加到几百条才够，不可接受）
+#   ⇒ 正解是**精准优先排序 + 命中即停**（`search_compare`），预算只是**安全阀**。
+#   故默认**保持 16**（够用），**不**靠调大它来救召回。
+# ★ 语义：对每条专辑，**跨全部子查询累计**最多**验证**几个候选（每个 = 1 次 details + 1 次下载）。
+# ★ 两站**同源**：乌托邦与蟹黄堡的 `find_existing_by_name` 都默认 `max_candidates=None` 读本键
+#   （蟹黄堡旧版硬编码 8 = 与 area=1 错配的 11/20 配置，已于 #31 修正）。
+# ★ 护栏性质：**不是**运维旋钮——调大只多花请求、**不会**假阳性；但仍需**有界**（挡超常见 token 扇出）。
+try:
+    DEDUP_MAX_CANDIDATES = int(float(os.getenv("DEDUP_MAX_CANDIDATES", "16")))
+except ValueError:
+    DEDUP_MAX_CANDIDATES = 16
 
 # ==================== Musopia 站点 ====================
 MUSOPIA_URL = os.getenv("MUSOPIA_URL", "https://www.musopia.vip")
@@ -200,7 +279,7 @@ HANDOFF_DRY_RUN = os.getenv("HANDOFF_DRY_RUN", "true")
 # ★★ 发种成品区（SSD）—— 2026-10-07（#133/#92-f1）**落点订正**：
 #   ★ 这里（容器内路径）是 `/publish`，但**真正要紧的是它的宿主侧**：compose 现在把
 #     **宿主 3040 的 Download 目录**（`${PUBLISH_DIR}`，
-#     默认 `/volume2/docker_ssd/qbittorrent-publish/Download`）挂到这里。
+#     默认 `/volume2/docker_ssd/qbit-publish/Download`）挂到这里。
 #   ★ 原先宿主侧是 `opencd2others/publish_data`（本项目**自己**的子目录）⇒ 复制过去的东西
 #     **3040 根本看不到**（3040 的 `/downloads` 是**另一个**宿主目录），这就是三条种补救时
 #     不得不**手工 cp** 的原因（见 NAS-92f 定稿文档 §1）。

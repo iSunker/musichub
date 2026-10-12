@@ -91,6 +91,50 @@ RETRY_STATUS_LIST = (429, 500, 502, 503, 504)
 # ★ 允许重试的方法白名单。POST **永不**在列（不可逆上传的保护）。
 RETRY_METHODS = frozenset(["GET", "HEAD"])
 
+# ★★ 2026-10-11（#15）：**可选出网代理**。
+#   起因：皇后封面**约一半是外站图**（`img2.pixhost.to` 等），对本 NAS 出口 IP
+#     **间歇 reset/超时**（`ERR-SITE-*` 记过）；而 NAS 上恰有一个可用代理
+#     `192.168.0.7:7894`（实测：经它取 pixhost 封面 673KB~1.7MB 全成功）。
+#   ★ 只管**外站封面下载**这一条路（`cover_fetch.download` 的 external 分支）——
+#     不碰皇后站内请求、不碰上传（POST）、不碰 qB。**默认空 = 直连**（行为零变化）。
+#   ★ 取"代理地址"（可带或不带 `http://`）与"例外列表"（不经代理的网段/域名，逗号分隔，
+#     走 `requests` 的 `no_proxy`）。★ 值是**地址不是凭据**，可打印；但仍只在日志里印一次。
+COVER_PROXY = os.getenv("COVER_PROXY", "").strip()
+# ★ 例外：这些主机**不走代理**（如内网/站点自身）。默认空 ⇒ 全部走代理（若配了代理）。
+COVER_NO_PROXY = os.getenv("COVER_NO_PROXY", "").strip()
+
+
+def proxies_for(url, proxy=None, no_proxy=None):
+    """给 `requests` 用的 `proxies` dict —— **没配代理就返回 `None`（直连）**。
+
+    :param url: 要访问的 URL（用来决定是否落进 `no_proxy` 例外）。
+    :param proxy: 代理地址；默认读本模块的 `COVER_PROXY`。空 ⇒ 返回 `None`。
+    :param no_proxy: 例外列表（逗号分隔）；默认读 `COVER_NO_PROXY`。
+    :return: `{"http": p, "https": p}` 或 `None`。
+
+    ★ 为什么返回 `None` 而不是 `{}`：`requests` 对 `proxies=None` 与 `proxies={}` 都当直连，
+      但 `{}` 会**覆盖**掉环境里的 `HTTP_PROXY`（如果有）。返回 `None` 才是**诚实的直连**
+      （不静默改环境语义）—— 同 `ERR-META-06`（别用"看起来一样"的值顶替语义不同的值）。
+    ★ 代理地址**自动补 `http://`**（用户常只给 `host:port`）：`requests` 认 scheme，
+      少了会报 `MissingSchema`。补 scheme 只影响"地址长啥样"，不改语义。
+    ★ `no_proxy` 用**子串**判据（`requests` 自己的 `should_bypass_proxies` 也是子串/后缀匹配）；
+      这里图简单只做"URL 里含该串就绕过"，够用（例外一般写域名/网段）。
+    """
+    p = (proxy if proxy is not None else COVER_PROXY) or ""
+    p = p.strip()
+    if not p:
+        return None
+    if "://" not in p:
+        p = "http://" + p
+    np = (no_proxy if no_proxy is not None else COVER_NO_PROXY) or ""
+    np = np.strip()
+    if np:
+        for token in (t.strip() for t in np.split(",")):
+            if token and token in (url or ""):
+                return None
+    return {"http": p, "https": p}
+
+
 # 幂等标记：同一个进程里被 import 多次也只打一次补丁（也便于自检断言"补丁已生效"）。
 _patched = False
 
@@ -192,6 +236,11 @@ def selftest():
         detail.extend(d_retry)
         if not ok_retry:
             return False, detail
+        # ★ 顺带验 #15 的代理：没配=直连(None)、配了=补 scheme、例外=绕过。
+        ok_prox, d_prox = _selftest_proxies()
+        detail.extend(d_prox)
+        if not ok_prox:
+            return False, detail
         return True, detail
     finally:
         # 还原成"本模块应有的状态"：若开着开关就保持补丁，否则还原默认。
@@ -256,6 +305,51 @@ def _selftest_retry():
             detail.append("④ 注意：裸 Session 也带同款白名单（环境异常，非失败）")
         else:
             detail.append("④ new_session 挂了 Retry 适配器（GET/HEAD），裸 Session 没有 ✅")
+    return True, detail
+
+
+def _selftest_proxies():
+    """#15 的判据：**没配代理 ⇒ 直连(`None`)**；配了 ⇒ 补 scheme；例外 ⇒ 绕过。带阴性对照。
+
+    ★ 关键判据（能失败）：`proxies_for(url, proxy="")` **必须**返回 `None`（不是 `{}`）——
+      若哪天有人把它改成 `return {}`，这条会红（`ERR-META-32`：判据必须能失败）。
+    """
+    detail = []
+    # ① 空代理 ⇒ None（直连）。★ 这是**生产默认**，必须钉死。
+    if proxies_for("https://img2.pixhost.to/x.jpg", proxy="") is not None:
+        return False, detail + ["★ 空代理竟返回非 None ⇒ 默认不再是直连（危险）"]
+    detail.append("① 空代理 ⇒ None（直连）✅")
+
+    # ② 配了 host:port（无 scheme）⇒ 自动补 http://
+    got = proxies_for("https://img2.pixhost.to/x.jpg", proxy="192.168.0.7:7894")
+    want = {"http": "http://192.168.0.7:7894", "https": "http://192.168.0.7:7894"}
+    if got != want:
+        return False, detail + [f"★ 补 scheme 后不对：{got!r} != {want!r}"]
+    detail.append(f"② `192.168.0.7:7894` ⇒ {got} ✅")
+
+    # ③ 已带 scheme ⇒ 原样（不重复补）
+    got2 = proxies_for("https://x/y.jpg", proxy="http://192.168.0.7:7894")
+    if got2 != want:
+        return False, detail + [f"★ 带 scheme 时被改坏：{got2!r}"]
+    detail.append("③ 已带 scheme ⇒ 原样 ✅")
+
+    # ④ 例外列表：URL 含例外串 ⇒ None（绕过代理）。
+    got3 = proxies_for("https://open.cd/attachments/a.jpg",
+                       proxy="192.168.0.7:7894", no_proxy="open.cd")
+    if got3 is not None:
+        return False, detail + [f"★ 例外主机竟走代理：{got3!r}"]
+    detail.append("④ `no_proxy` 命中 ⇒ 绕过（None）✅")
+
+    # ⑤ 阴性对照：**不**给例外 ⇒ 同一 URL 走代理（证明④不是空真）。
+    got4 = proxies_for("https://open.cd/attachments/a.jpg", proxy="192.168.0.7:7894")
+    if got4 is None:
+        return False, detail + ["★ 阴性对照失败：不给 no_proxy 也绕过 ⇒ ④ 是空真"]
+    detail.append("⑤ ★ 对照：不给 no_proxy ⇒ 同 URL 走代理 ✅")
+
+    # ⑥ 默认参数走模块级 COVER_PROXY（当前 env）——只断言"与显式传该值一致"，不假设配没配。
+    if proxies_for("https://x/y.jpg", proxy=COVER_PROXY) != proxies_for("https://x/y.jpg"):
+        return False, detail + ["★ 默认参数没走 COVER_PROXY"]
+    detail.append(f"⑥ 默认参数 == COVER_PROXY（当前={COVER_PROXY!r}）✅")
     return True, detail
 
 

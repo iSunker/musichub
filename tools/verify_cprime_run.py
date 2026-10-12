@@ -49,6 +49,9 @@ _DUMMY_ENV = {
     "MUSOPIA_URL": "http://dummy.invalid", "MUSOPIA_PASSKEY": "dummy",
     "MUSOPIA_COOKIE": "dummy", "PICGO_API_KEY": "dummy",
     "OPENCD_CATEGORY": "opencd-verify-fixture",
+    # ★ 2026-10-11（#10/#172）：scan 识别口径改用 tracker 主机名 ⇒ 夹具也要给这个键。
+    #   值 = 与替身 `_FT.tracker` 里的主机名**一致**（否则过滤后空、本工具全红）。
+    "OPENCD_TRACKER": "tracker.open.cd",
 }
 
 
@@ -213,22 +216,34 @@ def main():
 
     # ── 替身：qB ──
     class _FT:
-        def __init__(self, h, n):
+        def __init__(self, h, n, tracker=""):
             self.hash, self.name = h, n
             self.content_path = os.path.join(out_dir, "no-such-content-path")
+            # ★★ 2026-10-11（#10/#172）：scan 识别口径从 `category` 改成 **tracker 主机名**
+            #   ⇒ 替身**必须**带上 `.tracker`，否则 `run._torrent_is_opencd` 判否 ⇒ 本夹具
+            #   里的皇后行会被整体过滤掉、这个工具全红（这正是它该抓的"口径变了"）。
+            self.tracker = tracker
 
     class _FakeQB:
         def auth_log_in(self):
             return True
 
-        def torrents_info(self, category=None):
+        # ★ 2026-10-11：scan 现在调 `torrents_info()`（**不带参数**）再在 Python 侧
+        #   按 tracker 过滤（qB 服务端的 `tracker=` 参数在本版本无效，见 run.py）。
+        def torrents_info(self, category=None, tracker=None):
             # ★★ 别搞错参数序：`_FT(hash, name)` —— 第一版把两者写反了，
             #   于是 `torrent.hash` 成了**种子名**、`torrent.name` 成了 hash ⇒
             #   `known[info_hash]` **一次都没命中** ⇒ 每行 `oid=None` ⇒ 全走抓轨路。
             #   症状：日志里 C/D 也印 `来源: 抓轨路(parse_title)` ⇒ B/D 期望值不符。
             #   ★ 这正是本工具的价值：它把这个**fixture 错误**变成了两条红色判据。
+            # ★ 皇后路（`oid` 非空）的种给**真 tracker**，抓轨路给空 ⇒ 过滤后两者都留下
+            #   （取决于用例）：B 是抓轨路却也在 qB 里 ⇒ 它**不在**皇后列表里，但本工具
+            #   直接调 `run._scan_main`，其 `_all` 全量、用例覆盖两类 —— 故这里让**所有**
+            #   用例都带皇后 tracker，确保它们都进 `torrents`（本工具不测"过滤掉别的"，
+            #   那由 `run.py --selftest` 的 ⑨r 专测）。
             return [_FT(cs["hash"],
-                        ("皇后原始名" if cs["row"]["oid"] else "抓轨原始名") + cs["key"])
+                        ("皇后原始名" if cs["row"]["oid"] else "抓轨原始名") + cs["key"],
+                        "https://tracker.open.cd/announce.php?passkey=x")
                     for cs in CASES]
 
     _qb = types.ModuleType("qbittorrentapi")

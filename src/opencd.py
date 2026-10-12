@@ -26,7 +26,9 @@ import os
 import re
 import sys
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 
 # ★★ 必须在 `import db` 之前塞好环境变量（原 opencd_ingest.py 的顺序不变量，见下方段落）——
 #   旧代码在这里手动插入。
@@ -701,6 +703,259 @@ def _check_searchpages():
     return len(checks), fails
 
 
+# ==================== 皇后 RSS 反查（torrentrss.php） ====================
+#
+# ★★ 背景（2026-10-12 实测，见 `.scratch/B12-tid-reverse-lookup.md`）：
+#   皇后**搜索页**没有 hash 字段（40hex 搜返回无关空结果页）⇒「按 infohash 反查」在
+#   搜索页**不存在**。但 **RSS** 里每条 item 自带：
+#     `<guid>`   = **真 infohash**（40hex，`isPermaLink="false"`）
+#     `<link>`   = `https://open.cd/details.php?id=<TID>`
+#     `<pubDate>`= 皇后的 add time
+#   ⇒ `GET torrentrss.php?...&search=<名字>&rows=100` **一次请求**即可得
+#     「名字 → (hash, tid, 发布日期)」映射，本地逐字节比 hash，相等才认（**绝不发错**）。
+#
+# ★★ 本段全是**纯函数**（解析/归一化），刻意 **不 import `requests`/`crawl`** ——
+#   `opencd.py` 全程可 grep 审计「无网络」。出网编排在 `src/rss_backfill_tid.py`。
+
+# `<link>` 里的 tid —— ★ 实测 RSS `<link>` 就是 `details.php?id=<TID>`，
+# 与 `sync_opencd_tid.TID_RE`（`details\.php\?id=(\d+)`）**逐字同形**，但为避免
+# `opencd.py` import `sync_opencd_tid`（依赖倒置），这里放**同一份正则的副本**。
+_RSS_TID_RE = re.compile(r"details\.php\?id=(\d+)")
+# `<guid>` 必须**恰好**是 40 hex（info_hash = 20 字节 SHA1）。★ 不宽松匹配。
+_RSS_HASH_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def _rss_added_utc(pubdate):
+    """
+    RSS `pubDate` → **UTC 字符串** `'YYYY-MM-DD HH:MM:SS'`（拿不到 ⇒ `None`）。
+
+    ★ 语义**必须与 `sync_opencd_tid.added_at_utc` 一字不差**：闸门② 拿这个串与
+      `datetime('now')`（UTC）做**字符串比较**，差 8 小时会在 7 天门槛上表现为
+      「偶尔差一天放行」（`ERR-SQL-03` 的教科书形状）。
+      本函数不 import `sync_opencd_tid`（它必须保持"零请求、不 import 网络层"的
+      硬纪律，反向 import 会造成依赖倒置）⇒ 逻辑**照抄**，并在这里用判据钉死等价。
+    ★ `pubDate` 是 RFC-822（`Mon, 12 Oct 2026 03:29:25 +0800`，带时区）——
+      `parsedate_to_datetime` 直接给出 aware datetime ⇒ `astimezone(utc)`。
+      无时区的串（罕见）当"拿不到"（不敢猜本地时区）。取不到一律 `None`，**绝不编**。
+    """
+    if not pubdate:
+        return None
+    try:
+        dt = parsedate_to_datetime(pubdate)
+    except (TypeError, ValueError):
+        return None
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return None                       # 无时区 ⇒ 不敢当本地时区猜，留空
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_rss_index(xml_text):
+    """
+    解析 `torrentrss.php` 的 XML → `(idx, stats)`。
+
+    ★ `idx` 形状**与 `sync_opencd_tid.load_queen_index` 的返回值逐字段同形**：
+        `{hash_lower: {"tid": int, "name": str, "added": "YYYY-MM-DD HH:MM:SS"|None}}`
+      ⇒ `sync_opencd_tid.build(rows, idx)` 可**零改动**接收（这是刻意的：不写第二个
+        "配对"实现，也就不会有第二套口径）。
+
+    ★ 冲突规则**照抄 `load_queen_index`**：一 hash 多 tid（或反之）⇒ 该键**丢弃**，
+      记进 `stats`，**绝不自动挑**一条（挑错 = 发错种子）。
+    ★ 抠不出（guid 非 40hex / link 无 tid）⇒ 计入 `stats["unparsed"]`，**不编**。
+    """
+    idx, cand = {}, {}
+    stats = {"items": 0, "unparsed": 0, "usable": 0, "conflicts": 0,
+             "undated": 0, "dupe_hashes": 0, "dupe_tids": 0}
+    root = ET.fromstring(xml_text or "")
+    # ★ XML 坏了 ⇒ `ET.ParseError` 向上抛，**不静默当空**。调用方（fetch_index）
+    #   据此判"请求失败"而不是"零命中"——`ERR-META-02`：空成功与失败必须区分。
+    for it in root.iter("item"):
+        stats["items"] += 1
+        guid = (it.findtext("guid") or "").strip()
+        link = (it.findtext("link") or "").strip()
+        name = (it.findtext("title") or "").strip()
+        m = _RSS_TID_RE.search(link)
+        if not m or not _RSS_HASH_RE.match(guid):
+            stats["unparsed"] += 1
+            continue
+        key = guid.lower()
+        tid = int(m.group(1))
+        cand.setdefault(key, set()).add(tid)
+        added = _rss_added_utc(it.findtext("pubDate"))
+        if added is None:
+            stats["undated"] += 1
+        idx.setdefault(key, {"tid": tid, "name": name, "added": added})
+
+    # ★ 一 hash 多 tid / 一 tid 多 hash ⇒ 丢弃该键（与 load_queen_index 同规则）
+    dup_hashes = {k for k, v in cand.items() if len(v) > 1}
+    tid_seen = {}
+    for k, v in cand.items():
+        for t in v:
+            tid_seen.setdefault(t, set()).add(k)
+    dup_tids = {t for t, ks in tid_seen.items() if len(ks) > 1}
+    if dup_tids:
+        dup_hashes |= {k for t in dup_tids for k in tid_seen[t]}
+    for k in dup_hashes:
+        idx.pop(k, None)
+    stats["conflicts"] = len(dup_hashes)
+    stats["dupe_hashes"] = len([k for k, v in cand.items() if len(v) > 1])
+    stats["dupe_tids"] = len(dup_tids)
+    stats["usable"] = len(idx)
+    return idx, stats
+
+
+# ★ 模糊归一化的**尾部 token 表**（先保守：只剥格式/年份，**绝不碰艺术家**）。
+#   ★★ 实证（`.scratch/B12-tid-reverse-lookup.md` 的 25 条样本）：
+#     `X - 名 年份 - FLAC 分轨` 与 `X - 名 [1993][厂牌 编号][包装] 年份 - FLAC 整轨 - 上传者`
+#     这两类尾巴，剥掉后精确搜 32% → 52%。艺术家的位置在**开头**，从不剥。
+_FUZZY_STRIP = [
+    # ① 方括号整块（厂牌/编号/包装/CD 数…）—— 只剥**尾部**的
+    re.compile(r"\s*\[[^\[\]]*\]\s*$"),
+    # ② 圆括号里的年份（如 `(1994)`）—— 只剥尾部的
+    re.compile(r"\s*\((?:19|20)\d{2}\)\s*$"),
+    # ③ `vol.N` / `cdN` / `disc N`（大小写不敏感）
+    re.compile(r"\s*(?:vol|cd|disc)\.?\s*\d+\s*$", re.I),
+    # ④ 纯年份（4 位 `19xx/20xx`，前面可有 `-` 或空格）
+    re.compile(r"\s*[-–]?\s*(?:19|20)\d{2}\s*$"),
+    # ⑤ 格式/介质词（FLAC / WAV / APE / 分轨 / 整轨 …）
+    re.compile(r"\s*/?\s*(?:FLAC|WAV|APE|ALAC|MP3|320K|分轨|整轨)\s*$", re.I),
+    # ⑥ 尾部 `- 上传者`（形如 `- alin13788`，仅 ASCII 词 + **至少 4 位**避免砍到短歌名）
+    re.compile(r"\s*[-–]\s*[A-Za-z][A-Za-z0-9_]{3,}\s*$"),
+]
+
+
+def fuzzy_name(name):
+    """
+    把皇后/qB 标题**保守地**剥掉尾部格式信息，用于"精确不中再模糊"的第二段搜索。
+
+    ★★ 纪律（用户 2026-10-12 拍板"先保守"）：
+      · **只剥尾部** token，**绝不碰艺术家**（艺术家在开头；剥不动就停）。
+      · **幂等**：`fuzzy_name(fuzzy_name(x)) == fuzzy_name(x)`。
+      · 剥空 ⇒ 返回 `""`（调用方据此**跳过**模糊档，而不是拿空串去搜全库）。
+    ★ 这不是"重写标题"，只是"去掉尾巴再搜一次" —— 命中仍靠逐字节比 infohash，
+      **不因模糊而放宽安全性**。
+    """
+    s = _norm(name)                       # 全角空格/连续空白先归一
+    if not s:
+        return ""
+    # ★ 循环剥：`… - FLAC 分轨` 要连剥 `分轨` 与 `FLAC` 两块
+    changed = True
+    while changed and s:
+        changed = False
+        for pat in _FUZZY_STRIP:
+            new = pat.sub("", s).strip(" -–\t")
+            if new != s:
+                s = new
+                changed = True
+                break
+    return s
+
+
+def _check_rss_index():
+    """
+    RSS 解析 + 模糊归一化的自检（纯离线，喂**人造 XML**，零请求）。
+
+    ★ 判据分三组：
+      ① RSS 字段口径：guid=hash、link→tid、pubDate→UTC（★ 与
+         `sync_opencd_tid.added_at_utc` 的 UTC 口径**等价**；混时区样本坐实）。
+      ② 安全属性：一 hash 多 tid / 一 tid 多 hash ⇒ **丢弃**（不自动挑）；
+         guid 非 40hex / link 无 tid ⇒ 计入 unparsed（**不编**）。
+      ③ 模糊归一化：只剥尾部、**保住艺术家**、幂等、剥空返空串。
+    """
+    # 与真实样本同形（时区 +0800）；hash 混大小写以验 `.lower()`。
+    xml = """<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0"><channel>
+<item>
+  <title>群星 - 中岛美雪最爱 1994 - FLAC 分轨</title>
+  <link>https://open.cd/details.php?id=201940</link>
+  <guid isPermaLink="false">6cbe429fcf1578be5e11ab9c3b760949abe069d0</guid>
+  <pubDate>Mon, 12 Oct 2026 03:29:25 +0800</pubDate>
+</item>
+<item>
+  <title>Mantovani - 名曲精选 2006 - FLAC 整轨</title>
+  <link>https://open.cd/details.php?id=97885</link>
+  <guid isPermaLink="false">41A8F10D0000000000000000000000000000F86B</guid>
+  <pubDate>Fri, 22 Jun 2007 00:00:00 +0800</pubDate>
+</item>
+<item>
+  <title>坏：guid 不是 40hex</title>
+  <link>https://open.cd/details.php?id=123</link>
+  <guid isPermaLink="false">NOT-A-HASH</guid>
+  <pubDate>Mon, 12 Oct 2026 00:00:00 +0800</pubDate>
+</item>
+<item>
+  <title>坏：link 抠不出 tid</title>
+  <link>https://open.cd/</link>
+  <guid isPermaLink="false">aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</guid>
+  <pubDate>Mon, 12 Oct 2026 00:00:00 +0800</pubDate>
+</item>
+</channel></rss>"""
+    idx, stats = parse_rss_index(xml)
+    key = "41a8f10d0000000000000000000000000000f86b"   # ★ 大小写归一后的键
+    # ★★ UTC 口径硬对照：`2026-10-12 03:29:25 +0800` = `2026-10-11 19:29:25` UTC
+    #    （跨日！—— 正是"差 8 小时"最容易露馅的点）
+    utc_chrono = _rss_added_utc("Mon, 12 Oct 2026 03:29:25 +0800")
+    fuzzy_cases = [
+        ("群星 - 中岛美雪最爱 1994 - FLAC 分轨", "群星 - 中岛美雪最爱"),
+        ("Mantovani - 名曲精选 2006 - FLAC 整轨", "Mantovani - 名曲精选"),
+        ("齐秦 - 我拿什么爱你 [1998][上华][引进版] 2015 - WAV 整轨 - alin13788",
+         "齐秦 - 我拿什么爱你"),
+        ("群星 - 台语怀念金曲 2015 - FLAC 分轨", "群星 - 台语怀念金曲"),
+        ("徐元白 - 徐元白古琴 [2006] - FLAC 分轨", "徐元白 - 徐元白古琴"),
+    ]
+    checks = [
+        # ① 字段口径
+        ("usable 条数（2 好 + 2 坏）", 2, stats["usable"]),
+        ("unparsed 条数（非 hash / 无 tid）", 2, stats["unparsed"]),
+        ("guid 小写归一成键", True, key in idx),
+        ("该键 tid == 97885", 97885, idx.get(key, {}).get("tid")),
+        ("pubDate → UTC（★ 跨日 03:29+08:00 = 19:29Z 前一日）",
+         "2026-10-11 19:29:25", utc_chrono),
+        # ★ 第二条（Mantovani，键 41a8f10d…）的 pubDate = 2007-06-22 00:00:00 +0800
+        #   ⇒ UTC 前一日 16:00:00（再证时区换算，且证明 added 是**按各自 item** 算的）
+        ("写入 idx 的 added 按各自 item 换算",
+         "2007-06-21 16:00:00", idx.get(key, {}).get("added")),
+        # ② 安全属性
+        ("坏 guid 不编 (NOT-A-HASH 不入 idx)", False, "not-a-hash" in idx),
+        ("坏 link 不入 idx (aaaa… 不在)", False, "a" * 40 in idx),
+    ]
+    # 一 hash 多 tid ⇒ 丢弃
+    dup_xml = ("<rss><channel>"
+               "<item><link>https://open.cd/details.php?id=1</link>"
+               "<guid>%s</guid><title>a</title></item>"
+               "<item><link>https://open.cd/details.php?id=2</link>"
+               "<guid>%s</guid><title>b</title></item>"
+               "</channel></rss>" % ("b" * 40, "b" * 40))
+    didx, dstats = parse_rss_index(dup_xml)
+    checks += [
+        ("★ 一 hash 多 tid ⇒ 丢弃（conflicts=1）", 1, dstats["conflicts"]),
+        ("★ 冲突键不入 idx", False, "b" * 40 in didx),
+        ("★ items 计数正确（=2）", 2, dstats["items"]),
+    ]
+    # ③ 模糊归一化
+    for raw_name, want in fuzzy_cases:
+        checks.append((f"fuzzy({raw_name[:14]}…) == {want[:14]}…",
+                       want, fuzzy_name(raw_name)))
+    checks += [
+        ("★ fuzzy 保住艺术家（不含年份/格式残留）",
+         True, "1994" not in fuzzy_name("群星 - 中岛美雪最爱 1994 - FLAC 分轨")
+         and "FLAC" not in fuzzy_name("群星 - 中岛美雪最爱 1994 - FLAC 分轨")),
+        ("★ fuzzy 幂等", True,
+         fuzzy_name(fuzzy_name("Mantovani - 名曲精选 2006 - FLAC 整轨"))
+         == fuzzy_name("Mantovani - 名曲精选 2006 - FLAC 整轨")),
+        ("★ 剥空返空串（纯格式串）", "", fuzzy_name("FLAC 分轨")),
+        ("非格式串原样返回（不动）", "周杰伦 范特西", fuzzy_name("周杰伦 范特西")),
+    ]
+    fails = 0
+    print("  ── RSS 反查（torrentrss.php）· 纯解析 & 模糊归一化 ──")
+    for label, want, got in checks:
+        ok = got == want
+        fails += 0 if ok else 1
+        print(f"    {'✅' if ok else '❌'} {label:<44} 期望={want!r:<22} 实得={got!r}")
+    return len(checks), fails
+
+
 def _check_cover_extraction():
     """
     封面抽取的判据（★ 2026-09-21 新增）—— 防的是**两个真实错误**：
@@ -916,6 +1171,12 @@ def _selftest_parse(as_json=False):
     total_checked += sc
     total_fails += sf
 
+    print(f"\n{'─' * 72}")
+    print("RSS 反查 · torrentrss.php 的 name→(hash,tid,date)（★ 1 请求/条的新路）")
+    rc, rf = _check_rss_index()
+    total_checked += rc
+    total_fails += rf
+
     print(f"\n{'=' * 72}")
     if as_json:
         # ★ 本文件的分母是 total_checked（= 通过数 + 不符数），与别的脚本同义但变量名不同。
@@ -1108,7 +1369,7 @@ class RateGate:
     """
     皇后访问闸门。典型用法（**每个**请求都要走）::
 
-        gate = RateGate(max_per_round=20, min_interval=120.0, max_per_day=50)
+        gate = RateGate(max_per_round=20, min_interval=120.0, max_per_day=500)
         for tid in candidates:
             gate.acquire()          # ← 可能抛 DailyQuotaExceeded（正常收工）
             resp = session.get(url)  # 到这一步才真的发包
@@ -1118,7 +1379,7 @@ class RateGate:
     """
 
     def __init__(self, *, max_per_round=20, min_interval=120.0,
-                 max_per_day=50, day_key=None, log=None, ledger=None):
+                 max_per_day=500, day_key=None, log=None, ledger=None):
         self.max_per_round = int(max_per_round)
         self.min_interval = float(min_interval)
         self.max_per_day = int(max_per_day)
@@ -1458,7 +1719,7 @@ def _selftest_rate(as_json=False):
         return 1
     print(f"✅ 自检通过：{ok}/{ok + fails} 项")
     print("   ★ 核心是 ③（跨轮持久）+ ④⑤（跨天重载双向）：")
-    print("     没有 ③，「每日 50」就还是「每轮 50」—— 这正是本次要修的缺口。")
+    print("     没有 ③，「每日 500」就还是「每轮 500」—— 这正是本次要修的缺口。")
     return 0
 
 
@@ -1468,7 +1729,7 @@ def _main_rate():
     ap.add_argument("--selftest", action="store_true", help="跑闸门逻辑自检（零外网）")
     ap.add_argument("--max-per-round", type=int, default=20)
     ap.add_argument("--min-interval", type=float, default=120.0)
-    ap.add_argument("--max-per-day", type=int, default=50)
+    ap.add_argument("--max-per-day", type=int, default=500)
     # ★ --json：机读出口，给 tools/gen_counts.py 读（与 --selftest 合用）。
     ap.add_argument("--json", action="store_true",
                     help="与 --selftest 合用：只把结果以 JSON 打到末行")

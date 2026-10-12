@@ -55,12 +55,17 @@ x-common: &common
     - DATA_DIR=/data
     # network_mode: host 下没有 host.docker.internal 这条特殊 DNS 记录，
     # 容器直接共享宿主机网络栈，所以用宿主机自己访问 qB 的真实地址。
-    # ★★ 2026-10-07（#92）：发种回加改走 **publish 实例(:3040, SSD)**，不再走 opencd(:3020)。
+    # ★★ 2026-10-07（#92）：发种回加改走 **publish 实例(SSD)**，不再走 opencd(:3020)。
     #   · 为什么：发种是"高 IO + 短命 + 可校验"的活，与"长期保种"资源画像相反；
-    #     3040 专做发种、落 SSD、限并发(MaxActiveDownloads=1) ⇒ 不挤保种、不触发下载态 mmap 爆炸。
+    #     publish 实例专做发种、落 SSD、限并发(MaxActiveDownloads=1) ⇒ 不挤保种、
+    #     不触发下载态 mmap 爆炸。
     #   · 两条发种路径（乌托邦 readd_to_qb / 蟹黄堡 readd_to_qb_crabpt）共用 `config.QB_HOST`
-    #     （唯一构造点 qb_client.build）⇒ 改这一处两路都走 3040。
-    #   · ★ 回滚：把下面改回 `:-http://127.0.0.1:3020` 即可。
+    #     （唯一构造点 qb_client.build）⇒ 改这一处两路都走同一个发种实例。
+    #   · ★ 生产 `.env` 里 `QB_HOST=http://127.0.0.1:3010`（本行兜底 3040，`.env` 优先）。
+    #   · ★★ 2026-10-10（#16，ERR-ORCH-02）：**scan 不读本值** —— scan 读皇后源，
+    #     走 `QB_HOST_OPENCD`（经 `env_file: .env` 传进来，**故意不在这里写第二遍**：
+    #     写两处 = 两个真值来源，正是 ERR-ORCH-02 的病根）。
+    #   · ★ 回滚：把下面改回 `:-http://127.0.0.1:3020` 即可（但要同步想清楚 scan 的源）。
     - QB_HOST=${QB_HOST:-http://127.0.0.1:3040}
     # ★ 上面那个只读挂载的落点。`sync_opencd_tid.py` 读它（容器内路径）。
     #   写在这里而不是 .env：它是**挂载点的配对**，改一处不改另一处必然出错；
@@ -93,7 +98,7 @@ x-common: &common
     #   · ★★ 铁律：本挂载的宿主目录**就是 3040 的下载根** ⇒ "清 SSD"只删 `<本目录>/<专辑>` 子目录，
     #     绝不删本目录本身（`handoff._safe_rmtree` 有护栏，护栏①即为此）。
     #   · ★ 回滚：删掉本行（则 enqueue/复制没有可见落点，交棒不成立）。
-    - ${PUBLISH_DIR:-/volume2/docker_ssd/qbittorrent-publish/Download}:/publish
+    - ${PUBLISH_DIR:-/volume2/docker_ssd/qbit-publish/Download}:/publish
     # ★★ vertex2（另一个项目）的库，只读挂进来 —— `sync_opencd_tid.py` 靠它按
     #   infohash 找出皇后的 `details.php?id=`。它是本项目**唯一的 id 来源**。
     #   ★ 挂的是**目录**不是文件：sync_opencd_tid.py 期望的路径是

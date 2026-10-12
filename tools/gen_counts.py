@@ -70,7 +70,10 @@ SELFTEST_SCRIPTS = [
     ("src", "opencd.py", "parse"),
     ("src", "opencd.py", "rate"),
     ("src", "cover_fetch.py"),
+    ("src", "update_metadata.py"),
+    ("src", "rss_backfill_tid.py"),
     ("tools", "opencd-crawl-selftest.py"),
+    ("tools", "republish_one.py"),
 ]
 
 # 阶段间隔：**从 .env.example 的默认值读**，不在这里另抄一份。
@@ -82,9 +85,12 @@ STAGE_INTERVAL_KEYS = {
     "covers": "COVERS_INTERVAL",
     "edit": "EDIT_INTERVAL",
     "crawl": "CRAWL_INTERVAL",
+    # ★ 2026-10-12：rss_tid（B12 RSS 反查补 tid）。★ 与 nas_health 的 INTERVALS 同步。
+    "rss_tid": "RSS_TID_INTERVAL",
 }
 STAGE_INTERVAL_FALLBACK = {"scan": 1800, "publish": 1800, "sync": 86400,
-                           "covers": 21600, "edit": 21600, "crawl": 1800}
+                           "covers": 21600, "edit": 21600, "crawl": 1800,
+                           "rss_tid": 86400}
 # 已禁用的阶段：last_run 长期不动是预期内的（不是故障）
 DISABLED_STAGES: set = set()        # ★ 由 .env.example 的 ENABLE_* 实际值推出，见 _disabled
 

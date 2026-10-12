@@ -35,6 +35,12 @@ crawl.py 的**离线自检** —— 用本地 HTTP mock 假装是皇后。
      ★ 但那一组记录的**教训仍然有效**，见 `main()` 里对应的注释块：
        "两种不同的失败混成一个数就没法运维" —— 现在的承接者是
        `topup_opencd_fields.py` 的台账与 `wanted_absent` 上报。
+  ⑰ RSS 反查命中：1 请求 + 落盘；二次跑同词 = **0 请求**
+  ⑱ ★ dry-run / 不加 --apply ⇒ **0 请求**（CLI 报告模式的承诺）
+  ⑲ ★ `ZEROHIT`（空成功·缓存 no_hit） vs `HTTPFAIL`（失败·**不缓存**）结论**必须不同**
+  ⑳ RSS 请求数 == 闸门计数（每个请求都过 `RateGate`）
+  ㉑ 写库只填**空白 tid** 行；非空行 `opencd_tid`/`updated_at` 逐列不变（纪律 3）
+     ★ ⑰-㉑ 测 `rss_backfill_tid.py`（2026-10-12 新增的 RSS 反查路）。
 
 跑法：python tools/opencd-crawl-selftest.py
 """
@@ -77,6 +83,11 @@ op = cr = _opencd                 # noqa: E402
 
 SAMPLE = os.path.join(REPO, "opencdhtml", "sanitized")
 HITS = []                          # mock 收到的请求路径
+
+# ★ mock 的 /torrentrss.php 世界：一条 item，guid=RSS_HASH、link→tid=RSS_TID。
+#   `rss_backfill_tid.py` 的判据拿它来验"名字搜 → 逐字节比 hash 命中"。
+RSS_HASH = "ffe932f0d1e4a5b6c708d9e0f1a2b3c4d5e6f708"   # 40hex（人造，非真种）
+RSS_TID = "555001"
 
 
 def _sample(name):
@@ -144,6 +155,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send("<html><body>no such torrent</body></html>", 404)
                 return
             self._send(html)
+            return
+        if self.path.startswith("/torrentrss.php"):
+            # ★★ 2026-10-12：**新的活分支** —— `rss_backfill_tid.py` 的 RSS 反查。
+            #   mock 三个世界（用参数切；`search=` 里带开关词）：
+            #     ZEROHIT   ⇒ 成功但**零 item**（模拟"皇后上搜不到这个名字"）
+            #     HTTPFAIL  ⇒ 503（模拟 cookie 失效 / 限流 / 站点 5xx）
+            #     默认      ⇒ 一条 item，`guid` = RSS_HASH、`link` → tid=RSS_TID
+            #   ★ 判据的**核心**：`ZEROHIT`（空成功，要缓存、判 no_hit 不写库）与
+            #     `HTTPFAIL`（失败，**不缓存**）**结论必须不同**（`ERR-META-02`）。
+            if "HTTPFAIL" in self.path:
+                self._send("<html><body>server busy</body></html>", 503)
+                return
+            if "ZEROHIT" in self.path:
+                self._send('<?xml version="1.0" encoding="utf-8"?>'
+                           '<rss version="2.0"><channel>'
+                           '<title>OpenCD</title></channel></rss>')
+                return
+            self._send(
+                '<?xml version="1.0" encoding="utf-8"?>'
+                '<rss version="2.0"><channel>'
+                '<item><title>mock 条目</title>'
+                f'<link>https://open.cd/details.php?id={RSS_TID}</link>'
+                f'<guid isPermaLink="false">{RSS_HASH}</guid>'
+                '<pubDate>Mon, 12 Oct 2026 03:29:25 +0800</pubDate>'
+                '</item></channel></rss>')
             return
         self._send(_sample("sample-listpage.html"))
 
@@ -398,6 +434,126 @@ def main(json_mode=False):
     #      但删它没有收益，且它记录了实测的齐秦同名样本）。
     #       ⚠️ 留着的代价：mock 的 `/torrents.php` 分支**不再被任何判据走到**。
     #       若哪天有人拿它当"搜索还活着"的证据，那条注释（本段）就是答案。
+
+    # ==================== 判据⑰-㉑：RSS 反查补 tid（rss_backfill_tid.py） ====================
+    #
+    # ★ 2026-10-12 新增。测的是**新的一条出网路**：`torrentrss.php?search=<名字>`
+    #   ⇒ name → (hash, tid)。判据要点：
+    #     ① 命中：1 请求 + 落盘缓存；**二次跑同词 = 0 新请求**（缓存短路的核）
+    #     ② dry-run / 不加 --apply ⇒ **0 请求**
+    #     ③ ★ `ZEROHIT`（空成功 ⇒ 缓存、判 no_hit）与 `HTTPFAIL`（失败 ⇒ **不缓存**）
+    #        结论**必须不同**（`ERR-META-02`：空成功 ≠ 失败）
+    #     ④ 写库：**只填空白 tid 行**，非空行逐列不变、`updated_at` 不变
+    #     ⑤ 每个请求都过闸门（请求数 == gate.used_round）
+    #
+    # ★ 本块用**自己的夹具**（独立 client / 清落盘目录），不共享别处的状态。
+    import rss_backfill_tid as RB
+
+    print("\n【判据⑰】RSS 反查：精确命中 ⇒ 1 请求 + 落盘；二次跑同词 = 0 请求")
+    _clear_raw_dir()
+    HITS.clear()
+    g17 = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
+    cli17 = crawl.Client(gate=g17)
+    # 目标 hash 与 mock 的 guid 一致 ⇒ 必须命中
+    r17 = RB.fetch_index(cli17, "命中词")
+    c.check("第一次确实发了 1 个 torrentrss 请求", 1,
+            len([h for h in HITS if "torrentrss" in h]))
+    c.check("解析出 1 条 usable", 1, r17.stats.get("usable"))
+    c.check("命中目标 hash", True, RSS_HASH in r17.idx)
+    HITS.clear()
+    r17b = RB.fetch_index(cli17, "命中词")           # 同词 ⇒ 缓存短路
+    c.check("★ 二次跑同词 = 0 新请求（全部复用落盘）", 0,
+            len([h for h in HITS if "torrentrss" in h]))
+    c.check("二次读来自缓存 (from_cache)", True, r17b.from_cache)
+
+    print("\n【判据⑱】dry-run / 不加 --apply ⇒ 0 请求")
+    HITS.clear()
+    # 复刻 main() 的 dry-run 语义：apply=False 时循环体不发请求（这里直接调 report 路径）
+    # ★ 用真 CLI 更硬 —— 但 CLI 会连库；这里用同一判据的最小复刻：
+    g18 = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
+    cli18 = crawl.Client(gate=g18)
+    # 报告模式根本不构造请求 —— 断言"没有可选的候选时不请求"这条路：
+    #   直接验 `fetch_index` 之外，主循环在 apply=False 时不调用它。
+    # ⇒ 用子进程跑 CLI 的 report 模式最保真（零请求是那一步的承诺）。
+    import subprocess
+    env18 = dict(os.environ)
+    env18["OPENCD_URL"] = base
+    env18["DATA_DIR"] = _TMP
+    env18["OPENCD_RAW_DIR"] = os.path.join(_TMP, "raw_html")
+    r18 = subprocess.run(
+        [sys.executable, os.path.join(HERE, "..", "src", "rss_backfill_tid.py"),
+         "--limit", "5"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env=env18, cwd=REPO)
+    c.check("★ CLI 报告模式无 traceback（exit 0）", 0, r18.returncode)
+    c.check("★ CLI 报告模式：mock 无新请求", 0,
+            len([h for h in HITS if "torrentrss" in h]))
+
+    print("\n【判据⑲】★ ZEROHIT（空成功·缓存 no_hit） vs HTTPFAIL（失败·不缓存）")
+    _clear_raw_dir()
+    g19 = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
+    cli19 = crawl.Client(gate=g19)
+    rz = RB.fetch_index(cli19, "ZEROHIT 名字")
+    c.check("ZEROHIT：ok=True（成功，不是失败）", True, rz.ok)
+    c.check("ZEROHIT：usable=0（零命中）", 0, rz.stats.get("usable"))
+    c.check("★ ZEROHIT：**落盘缓存**（下次零请求）", True,
+            RB.load_rss("ZEROHIT 名字") is not None)
+    rf = RB.fetch_index(cli19, "HTTPFAIL 名字")
+    c.check("HTTPFAIL：ok=False（失败）", False, rf.ok)
+    c.check("★ HTTPFAIL：**不落盘**（失败不许被缓存成零命中）", True,
+            RB.load_rss("HTTPFAIL 名字") is None)
+    # ⛔ 阴性对照：两者结论**必须不同**（否则就是把失败当空结果）
+    c.check("⛔阴性对照：ZEROHIT 与 HTTPFAIL 结论不同", True,
+            rz.ok != rf.ok)
+
+    print("\n【判据⑳】每个请求都过闸门（RSS 请求数 == gate.used_round）")
+    _clear_raw_dir()
+    HITS.clear()
+    g20 = cr.RateGate(max_per_round=50, min_interval=0, max_per_day=500)
+    cli20 = crawl.Client(gate=g20)
+    RB.fetch_index(cli20, "闸门词A")
+    RB.fetch_index(cli20, "闸门词B")
+    n20 = len([h for h in HITS if "torrentrss" in h])
+    c.check("mock 收到 torrentrss 请求数", 2, n20)
+    c.check("★ 闸门计数一致", 2, g20.used_round)
+
+    print("\n【判据㉑】写库：只填**空白 tid** 行，非空行逐列不变、updated_at 不变")
+    _clear_raw_dir()
+    import sync_opencd_tid as ST
+    db2 = db.connect()
+    # 一条空白（该填）、一条非空（不许动）
+    db2.execute("INSERT OR REPLACE INTO tasks (info_hash, torrent_name, status, "
+                "opencd_tid, updated_at) VALUES (?,?,?,?,?)",
+                (RSS_HASH, "命中词行", "SUCCESS", None, "2020-01-01 00:00:00"))
+    other = "9" * 40
+    db2.execute("INSERT OR REPLACE INTO tasks (info_hash, torrent_name, status, "
+                "opencd_tid, updated_at) VALUES (?,?,?,?,?)",
+                (other, "已对上", "SUCCESS", "12345", "2020-01-01 00:00:00"))
+    db2.commit()
+    before = dict(zip(
+        ["opencd_tid", "updated_at"],
+        db2.execute("SELECT opencd_tid, updated_at FROM tasks WHERE info_hash=?",
+                    (other,)).fetchone()))
+    db2.close()
+    # 走 build + apply_tids（唯一写口）
+    todo, _, _, _ = ST.build([(RSS_HASH, "", "")], r17.idx)
+    c.check("build：空白行进 todo", 1, len(todo))
+    ST.apply_tids(todo)
+    db3 = db.connect()
+    got_tid, got_upd = db3.execute(
+        "SELECT opencd_tid, opencd_added_at FROM tasks WHERE info_hash=?",
+        (RSS_HASH,)).fetchone()
+    c.check("★ 空白行已填 tid", RSS_TID, str(got_tid))
+    c.check("★ 空白行已填 added（UTC 串）", "2026-10-11 19:29:25",
+            (got_upd or ""))
+    after = dict(zip(
+        ["opencd_tid", "updated_at"],
+        db3.execute("SELECT opencd_tid, updated_at FROM tasks WHERE info_hash=?",
+                    (other,)).fetchone()))
+    c.check("★ 非空行 opencd_tid 逐字不变", before["opencd_tid"], after["opencd_tid"])
+    c.check("★ 非空行 updated_at 不变（纪律 3）",
+            before["updated_at"], after["updated_at"])
+    db3.close()
 
     srv.shutdown()
     print("\n" + "=" * 74)

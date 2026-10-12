@@ -19,7 +19,8 @@ RUN pip install --no-cache-dir \
     qbittorrent-api==2026.10.0 \
     torf==4.2.7 \
     requests==2.32.3 \
-    beautifulsoup4==4.12.3
+    beautifulsoup4==4.12.3 \
+    Pillow==11.3.0
 
 # 代码直接打进镜像，不再依赖 bind mount 到 /app —— 状态（数据库/产物）
 # 走独立的 /data，两者彻底解耦，见 docker-compose.yml 和 config.py。

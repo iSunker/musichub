@@ -9,6 +9,920 @@
 
 ---
 
+> ★★ **导航（2026-10-11 整理）** —— 本文件是**逆序**（最新在最上），但历史上有**两套互不相同的「续 N」编号**
+> 撞在一起，读时别混：
+> - **10-11 序列**（本会话链的**待办/结论**）：`续 104 → 105 → 106 → 107 → 108 → 109 → 110 → 111 → 112`
+>   （★ `续106` = **待办总清单 T1~T6**；★ `续112` = **全问题待办大纲（BACKLOG）入口**，恢复会话先读它）。
+> - **10-08 序列**（**另一批**独立编号，现落在文件**末尾**）：`续 100 → 101 → 102 → 103 → 104 → 105 → 106 → 107`
+>   （这里的 `续106` = `#56 retract 自检`，与上面**完全无关**）。
+> ⇒ 找待办看 **顶部「续106」**；找"护栏 #39/#49/#51"那批工作看**末尾的 10-08 序列**。
+> ★ 本次仅**修正顶部四处**：补回丢失的 `续106` 节头、把 `续109/续108` 摆回逆序、加本导航 —— 旧节内容一字未改。
+
+---
+
+## 2026-10-12（续 112）—— ★★ 全问题待办大纲落盘（BACKLOG）+ 乌托邦即将自然出种
+
+> 用户："把现在所有问题列入待办大纲，本地落盘。" 本节 = 汇总大纲的**权威入口**；
+> 细则与快照在 **`.scratch/BACKLOG.md`**（gitignore，不进仓库/镜像）。
+
+### ★ 主表（B 系列；与 `续106` T1~T6 对应，避免重复）
+
+| ID | 类 | 问题 | 现状 | 阻塞 |
+|----|----|------|------|------|
+| **B1** | 修 | #31 精准优先 | 代码+回归 14/20 完成 | ★ 未发版（B4）|
+| **B2** | 修 | A组 8 行重发(#54)+改指针(#55) | 手册 v2 在；`republish_one.py` 缺阴性对照 | ★ 等你批（不可逆）|
+| **B3** | 修 | #173 的 16 条坏指针残留 | 只止血（5 条 stale）| 等你定订正口径 |
+| **B4** | 修 | 本机 WIP 未发版（21改+10新）| 工作树自洽、默认 dry-run | ★ 等你批发版 |
+| **B5** | 修 | #5 漏做种告警清空 | 未清 | 等你批 |
+| **B6** | 决 | 无 log 直发蟹黄堡旁路（解锁 188 行）| 未决 | ★ 等你拍板 |
+| **B7** | 决 | 无 log WEB 发行放宽（~180 行）| 未决 | ★ 等你拍板 |
+| **B8** | 清 | `.scratch/` 堆积 | 未清 | 可选 |
+| **B9** | 清 | `tools/` 临时脚本堆积 | 未清 | 可选 |
+| **B10** | 闭环 | 乌托邦不发种 | ✅ 查清=队列空 | — |
+| **B11** | 闭环 | HR 补种 171 | ✅ 全绿 | — |
+
+### ★★ 快照（2026-10-12 实测，会变的数字以 `counts.json`/`.scratch/BACKLOG.md §0` 为准）
+- **发布队列 = 0**：正常 —— 12 条 `ALLOW` 未到「皇后发布+7天」闸，最早 `41dba1e864c9` 到期 **10-13 09:51**
+  ⇒ **乌托邦 ~10-13 上午自然出种，无需干预**（同 `续111 §A`）。
+- git 分支 `feat/crawl-stage-wiring`，HEAD=`a160375`；工作树 **21 改 + 10 新**未提交/未发版。
+- HR 补种：qbit-music3 171/171 在库（170 做种 + 1 暂停，新增仅 id=145523）—— 见 `.scratch/hr-rescue/STATE.md`。
+
+### ★ 依赖与建议
+- **B1/B3/B5 → 并入 B4（发版总闸）→ 生产生效**；**B2 不可逆、B6/B7 决策，全需你点头**。
+- 零风险先做：**B2 补阴性对照**（纯本地）、**B3 出 16 条错值表**（只读）。
+
+### ★★ B12（本次会话新增·进行中）—— 皇后按 infohash 反查补 tid + 日配额 50→500
+- 用户指示：**一天能搜 500 个，改限制；把"按 infohash 反查页面补 tid"补上**。
+- 缺口实测：全库 2212 行，**1651 行无 `opencd_tid`**（SUCCESS 335 / NO_LOG_FILE 1316）⇒ 抓不了页；
+  tid 只来自 `sync_opencd_tid.py`（读 vertex2 外库），vertex2 没收的拿不到。
+- 现状：`crawl.py` 的 `--search` 路 2026-09-23 已整条删除；★ 解析器 `opencd.parse_list` 还在。
+- 两个待定：**Q1** 日配额 500 后 `min_interval`(现 120s)/`max_per_round`(现 20) 怎么调（**要你点头**）；
+  **Q2** 皇后搜索页**能否按 infohash 搜**（未验证）。
+- ★ 详情/出处：`.scratch/B12-tid-reverse-lookup.md`；TaskList #8~#13。
+
+> ★ 本节只登记**问题与状态**；不写会变的库计数；细则/证据全在 `.scratch/BACKLOG.md`。
+
+---
+
+
+> 用户问："前几次会话还有哪些问题没解决？乌托邦还是没有开始发种。" 本节 = 真机只读核查的答复。
+
+### A. ★★★ 乌托邦为什么"没发种" —— **队列里根本没有到期可发的行**（不是卡死/不是 bug）
+
+**真机实测（NAS 容器内只读 + `docker logs`，2026-10-12 07:10 NAS/CST）：**
+- **发布队列计数 = `0`**（`SELECT count(*) FROM tasks WHERE {db.PENDING_PUBLISH_WHERE}`）。
+- publish 阶段**每轮都跑、正常退出**，输出逐字为 **「💡 当前没有需要发布的任务。」**（耗时 1.4s，`last_ok:true/last_code:0`）。
+- ⇒ **「乌托邦卡住」是误报**（同 `续104 §F`）。**流水线健康**：同一轮里 **蟹黄堡 `publish_crabpt` 正在发**（耗时 42.4s，handoff 复制 + 入队都正常）。
+
+**★ 为什么队列=0 —— 把候选逐闸门数出来（`SUCCESS` 且 `site_status≠EXISTS` 共 509 行）：**
+
+| 子集 | 行数 | 卡在哪道闸 |
+|---|---:|---|
+| `transfer_rule = NULL`（未映射，327 无 `opencd_tid` / 4 有） | 331 | 闸门①/③（**没走皇后路**）|
+| `transfer_rule = DENY` | 155 | 闸门④（禁转，**正确拒**）|
+| **`transfer_rule = ALLOW`** | **12** | **闸门② —— 全部 `not_due`（皇后发布 < 7 天）** ← **唯一"迟早能发"的那批** |
+| `transfer_rule = NEED_CONFIRM` | 11 | 闸门④（待确认）|
+
+**⇒ 直接原因：那 12 条 `ALLOW` 的行，`opencd_added_at + 7 天` 全部**还没到**。**
+**最早一条 `41dba1e864c9` 到期 = `2026-10-13 09:51`（NAS 时间）**，其余多在 `10-14 ~ 10-16`。
+⇒ **乌托邦会在 ~2 天后（10-13 上午）自然开始出种**，无需任何干预。
+
+> ★ 一般化：**"没发种"要先分清「不能发」与「没有可发的」** —— 队列空 ≠ 故障。
+> 判据：`db.PENDING_PUBLISH_WHERE` 计数 + 逐闸门分桶（见上表），而不是看"站点上没新页"就断定坏了。
+
+### B. ★ 前几次会话未解决问题清单（截至本次核查，仍未闭合）
+
+| # | 问题 | 状态 | 归口 |
+|---|---|---|---|
+| 1 | **乌托邦不发种** | ✅ **本次查清=队列空**（10-13 自然出种） | 本条 §A |
+| 2 | **A 组 8 行错版本页重发（#54）+ 改指针（#55）** | ❌ **未做**（不可逆，等你批；方案 v2 已落 `.scratch/A_group_republish_plan.md`；`republish_one.py` 已写+自检绿，**缺阴性对照+发版**） | `续109` §C/§F |
+| 3 | **#173 的 16 条坏指针行残留** | ⚠️ **未订正**（止血只拦了当前 5 条 stale；根治护栏已上线，但**回填路未查修、21 条错值未逐条订正**） | `续108` |
+| 4 | **全部 WIP 未发版**（21 改 + 11 新增） | ❌ **未部署**（`musopia.py` 已修好、不再是地雷；其余已验证） | `续104 §A` |
+| 5 | **#31 精准优先** | ✅ 代码+自检+回归 14/20 完成；⚠️ **未发版**（随 #4） | `续107` |
+| 6 | **决策类 T4.1/T4.2**（无 log 直发蟹黄堡旁路 / WEB 放宽） | ❌ 未决（等你拍板，业务规则） | `续106` T4 |
+| 7 | **#5 漏做种告警**（`handoff_missing_data.jsonl`） | ⚠️ 建议清空/归档以消警（**需批**） | `续106` T4.4 |
+| 8 | **`.scratch/` 临时脚本堆积 + `tools/` 自称"用完即删"脚本** | ⚠️ 未清（T6.3，可选） | `续106` T6.3 |
+| 9 | **`续106` 节头曾丢失**（引用指向它、但它无标题） | ✅ **本次补回**（见 §C） | 本条 |
+
+### C. 文档整理（本次执行）—— `SESSION-NOTES.md` 顶部排序理顺
+- **补回丢失的 `## 2026-10-11（续 106）` 节头**（原是一段无标题 preamble，被夹在 续105 前 —— 引用全指向它，却搜不到）。
+- **把 `续109/续108` 摆回逆序**（原 108 在 109 之前；#173 是排查 A 组时"顺带挖出"，晚于 A 组 v2 ⇒ 109 应在 108 上）。
+- **加顶部「导航」**：说明本文件有**两套"续 N"编号**（10-11 序列 vs 10-08 序列）撞车，读时别混。
+- ★ **旧节内容一字未改**（守"只增不改"纪律，仅修正节头/顺序/导航）。
+
+---
+
+## 2026-10-11（续 110）—— `qb3260 空 tracker` 探因 + 「会话链收尾/落盘」总结
+
+> 本节 = 收尾：① 回答"为什么 qb3260 有很多没有 tracker 的种子"；② 把 10-11 会话链
+> （`94a5b153` 等）**已完成但未单独成节**的产出补记一笔；③ 会话 jsonl 清理记录。
+> ★ 已单独成节的产出（`#31` 精准优先、`#173` 护栏、A 组 v2 方案）**不在此重复**。
+
+### A. ★★★ `qb3260` 空 tracker 之谜 —— 是 **IYUU「原地辅种」**，非本项目 bug
+
+**现象**（真机只读实测，`qbit-music3` = `:3260` 皇后源实例，共 1562 种）：
+
+| tracker | 数量 |
+|---|---:|
+| `tracker.open.cd`（皇后） | 1416 |
+| **空 tracker** | **115** |
+| `crabpt.vip` | 19 |
+| `www.musopia.vip` | 12 |
+
+**115 条的共同特征**（逐条查过）：
+- 全 `stalledUP`、`progress=1.0`、`category=''`、`save_path=/downloads` ⇒ "本地已有内容后加的种"，非下载来的。
+- `added_on` 全落在 **2026-10-08 07:35:40~42（2 秒内）** ⇒ **一次批量导入**。
+- tag 全是 `other, ~share_limit_1.all-500k`（一条带 `IYUU自动辅种`）—— **IYUU 辅种标签**。
+- `magnet_uri` **没有 `&tr=`**（只有 `btih`+`dn`）⇒ 加入时用的种子/磁力**本身不带 announce**。
+
+**根因**：NAS 上跑着 `iyuuplus_ssd`，其计划任务 **ID 7「qb原地辅种」**（拿本地已有文件回填种子）
+⇒ 这样构造/匹配出来的种**不带 tracker**，加进 3260 后 qB 的 tracker 列即空。
+**不是本项目的 bug，是 IYUU 辅种的正常现象。**
+
+**对本项目影响 = 0（可放心保持现状）**：
+- 115 个 hash 与生产库交叉比对 → **115/115 全部已在库**（`NO_LOG_FILE 68 / SUCCESS 34 / PUBLISHED 12 / NO_TORRENT_FILE 1`），
+  与 `src/run.py:1707` 已写死的历史结论（"空 tracker 的行 115/115 已在库"）**逐字吻合**。
+- scan 认皇后种用 **tracker 主机名精确相等**（非 category/tag）；空 tracker 一律**判否**（"不可知 ≠ 是"）
+  ⇒ 这 115 条**不会被误当皇后种发出去**，且因都已在库**一条也不会漏扫**。★ 设计正确，**不处理**。
+
+### B. 会话链日志巡检（只读，无异常）
+- 容器 `opencd2musopia` healthy、跑**镜像原版**；`docker logs --since 24h` **无 traceback/exception**。
+- `daemon_state.json` 五阶段全 `last_ok:true / last_code:0`（只是"未到期跳过"）。
+- 唯一刷屏的两类输出**均属已知非异常**：① `❌ 跳过：目录里没有 .log 抓轨日志` = 铁律（乌托邦必须有 log）正确行为；
+  ② `[图床失败] … Duplicated upload`（24h 内 4 次）= 已知封面重传问题（已修，随 WIP 待上线）。
+
+### C. NAS 挂载搬迁 —— **代码零改动**（补记，详见本节之后 `续107` 同款小节）
+用户把宿主侧 `qbittorrent-publish/Download` → `qbit-publish/Download`（qB 3010 宿主 + 项目 `PUBLISH_DIR`）。
+★ 代码只认**容器内** `/publish`（`config.PUBLISH_CONTAINER_DIR`）⇒ 宿主侧改名对它**透明**，**无需改代码**。
+两容器挂载已一致、2 个 FLAC 实测 `stalledUP prog=100%`（qB 自动重认）。已同步 3 处**默认值/注释**
+（`docker-compose.yml` / `.env.example` / `config.py`+`handoff.py` 注释）避免日后误用旧路径。
+
+### D. 会话文件清理（本次执行）
+删除旧会话 jsonl（内容已全部并入本文档 + `ERRATA.md`，无独有信息）：
+- `94a5b153-…jsonl`（3.8MB 主会话）+ 其 `subagents/`（3 个 `Explore`/`Plan` 子代理，主题均为 `#31` 精准优先，结论已落 `续107`）。
+- `566a133d-…jsonl`（仅一条 `/exit`）、`60e0f86b-…jsonl`（截断噪音）。
+> ★ 保留：`memory/`（空）；本会话自身的 `35bc0935-…jsonl` 不删。
+
+---
+
+## 2026-10-11（续 109）—— A 组重发【拦路虎】+ 方案 v2（**未执行生产**）
+
+> 用户选 **Z**：先把"重发怎么发"写成方案，**不动生产**。方案落 `.scratch/A_group_republish_plan.md` §v2。
+
+### 前置全过（只读）
+- **8/8 `MISSING-PAGE`**（`crabpt 216915` 首轮 `DOWNLOAD-FAILED` = crabpt 抖动，复跑即 MISSING）。
+- **源全在**：8 行 `.torrent` + `content_path` 数据目录 ✅。
+- **DB 现状**：8 行 `tasks.site_status='EXISTS'`。
+
+### ★★ 拦路虎（v1 方案漏掉，实测踩到）
+- **`publish.py --only <hash>` 是与待发队列取交集**，而队列 WHERE 首条 = **`site_status != 'EXISTS'`**。
+- 8 行全是 `EXISTS` ⇒ **点名也发不出去**（实测 `--dry-run` 报「💡 当前没有需要发布的任务」）。
+- 且这 8 条 `transfer_rule` 已止血成 `NEED_CONFIRM` ⇒ **闸门④也拦**（只有 `ALLOW` 放行）。
+- ⇒ **v1 的"`publish.py --only` 重发"路径走不通**。
+
+### 两条重发路径（详见方案 §C）
+- **X 临时改 `site_status` 回队列**：快、零代码；但制造"这行没发过"的**语义谎言**（窗口期可能被 handoff/dedup 误读）。
+- **Y 写 `tools/republish_one.py` 手工单条发**：净、可复用、可自检；绕过队列（"重发已存在行"本就不该进队列）；代价=写码+发版。
+- ★ **推荐 Y**（`ERR-META-03`：一个动作别背两个语义）。
+- ★ 无论 X/Y：**发布 + 改指针（#55）必须连着做完** —— #173 护栏上线后，发了新页却不改 `site_torrent_id` ⇒ edit 会被**永久拒改**。
+
+### 状态
+- **未动生产**（只做只读核对）。
+- ⚠️ **`9e9ed78ab8` 现 `transfer_rule='ALLOW'`**（试水准备时由用户复位）。因 #173 护栏已上线 ⇒ 即便 stale，edit 也会拒改（`site_torrent_id=20667` 指向别人页）⇒ **无新增风险**。**待发或复原，见方案 §F 清单。**
+
+---
+
+## 2026-10-11（续 108）—— ★★★ 新 bug `#173`：`tasks.site_torrent_id` 号段错值（21 条指向别人页）+ 已止血
+
+> 本节 = 排查 A 组 8 行时**顺带挖出的独立高危 bug**。★ 与 A 组（错版本页）**是两码事**。
+
+### 现象（只读扫 130 行 `EXISTS`：`.scratch/scan_ptrs.py`）
+`MATCH=104  MISMATCH=21  MISSING(页已删)=5  ERR=0`。21 条 **全是 crabpt**：
+- **`tasks.site_torrent_id` 指向的页 ≠ 本地 `info.name`**，且指向的是**完全不相干的资源**：
+  - 音乐条目 → **别人的电影/剧集页**（`I.Am.From.Chile`/`CTRL`/`Sucker.Punch`/`Pacific Rim`/`Severance`/`Ted`/`呼叫大明星`…）
+  - 音乐条目 → **别人的音乐页**（`GAO-Christmas`/`My Little Airport`/`Beyond`/`Max Oazo`…）
+- 坏 tid 分布在 `15972…19350`（**非连续号段**）⇒ 不是单纯的号段偏移，是**错位匹配/写错源**。
+
+### 根因（初判，待坐实）
+- `site_torrent_id` 由**回填**写入（`sync_site.py` 按**归一化标题**匹配"我的上传"列表；`sync_opencd_tid.py` 另有写入路）。
+- **21 条全是 crabpt + 指向别人页** ⇒ 大概率是**某次回填把"id↔内容"对错**（标题匹配错/号段混用/写了别的列）。
+- ★ **待办：坐实机制**（看 `sync_opencd_tid` 写入路 + 历史回填日志）。
+
+### ★★★ **危害不在"误发重复"，在"edit 会改写别人的页面"**
+1. **发布路安全**：`get_pending_publish` 判据 = `status='SUCCESS' AND site_status!='EXISTS'`，**不用 `site_torrent_id`** ⇒ 21 条 `site_status='EXISTS'` 被排除 ⇒ **不会误发重复**。
+2. **edit 路高危**：`update_metadata.py` 用 `site_torrent_id` 当**页面 id 去写**（`edit_torrent(tid, overrides)`），且**没有"这是我自己的页吗"的身份护栏**；判据只是 `site_status='EXISTS' AND site_torrent_id!='' AND transfer_rule='ALLOW' AND stale`。
+   ⇒ 一条**坏指针 + ALLOW + stale** 的行 ⇒ **会把它的元数据写进别人的页**（不可逆）。
+   ★ 实测踩到：`3309ad2a2e`（SEKAI NO OWARI Stella，tid=**19069**=""CTRL 电影页"，ALLOW + stale）⇒ **当时随时会在下一轮 edit 改写电影页**（edit 周期 6h，≈5h 后到期）。
+   ★★ 一般化（同 `ERR-PUBLISH-14` 族）：**拿一个可能错的指针当"事实"去执行不可逆动作** = 最坏形状。指针错值本身无害（只读），**但被另一条路当成"要做的事"就有了破坏力**。
+
+### 已止血（用户执行，2026-10-11）
+备份 `data/data.db.bak-rule-20261011-114413` → 把这 5 条"坏指针 + ALLOW + stale"的 `transfer_rule` 改 **`NEED_CONFIRM`**（edit 闸门④ 仅放行 `ALLOW` ⇒ 立即被拦）：
+`9b4408b944`/`0295c1305c`(tid 19333) · `3309ad2a2e`(19069) · `1f42798019`(20639) · `9e9ed78ab8`(20667)。
+⇒ **edit 候选 35 → 29**，电影页保住。★ 用 `NEED_CONFIRM` 而**非 `DENY`**（DENY = "禁止轉載"是另一语义，别误用）。
+
+### 根治方案（**待排期，改代码**）
+- **主方案**：`update_metadata.py`（及任何"用 `site_torrent_id` 写站点"的路）在**提交前加身份护栏**——用 `site_verify` 验证"站侧页 `info.name` == 本地 `info.name`"，**不符 ⇒ 拒改**（同 `#173` 与 `ERR-PUBLISH-14` 的"拿事实、不拿推测"纪律）。
+- **配套**：查清并修 `site_torrent_id` 的回填路（`sync_site`/`sync_opencd_tid`），对 21 条错值**逐条订正或清空**。
+- **判据**：edit 路加护栏后，构造"命中别人页"的假 client ⇒ 必须**拒改**（阴性对照）。
+
+### ★ 根治补丁已落盘 + 已部署（2026-10-11）
+- `site_verify.edit_target_ok(local,hosted)`（纯判据）+ `update_metadata.py` 在 `edit_torrent` **之前**核身份、不符 ⇒ 拒改（计数/明细）+ `--selftest`（判据 + AST 接线，**两条阴性对照实测均变红**）。
+- 注册进 `tools/gen_counts.py`（自检 **9/9**）。`ERRATA.md` 记 **`ERR-PUBLISH-19`**。
+- **只读实测**：5 条真坏指针行 **5/5 拒改**（`3309ad2a2e`→`CTRL`、`19333`→`仙逆`、`20639`→`郎君不如意`、`20667`→`Wolf.Warriors`）。
+- **已发版上线**（digest `793e782b…`，容器 healthy，容器内两自检 RC=0）⇒ **edit 现在会先核身份、拒改别人的页**。
+
+### 与 A 组（#54/#55）的关系
+- A 组 8 行里 **5 行**同时是坏指针行（即上面止血的 5 条）⇒ **A 组的"重发+改指针"会顺带订正这 5 条**。
+- ★ 但**另 16 条坏指针行**不在 A 组里 ⇒ 属 #173 单独处理。
+- 方案 A（A 组只做自己的语义）**不变**：`tasks.site_torrent_id` 的错值**不**在 A 组里顺手改。
+
+---
+
+## 2026-10-11（续 107）—— ★★★ T1/T2.1/T3.1 三件急办全落地：`#31` 精准优先（真站回归 14/20）
+
+> 本节落盘"三件急办"的结果。★ 恢复会话先读**续 106（待办总清单）** + 本节。
+
+### T2.1 —— scan 结果核实 ✅（只读）
+容器内跑 `verify29.py`（★ 查库用 `like '<12位前缀>%'`）：**29/29 已入库**
+= **22 `SUCCESS` + 7 `NO_LOG_FILE`**（与期望逐字一致，无第四条 FAILED）。scan 已跑完（`last_ok=true`）。
+
+### T3.1 —— WIP 分类（判据 = `Dockerfile` 的 `COPY src/*.py` + `COPY tools/`）
+- **A 进镜像的代码** = `src/*.py` + `src/site_*.py` + `tools/*.py` + `Dockerfile`/`docker-compose.yml`/`.env.example`。
+- **B 只在本机的记录** = `ERRATA.md`/`SESSION-NOTES.md`/`counts.json`/`README.md`/`CLAUDE.md`（不进镜像）。
+- **C `src/musopia.py`** = 半成品，**曾绝不能部署**；现已随 T1 修好。
+- ★ 真实耦合：T3 发版会带上 `musopia.py` ⇒ **必须先修好 T1 才能发版**（现已具备）。
+
+### T1 —— `#31` 精准优先：落地 + **真站回归 14/20** ✅
+
+**改了什么**（`src/musopia.py` / `src/crabpt_site.py`；+`publish.py`/`run.py` 自检）：
+- `SEARCH_QUERY_PLAN` 改**窄→宽**排序；`search_and_compare` 改**逐查询→立即验证→命中即停**；
+  蟹黄堡 `find_existing_by_name` 默认 `max_candidates=8 → None`（读 config，与乌托邦同源）。
+
+**★★★ 关键实测（推翻了初版直觉 —— 这是本节的精髓）**：
+初版假设"高精度 = 单 token（艺术家名）"，但**真站实测恰好相反**：
+- 单 token 是**宽**的：`Etre` 单独查 **109 条**（目标第 44）、`群星` **109**（第 67）、`Shaggy` 90；
+- 多 token 窗口才**窄**：`Etre 2001 03` **18**（第 8）、`群星 爱是我们共同的声音` **2**、`Shaggy Intoxication 2007` **2**。
+⇒ 初版把**最宽的查询排到了最前** ⇒ 预算被噪声吃光 ⇒ 仍 11 量级。改正后 = **多 token 窗口在前、单 token 最后**。
+★ 一般化 = **`ERR-PUBLISH-18`**：「精度是**可测量的外部事实**（该查询在此站返回多少候选），
+**不是** token 的类型/长短」。
+
+**真站回归（20 行，`q31_regress.py`，低频只读）**：
+- 本修 = **14/20**（旧 area=0 = 13/20；半成品 = 11/20）；命中落点 **`pos ≤ 3`、`n_over_8=0`**（预算不再是瓶颈）。
+- 新救回：`Etre`(pos3)、`群星`(pos0)、`Shaggy`(pos0) 等；按"同 info.name 的旧指针页算命中"口径 ⇒ **18/20**。
+- 2 个 ❌（`徐元白 19245`/`李泰祥 19350`）实测 **`page_exists=False`（页已删）** ⇒ **非召回失败**。
+
+**自检（含阴性对照，均已实测变红）**：
+- `publish.py --selftest` ok8 扩：顺序断言 + 命中即停 + 噪声不截断 + **加固旧"中途 503 仍抛"**（命中即停曾让它**空真变绿**，已强制首条落空）。
+- `run.py --selftest` 新增 **⑨s** 结构护栏（`search_and_compare` 内两条 `raise` + `return tid` + `DEDUP_MAX_CANDIDATES`）。
+- 本机 `run.py`/`publish.py`/`crabpt_site.py` `--selftest` 全 **EXIT=0**。
+
+### 你改 NAS 挂载路径的影响评估 ✅（无需改代码）
+你把 `qbittorrent-publish/Download` → `qbit-publish/Download`（qB 3010 宿主侧 + 项目 `PUBLISH_DIR`）。
+**代码零改动**（代码只认容器内 `/publish`，宿主侧改名对它透明）；两容器挂载已一致；
+两个 FLAC 实测 **`stalledUP prog=100%`**（qB 自动重认、无需 recheck）。已**同步 3 处默认值/注释**避免日后误用旧路径。
+
+### 文档/账同步
+- `ERRATA.md` 新增 **`ERR-PUBLISH-18`**（精准优先的教训/根因）。
+- `README.md` 新增「发布前跨站查重」节。
+- `counts.json` 重生成（**ERR 139 条**）。
+
+### 未做（待你批）
+- **T4c 发版**：`build-push.sh` → NAS 点名 `:<git-sha>` → `up -d` → 容器内 `--selftest`（**等用户批**）。
+- T4.3 A 组 8 行重发（不可逆，需批）；T6 清理（`.scratch/` 88 文件 + 3 旧会话目录）。
+
+---
+
+## 2026-10-11（续 106）—— ★ 待办总清单 T1~T6（★ 恢复会话先读本节）
+
+> ★ 本节是**待办的落盘处**（`ERR-META-04`：结论/待办不许只活在对话里；与续 102 的 `#17a–#17i` 同一体制）。
+> **恢复会话先读本节**。每条写死**判据**与**依赖**。
+> ★ 完成即在此节标 `✅`；全完成后本节并入后续续节，不留空壳。
+
+### ★★ 亟需现在做的（3 件）
+1. **【T1.2/T1.3】定 `#31` 方向并落地** —— 已实测（续 105）：本机半成品（`area=1`+词对）**比旧代码更差**（13→11）。
+   ⇒ **必须先决定：① 做「精准优先」；或 ② 回退 `area=0`。** ★ 决定前 `src/musopia.py` **绝不能部署**。
+2. **【T3.1】把本机 WIP 分类**（代码 vs 本地记录）—— ~28 个改动文件悬着，其中**除 `musopia.py` 外**的部分
+   （蟹黄堡坏封面修复、传前压图、scan 单实例锁、C 类巡检等，见续 100/104）**已验证可用、与 #31 无关**
+   ⇒ 可先单独发一版上生产。
+3. **【T2.1/T2.2】核实后台 scan 结果** —— 后台 scan **正在跑**（`▶️ 阶段 [scan] 开始` @ 2026-10-11 07:58:44）。
+   跑完核对 29 条入库（期望 22 `SUCCESS` + 7 `NO_LOG_FILE`；脚本 `.scratch/verify29.py`）。
+
+### 主干概览
+| 主干 | 一句话 | 现状 | 阻塞 |
+|---|---|---|---|
+| **T1** | `#31` 查重召回 | ★ 已定性：半成品更差 | **等用户选 ①/②** |
+| **T2** | scan 29 条入库验证 | 后台 scan 正在跑 | 等 scan 跑完 |
+| **T3** | 本机 WIP 上生产（代码 vs 本地记录） | 未提交/未部署 | T1；**其余部分可先发版** |
+| **T4** | 决策类 | 未决 | **等用户拍板** |
+| **T5** | 文档与账同步 | 部分 | 随 T1~T4 |
+| **T6** | 清理 | 部分完成 | — |
+
+---
+
+### T1 —— `#31` 查重召回（★ 最高优先）
+- [ ] **T1.1（已定案·实测）** 方向 = **精准优先**（`area=1` 只有在精准查询下才用）；做不出来 ⇒ **回退 `area=0`**。
+- [ ] **T1.2** 改 `src/musopia.py`：① `SEARCH_QUERY_PLAN` 把**高精度短串**（2 词对/单词艺术家名）**排最前**；
+      ② 宽 area 的大扇出查询**放在精准串全部落空之后**（或干脆不用）。判据：回归 **>13/20**（旧基线）且无"整片 MISS"。
+- [ ] **T1.3** 用本机半成品对真站点重跑（`docker cp src/musopia.py → 容器 /tmp/musopia_local.py`，`importlib` 覆盖；**不动 /app**）。
+      ★ 判读：脚本比 `site_torrent_id` **过严**，`菅原圭/サカナクション/Mary Black/milet` 的"⚠️误中"= **命中另一同 `info.name` 页**（DB 指针陈旧）⇒ 算命中正确；`徐元白/李泰祥` 站点页 `page_exists=False`。
+- [ ] **T1.4** `musopia`/`publish` `--selftest` + 补断言（`SEARCH_QUERY_PLAN` 顺序 + 阴性对照）。
+- [ ] **T1.5** `ERRATA.md` 记 `ERR-PUBLISH-17`：「**召回面变宽 ≠ 召回变好 —— 候选被噪声污染会把真目标推出预算**」。
+- [ ] **T1.6** `tools/gen_counts.py` 重生成 `counts.json`。
+- [ ] **T1.7** 部署（并入 T3）。
+
+### T2 —— scan 29 条入库验证（等后台 scan）
+- [ ] **T2.1** 确认 scan 跑完：`docker logs opencd2musopia | grep -E "🎯 扫描完成|阶段 \[scan\]"`；`run.py` 进程数 ∈ {0,1}。
+- [ ] **T2.2** 核对 29 条：**22 `SUCCESS` + 7 `NO_LOG_FILE`**，无第四条 `FAILED`。★ 查询**必须 `like '<12位前缀>%'`**。
+- [ ] **T2.3（#17c）** 确认 22 条进"可发布"口径（`SUCCESS` ≠ 已发）。判据：`db.publish_funnel()` 队列数增长，新增含这些 hash。
+- [ ] **T2.4（#17d）** 站点侧开始出种：publish 下周期后新增页 > 0，或 `site_publish` 新增行。
+- [ ] **T2.5（#17e，可选）** 7 条无 log 复核（`find -iname '*.log'` 为空）。
+- [ ] **T2.6（#17i，已定）** 报告巨型/可能含脏文件的种子清单，供用户自删。**不动代码。**
+- [ ] **T2.7（#17g）** `ERRATA.md` 加 `### ERR-ORCH-03`（长任务缺单实例锁）；不写日期/会变的数字。
+- [ ] **T2.8（#17h）** `README.md` 加"scan 是单实例的"小节 + 2 条排障行。
+
+### T3 —— 本机 WIP 上生产
+- [ ] **T3.1** WIP 分类：**代码（上 git）** = `src/*.py` + `src/site_*.py` + `tools/*.py` + `Dockerfile`/`docker-compose.yml`/`.env.example`；
+      **本地记录（不上 git）** = `counts.json`/`SESSION-NOTES.md`/`ERRATA.md`（★ 按用户"只传代码"纪律）。
+      ★ **`musopia.py` 单独处理**（等 T1）—— 其余部分**可先发一版**。
+- [ ] **T3.2** `python src/run.py --selftest` ✅（含接线断言）。
+- [ ] **T3.3** `bash tools/build-preflight.sh` 通过。
+- [ ] **T3.4** `bash build-push.sh`（★ 本机 `auth.docker.io` 间歇超时，重试可成）。
+- [ ] **T3.5** NAS 部署：`pull` **点名不可变 `:<git-sha>` tag**（`ERR-DOCKER-13`）→ `up -d --remove-orphans musopia`。
+- [ ] **T3.6** 验证跑的是新镜像（`docker inspect … .Image` vs `buildx imagetools inspect`）。
+- [ ] **T3.7** `docker exec opencd2musopia python run.py --selftest` ✅。
+- [ ] **T3.8（纪律）** **不主动 commit**；要提交时若在默认分支先开分支。
+
+### T4 —— 决策类（等用户拍板，勿自行执行）
+- [ ] **T4.1** 是否为「无 log 但可发蟹黄堡」开**直发旁路**（绕过乌托邦 `EXISTS` 前置）？
+      背景：蟹黄堡队列源 = 乌托邦已发 ⇒ 187 行「无解」桶永远拿不到。★ 铁律：乌托邦必须有 log、蟹黄堡可以没有（代码已实现，缺的只是旁路设计）。
+- [ ] **T4.2** 无 log 的 WEB 发行（180 行）是否放宽可发？（业务规则，非 bug）
+- [ ] **T4.3** `#54`/`#55` A 组 8 行错版本页重发 + 改指针（**不可逆，需批，先 1 条试水**）。
+      前置：8 个 id 只读复跑全 `MISSING-PAGE`。方案见 `.scratch/A_group_republish_plan.md`。
+- [ ] **T4.4** `#5` 建议：清空/归档 NAS `data/handoff_missing_data.jsonl` 以消"漏做种"告警。（需批）
+
+### T5 —— 文档与账同步（随 T1~T4）
+- [ ] **T5.1** `SESSION-NOTES.md` 每完成一条主干追加一节（**只增不改、逆序**）。
+- [ ] **T5.2** `ERRATA.md`：`ERR-ORCH-03`（T2.7）+ `ERR-PUBLISH-17`（T1.5）。
+- [ ] **T5.3** `README.md`：行为变更（scan 单实例 / 蟹黄堡跳过坏封面 / 传前压图 / `LSKY_MAX_BYTES`）。
+- [ ] **T5.4** `tools/gen_counts.py` 重生成 `counts.json`（**别手改**）。
+- [ ] **T5.5** `.env.example` 新键 → **手工**加到 NAS `.env`（`ERR-ENV-02`）。
+
+### T6 —— 清理
+- [x] **T6.1** 旧恢复笔记并入本文件 + 精简 `.scratch/RESUME.md`；删过期噪点（`lastprompt.txt`/`tail.txt`/`SESSION-ARCHIVE-*`/3 份旧 `RESUME-*.md`）。
+- [x] **T6.2** ★ 删除旧会话记录（`~/.claude/projects/D--Projects-opencd2others-zhuanzhong/`）。
+      **状态：已删 `94a5b153-*`（3.8MB 主会话 + `subagents/`）、`566a133d-*`、`60e0f86b-*`**（内容已并入本文件/`ERRATA`，见 `续110 §D`）。
+- [ ] **T6.3（可选）** `tools/` 里自称"用完即删"的临时脚本（`publish_probe.py`/`uploads_probe.py`/`show_response.py`）与历史 `_probe_*/diag_*` 归档或删除。
+
+---
+
+## 2026-10-11（续 105）—— ★★★ #31 查重召回「决定性实测」：`area=1` 半成品**净亏损**，不能部署
+
+> 本节是**本次会话的核心结论**。★ 待办见**下一节「续 106」（待办清单 T1~T6）**。
+
+### 干了什么（全部只读，真站点）
+在 NAS 容器上对**同一批 20 行** `site_status='EXISTS'` 行跑了两次回归
+（脚本 `.scratch/q31_regress.py` + 一个"本机版"：`docker cp src/musopia.py → 容器 /tmp/musopia_local.py`，
+`importlib` 覆盖 import；**不改 /app 生产代码**）：
+
+| 代码 | 配置 | 召回 | 命中落点 |
+|---|---|---:|---|
+| **生产容器（镜像原版）** | `area=0`、无词对窗口、`maxc=8` | **13/20** | pos ≤ 3 |
+| **本机半成品**（未部署） | `area=1`、有词对窗口、`maxc=16` | **11/20** | pos ≤ 3 |
+
+**⇒ 本机半成品比旧代码更差（13→11）⇒ 这个方向不能部署。**
+- **修好 1 条**：`Etre` 17337（旧 ❌ → 新 ✅ `pos=3`；词对窗口确实救回了它 —— 目标页 `MATCH`、页面存在）。
+- **打坏 5 条**：`村松崇継`/`岩崎太整`/`音田雅則`（旧 ✅ → 新 ❌）、`菅原圭`/`サカナクション`（旧 ⚠️误中 → 新 ❌）。
+
+### ★★ 根因（决定性，且**推翻了此前所有关于"预算不够"的假设**）
+**所有命中落点 `pos ∈ {0,3}`、`n_over_8=0`** ⇒ **`max_candidates` 从来不是瓶颈**（调大它无用）。
+真因：**`area=1` 让单条查询的候选从 ~4–21 条暴涨到 109–120 条**（噪声填满候选列表），
+真目标被挤到 `pos ≥ 8` ⇒ **撞 `max_candidates` 截断**。旧 `area=0` 时它排最前，所以没事。
+★ 教训形状：**「召回面变宽 ≠ 召回变好」** —— 候选列表被噪声污染会把真目标**推出预算**；
+而噪声是**线性**增长 ⇒ **加预算治不了**（要加到几百条，不可接受）。
+
+### ★ 结论（T1.1 最终定性）
+**`area=1` 单独用是净亏损。** 正解**只有一条**：**`area=1` 必须配「精准优先」** ——
+先发**高精度短查询**（艺术家名 / 2 词对），**命中即停**，绝不拿宽 area 的大扇出查询去撞候选预算。
+⇒ **若做不出「精准优先」，就回退 `area=0`**（= 13/20 的旧行为，至少不倒退）。
+
+### ★ 判读要点（防误判，别把"命中另一页"当缺陷）
+脚本比较 `site_torrent_id` **过严**：`菅原圭/サカナクション/Mary Black/milet` 的"⚠️误中"
+是**命中另一张同 `info.name` 的页**（DB 指针陈旧；`milet 14081 vs DB 17287`，DB 那条是**死链**）
+⇒ 判读时应算**命中正确**。`徐元白/李泰祥` 站点页 `page_exists=False`（页没了，非召回问题）。
+
+### ★ 顺带确认的事实
+- **生产容器 = 镜像原版**（`search_area:0`、无 `word_pairs`、`maxc=8`）✅ 与镜像一致。
+- **后台 scan 正在跑**（`▶️ 阶段 [scan] 开始` @ 2026-10-11 07:58:44，日志逐条在推进）
+  ⇒ T2 的核对**要等它跑完**（`run.py` 进程数现为 1）。
+
+### ★ 本次会话产出的落盘物
+- 本文件**续 106**（待办总清单 T1~T6，按依赖排序；每条含判据/依赖）。
+- 本文件**续 105**（本节，`#31` 决定性实测）。
+- `.scratch/RESUME.md`（精简的机器可读快照，已删 3 份旧 `RESUME-*.md` + `lastprompt.txt` 等过期噪点）。
+- ★ 未新建 TODO/TASKS 文件 —— 按项目既有体制，待办写在 `SESSION-NOTES` 节内（同续 102）。
+
+---
+
+## 2026-10-11（续 104）—— ★★★ 会话合并落盘：未提交代码/未部署项/未决决策/临时记录一览
+
+> **本节是"上一次会话链（续 100～103 + `ab19e30b`/`9a9df987`/`e801a0ef`）的合并落盘"** ——
+> 把散在多份 `.scratch/RESUME-*.md` 与对话里的**未完工作**收敛成一条入口，避免结论只活在会话里
+> （`ERR-META-04`）。★ 只写"已实测坐实"的；未坐实的写明**待验判据**。
+
+### A. ★★ 本机工作树 = 未提交、未部署（一树自洽的工作，别拆散）
+
+`git` 分支 `feat/crawl-stage-wiring`，HEAD = `a160375`（2026-10-07）。工作树 WIP 混着
+**必须随镜像上线的代码** 与 **只该在本机的记录**，提交时按后者分类（见本节 C）。
+
+**A.1 代码改动（M，需随镜像）**
+| 文件 | 主题 | 关联 |
+|---|---|---|
+| `src/daemon.py` | C 类护栏巡检线程 + `PUBLISH_WINDOW` 时段门 | #51/#75 |
+| `src/handoff.py` | #45 fix：3040 上站点种 B hash≠皇后 A ⇒ name 兜底匹配 | #45 |
+| `src/run.py` | selftest 护栏 ⑨f/⑨l/⑨o + **#17f scan 单实例锁**（`fcntl.flock`） | #33/#45/#17f |
+| `src/publish.py` | 蟹黄堡 `--limit` 改**成功计数** + 跳过即枚举（`selftest_crabpt_limit_enumerates`） | 续 100 |
+| `src/assets.py` | `LSKY_MAX_BYTES`(默认 5MiB) + `_shrink_for_lsky()` **传前压图**（Pillow，不覆盖原图） | 续 100 |
+| `src/musopia.py` | ★**半成品**：`SEARCH_PARAMS` `search_area` 0→1 + `SEARCH_QUERY_PLAN` 加「相邻 2 词对」窗口 | #27/#31 |
+| `src/config.py` / `src/net.py` / `src/cover_fetch.py` / `src/crabpt_site.py` / `src/update_metadata.py` | 各自护栏/超时/映射修复 | #27/#31/#51 |
+| `Dockerfile` | pip 加 `Pillow==11.3.0`；`COPY src/*.py ./` + `COPY tools/ ./tools/` | 续 100 |
+| `docker-compose.yml` | `pull_policy` 可配 + `/publish` 落点订正（=3040 下载根） | #92/#133 |
+
+**A.2 新增未跟踪（??，均默认 dry-run / 默认 `ENABLE_*=false`）**
+- `src/site_readd.py`（#49 执行臂）、`src/site_seed_patrol.py`（#39 只读巡检验）、
+  `src/site_verify.py`（#31 只读核对）。
+- `tools/check_site_seeding.py` / `readd_missing_from_patrol.py` / `readd_site_torrent.py` /
+  `retract_missing_pages.py`（含 `--selftest` 15 判据 + 4 阴性对照）/ `verify_hosted_edition.py`（自检 22/22）/
+  `test_verify_hosted_edition.py`。
+- ⇒ 全部**默认不动生产**（`_seed_patrol_thread_loop` 第一件事 return）⇒ 打包进镜像**生产行为不变**。
+
+### B. ★★ 未决决策（★ 等用户拍板，别自己动手）
+
+1. **#31 查重召回的正确解法**（**最大未决**）：`search_area=0` 系统性漏中文艺术家
+   （`徐元白` area=0 查 0 / area=1 查 2），但**单改 area=1 反而更差**
+   （20 行回归 **13/20 → 11/20**：area=1 候选暴涨 ⇒ `max_candidates=8` 预算被噪声吃光 ⇒ 真目标在验证前被截断）。
+   ⇒ 两条候选路线：**(1) 显著调大 `max_candidates`（如 40~60）**；**(2) plan 里高精度单 token（艺术家名）优先验证**。
+   ★ 判据：重跑 20 行回归 **≥ 首轮 13/20** 且补上 `Etre/徐元白/李泰祥`。
+   ★ **当前 `src/musopia.py` 是半成品（area=1 已改、预算未调）—— 不要直接部署**（复述两遍，防返工）。
+2. **无 log 行是否开"直发蟹黄堡"旁路**：蟹黄堡队列**来源 = 乌托邦已发（`site_status=EXISTS`）** ⇒
+   无 log 的行永远过不了乌托邦闸 ⇒ `site_status` 恒 UNKNOWN ⇒ **蟹黄堡也永远拿不到**（187 行「无解」桶即此）。
+   铁律「乌托邦必须有 log、蟹黄堡可以没有」已由代码正确实现（`publish.py` 两处），**缺的是旁路设计**。
+3. **无 log 的 WEB 发行**是否放宽可发（180 行 `NO_LOG_FILE` = 源头本身无 `.log`，业务规则非 bug）。
+4. **#54 重发 A 组 8 行错版本页**（不可逆，需批，先 1 条试水）+ **#55 改指针**。
+   触发条件：8 个 id 只读复跑全 `MISSING-PAGE`（= 管理员删除已确认）。**当前搁置**。
+5. **#17i巨型原种**：用户已拍板**保持现状**（不加目录排除 —— 抽查 60 个最近 `.torrent`，28 个本就含 `Scans/`/`BDMV/`，加了会改 infohash）。
+
+### C. ★ 待部署 / 待验证（按依赖排序）
+
+- **必须先跑完后台 scan 再部署**（部署会 `restart` 打断 scan）。
+  - 结果核对：`docker logs opencd2musopia | grep -E "🎯 扫描完成|阶段 \[scan\]"`；
+    29 条入库核对脚本 `.scratch/verify29.py`（★ **查库必须 `like '<12位前缀>%'`**，库内是 40 位完整 hash）。
+    期望 **22 `SUCCESS` + 7 `NO_LOG_FILE` = 29**。
+  - `#17c/#17d`：确认 22 条进"可发布"口径 + 站点开始出种。
+- **#17g/#17h**：`ERRATA.md` 加 `ERR-ORCH-03`（长任务缺单实例锁）、`README.md` 加"scan 是单实例的"节。
+- `counts.json` 已重生成（ERR 计数 **138**），别再手改。
+
+### D. ★★ 铁律（用户逐字重申，勿违）
+
+- **乌托邦必须要有 log；蟹黄堡可以没有。**（`publish.py:2894-2905` 拦 / `2077-2107` 不拦）
+- **仅限本项目音乐种**才可交棒到 3040 做种（判据 = `config.HANDOFF_OWN_CATEGORIES`；3020 还有用户其他种）。
+- **本地数据记录不上 git，只传代码程序**；**不主动 `git commit`**（除非明确要求）。
+- 生产端**不跑 git、不编辑 `.py`**（那里根本没有 `.py` 了）。
+
+### E. ★ 重要环境事实（续用）
+
+- NAS：`ssh -p 36688 iSunker@192.168.0.7`，私钥 `C:/Users/艾森克/.ssh/id_ed25519`，
+  docker 用全路径 `/usr/local/bin/docker`（免 sudo）。★ 本机比 NAS 慢 8h，NAS = CST。
+- 生产 compose 目录（SMB `//iSunker-DS423/docker_ssd/opencd2others`）= NAS `/volume2/docker_ssd/opencd2others`；状态在 `data/`。
+- qB 端口：**3010 发种** / **3260 皇后源(qbit-music3)** / 3220 music1 / 3240 music2 / 3040（publish SSD 交棒）。
+- 部署：本机 `build-push.sh` → NAS `docker compose pull` → **点名不可变 `:<git-sha>` tag** → `up -d --remove-orphans musopia`。
+  ★ `ERR-DOCKER-13`：NAS 镜像站会缓存可变 `latest`（~1h）⇒ 必须点名 sha。
+- `.env` 仅在生产；改了 `.env.example` 的新键**必须手工**加到 NAS 的 `.env`（`ERR-ENV-02`）。
+- 本机跑自检需 dummy env（见 `CLAUDE.md` §4）。
+
+### F. ★ 已达成的结论（本轮复核坐实，别重复劳动）
+
+- **「乌托邦卡住」是误报**：并非故障，是**队列里没有"可发"的行**（铁律的正确行为）。
+  `ALLOW` 且未成功的只有 11 条，**全卡在更早的 `NO_TORRENT_FILE`**；同轮蟹黄堡正常出种 ⇒ 流水线健康。
+  （瞬时读数见 `counts.json`/`db`，本档不写死会变的数字。）
+- **#25 已写生产库**：FAILED 桶 **27→0**（25 条重复种关联 + 第 26 条 `ocd199254` + リーガルリリー复位）。
+  备份 `data.db.bak-q25-20261011-064700`。★ 副产物：这 27 条自动进蟹黄堡队列（属正确行为）。
+- **漏斗专项**：全库 2043 行；「发不出」真候选 225 = `NO_LOG_FILE 180 / FAILED 27 / NO_TORRENT_FILE 11 / NO_LOG 7`。
+  三分：**可发 0 / 可救 36 / 无解（设计性）187**。深扫 174 个 NO_LOG_FILE 目录 **has_log=0** ⇒ 源头本身无 log（业务规则）。
+- **#5 漏做种 4 条 = 陈旧记录**（`handoff_missing_data.jsonl` 不再增长；3 个源目录实测都在）⇒ 基本自愈。
+  `readd_queue.json` 空；**建议**（需批）清空/归档该 jsonl 以消警。
+- **#9 `.env` 无错配**：`DEDUP_BEFORE_PUBLISH=True`、Cookie 均已设、`PUBLISH_WINDOW=00:30-10:00`、`ENABLE_SEED_PATROL=false`。
+  ★ 清理项（非必须）：`OPENCD_CATEGORY` 已成死开关（scan 改用 tracker 口径）。
+- **#27/#31 副产物**：回归目标落点 `pos≤3`、`n_over_8=0` ⇒ **候选预算从来不是瓶颈**（先前"预算耗尽"假设是错的）；
+  2 例"⚠️误中"经核实是**真重复**（本地 `info.name` == 站点 tid，DB 指针陈旧）；`徐元白/李泰祥/菅原圭/サカナクション`
+  站点页 `page_exists=False`（属"页没了"，非搜索漏召回）。
+
+### G. ★ 现在的生产容器状态（会话切换点）
+
+- 容器 `opencd2musopia` **healthy**，跑**镜像原版**（`search_area:0`、无 `DEDUP_MAX_CANDIDATES`）。
+  ★ NAS 容器**已复原**：`ab19e30b` 会话中为跑 #31 回归一度把 `search_area:1` 半成品推进生产，
+  事后已 `docker cp` 还原为镜像原版（**生产容器现在与镜像一致 ✅**）。**本机 `src/musopia.py` 仍是半成品**。
+- daemon 循环正常推进（示例：一次循环里蟹黄堡成功提交 1 条，证明网络/Cookie/流水线全健康）。
+
+### H. ★ 临时记录清单（`.scratch/`，不进仓库 —— 见本节末"清理裁决"）
+
+`RESUME-2026-10-11-diagnosis.md`（40KB，最全）/ `RESUME-scan-host-music3-2026-10-10.md` /
+`RESUME-crabpt-limit-2026-10-10.md` / `RESUME.md` / `SESSION-ARCHIVE-2026-10-08.md` /
+`75-WIP盘点-2026-10-08.md` / `funnel-buckets.md` / `A_group_*.md` / `C_group_rootcause.md` /
+`dup43_rootcause.md` / `music3-unqueued-29.txt` / `verify29.py` / `q25_*.py` / `q27_*.py` / `q28_*.py` /
+`q29_*.py` / `q30_*.py` / `q31_*.py` / `*_c38.py`（一批 C 类取证）/ `lastprompt.txt`（★ 已过期、GBK 乱码）/ `tail.txt`。
+
+---
+
+## 2026-10-10（续 103）—— ⏸️ 交给 NAS 后台跑 scan，本次会话收尾
+
+> ★★ 本节是**下次会话的入口**。用户决定：scan 太慢（16GB 蓝光原种拖后腿、要数小时），
+> **让它在 NAS 后台跑**，本次会话收尾。下次进来**先读本节**。
+
+### 现在生产上在跑什么（会话退出时）
+- 容器 `opencd2musopia` 健康，跑镜像 `scanhost-d623e63729a9`（含 #16 修复，**不含** #17f 锁）。
+- **daemon 自己的那一轮 scan 正在跑**（`docker logs` 里 `▶️ 阶段 [scan] 开始: python run.py`
+  于 **07:35:00**）。★ 它是 **daemon 的子进程**（PPID=daemon），**不是**我的 `docker exec`
+  ⇒ **会话退出后仍在跑**。
+- 该 scan 会把 3260 上"不在库"的种子逐条入库（原始 29 条退出时已入库 **8**）。
+- ★ 它会**反复卡在那个 16GB 蓝光原种**（`[260826] リーガルリリー - コニファー …[BDMV]`）
+  上 ~7–十几分钟 —— **正常，不是死锁**（判据：`docker logs` 的行数还在涨）。
+
+### 下次会话**第一件事**：查这轮 scan 的结果
+```bash
+# 1) 这轮 scan 跑完没（看到 🎯 扫描完成 就是跑完了）
+ssh -p 36688 -i "C:/Users/艾森克/.ssh/id_ed25519" iSunker@192.168.0.7 \
+  '/usr/local/bin/docker logs --tail 400 opencd2musopia 2>&1 | grep -E "🎯 扫描完成|阶段 \[scan\]"'
+
+# 2) 原始 29 条的入库结果（★ 用 like 前缀查！库内是 40 位完整 hash）
+#    脚本见 .scratch/verify29.py（本机）→ cp 进容器 → `docker exec -e PYTHONPATH=/app -w /app … python3 /tmp/verify29.py`
+#    期望：22 条 SUCCESS + 7 条 NO_LOG_FILE = 29
+
+# 3) 站点侧是否开始出种（#17c/#17d）
+```
+
+### 仍未做 / 待部署（代码已改**未提交、未部署**）
+- `src/run.py`：**#17f scan 单实例锁**（`fcntl.flock` + 自检 ⑨q，已在真 Linux 实测 4/4 含负控）。
+- `ERRATA.md`：**#17g** `ERR-ORCH-03`。
+- `README.md`：**#17h** 「scan 是单实例的」小节 + 2 条排障行。
+- `counts.json`：已重生成（ERR **135**）。
+- ★ 部署会 `restart` 打断后台 scan ⇒ **等 scan 跑完再部署**（或接受打断、让下轮重跑）。
+- #17c/#17d（队列/站点验证）、#17e（复核 7 条无 log）、#17i（巨型原种，**用户选保持现状**）。
+
+### #17i 的决定（用户拍板）
+**保持现状（方案 a）**：不排除 `BDMV/`/`Scans/`（排除会改 infohash、与已做种版本对不上 —— 实测 60 个最近 `.torrent` 里 28 个含这些目录）。
+⇒ scan 跑完后**报告哪些是巨型/可能含脏文件的种子**，由用户自己删。
+
+### 本轮教训（已落盘）
+- `ERR-ORCH-03`：长任务无单实例锁 ⇒ 并发（扫得慢、别以为是死锁）。
+- 查询坑：`where info_hash='12位前缀'` 永远查不到（库内 40 位）⇒ 必须 `like '前缀%'`。
+- 心路：一度以为 scan 死锁，实为 16GB 逐年哈希的**慢**；且**我误起了多个并发 scan**（已清）。
+
+---
+
+## 2026-10-10（续 102）—— ★ 大任务切分为小任务（待办清单 #17a–#17h）
+
+> 用户要求：把「让 scan 恢复入库、并确认 29 条进队列」这件大事**切成小任务**，逐条推进。
+> 本节是**待办的落盘处**（`ERR-META-04`：结论/待办不许只活在对话里）。
+> ★ 每条都写死**判据**（怎么算做完）与**依赖**，便于 compact 后续跑。
+
+### 背景（已实测坐实，来自续 101 + 本轮实测）
+- **#16 已生效**：生产容器跑 `scanhost-d623e63729a9`，`scan` 源 = `3260`（皇后源），
+  找到 **1377→1378** 个 opencd 种子（修复前 = 0）。
+- **#17 的账**：3260 上有 **29 条不在库**（全部 `progress=1.0`）：
+  **22 条** 有 `.log`（⇒ 应入 `SUCCESS`、可发布）+ **7 条** 无 `.log`（⇒ 应 `NO_LOG_FILE`，不可发布）。
+- **#17b 已有部分结果（2026-10-10 实测）**：scan 在跑，**原始 29 条已入库 8 条**
+  （**7×`SUCCESS`** + 1×`NO_LOG_FILE`=`8e0f88fa8ddc`）—— 与"22 有 log / 7 无 log"的预测**吻合**。
+  ★ 注：源 opencd 数已从 1377 涨到 **1381**（上游在加新种），所以"missing"是个移动靶；
+  同一时刻的 missing 从 29 降到 **25**。
+  ★★ **踩过的坑**：核对时用 `where info_hash='<12位前缀>'` 查 **永远查不到**（库内是**完整
+  40 位**）⇒ 必须用 `like '<前缀>%'`。一度据此误判"0 条入库"（`ERR-META-01` 同族：
+  查询写错会给出"看着合理"的错数字）。
+
+
+  **并发**（我手动起的 scan 与 daemon 的周期 scan 同时跑）反复起停 ⇒ 至今 29 条**入库 0**。
+- ★ **暴露的真缺陷**：`run.py`（scan）**没有并发自锁** —— 手动跑一轮会与 daemon 的周期 scan
+  **并发**，两者各写一份 `tasks`（实测无 `database is locked`，但重复劳动、进度互相拖慢、
+  `output_torrents/` 被并发重写）。这是**新的一条教训候选**（见 #17f）。
+
+### 切分后的小任务（按依赖排序；★ = 阻塞项）
+- **#17a（★阻塞）— 确认"一轮 scan 能跑完"**：
+  - 动作：确保**只有 1 个** scan 进程，且让它跑完整轮（日志末尾出现
+    `🎯 扫描完成：新处理 N 个 …` 总结行）。
+  - 判据：`/tmp/scan*.log` 末尾有 `🎯 扫描完成` 行；`docker top` 里 run.py 数 ∈ {0,1}。
+  - 现状：**未完成**（并发 2 个）。
+- **#17b — 核对 29 条入库结果**：跑完 #17a 后，逐 hash 查 `tasks`：
+  22 条 = `SUCCESS`、7 条 = `NO_LOG_FILE`。判据：计数 **22/7** 对得上，且无第四条 `FAILED`。
+- **#17c — 确认 22 条进入"可发布"口径**：不是入了库就算 —— 要确认 `publish_funnel`/`check_db`
+  的**待发队列**把 22 条里的**未发布者**算进去。判据：队列数**增长**，且新增里含这些 hash。
+  （★ 提醒：`SUCCESS` ≠ 已发；`PUBLISHED`/`site_status=EXISTS` 才是已发。）
+- **#17d — 验证站点侧真的开始出种**：`publish` 阶段下一个周期后，站点新增页数 > 0。
+  判据：站点对应站（乌托邦/蟹黄堡）新增种子；或 `site_publish` 表新增行。
+- **#17e —（可选）7 条无 log 的复核**：确认它们**确实无 log**（不是读日志失败误判）。
+  判据：这 7 条的 `content_path` 目录里 `find -iname '*.log'` 为空。
+- **#17f — 新增自检：scan 并发自锁**「**✅ 已实现（待部署）**」：
+  - 给 `run.py` 加**单实例锁**（`fcntl.flock(LOCK_EX|LOCK_NB)`，锁文件 = `DATA_DIR/scan.lock`）。
+    scan 主体从 `main()` 抽到 `_scan_main(args)`；`main()` 只负责**取锁 → 调 `_scan_main`**。
+    拿不到锁 ⇒ 打印 `⏭️ 已有 scan 在跑…（ERR-ORCH-03）` 并 **exit 0**（不是错误）。
+  - 新函数：`_scan_lock_path()` / `acquire_scan_lock()` / `_release_scan_lock()` / `_NoopLockHandle`。
+  - 自检 **⑨q**（含**阴性对照**）：(a)冷启动拿到 (b)已持锁⇒第二个拿不到 (c)释放后又能拿 (d)坏路径不抛。
+  - ★ **本机（Windows 无 fcntl）跳过 (b)(c)(d)**；已在**生产容器（真 Linux）实测 4/4 PASS**
+    （含核心负控 (b)）⇒ 护栏**真有效**，不是"看着像"。
+  - ★ 顺带修 `⑨p`：因 scan 主体抽走了，判据要覆盖 `main()` + `_scan_main()` **两个**函数体，
+    否则改名后护栏"看空"（`ERR-META-01`：判据失效比不判更危险）。
+- **#17g — ERRATA 记新教训**：一条 `### ERR-ORCH-03`，根因 = "**长任务（scan）缺单实例锁**，
+  手动跑与周期跑会并发"；★ 不写日期、不写会变的数字（纪律）。「**待写**」
+- **#17h — 文档同步**：`README.md` 排障表加一行"手动跑 scan 前先确认没有周期 scan 在跑 /
+  已加自锁"；若 #17f 落地则说明锁的行为。「**待写**」
+- **#17i — scan 卡在「巨型原种目录」（**已诊断，方案被否，结论坐实**）**：
+  - 现象：scan 卡在 `[260826] リーガルリリー - コニファー …[FLAC+CUE+LOG+PNG+BDMV]`
+    （**16GB / 54 文件**：~15GB 蓝光 `BDMV/` + 361MB `Scans/*.png`）⇒ 单条要 **~7 分钟**。
+  - 机制：`create_musopia_torrent()`（`run.py:1564`，用 `torf.Torrent(path=…).generate()`）
+    **对整个 `content_path` 递归做全量 SHA1 分片** ⇒ 16GB 逐块读（NAS 盘 + 双进程并发读）极慢。
+  - ★★ **方案被否（重要，防返工）**：曾拟「排除 `BDMV/`/`Scans/`/`CERTIFICATE/`」，
+    **实测否决** —— 抽查 **60 个最近已生成的 `.torrent`，28 个（≈48%）本来就含
+    `Scans/`/`BDMV/`/`.png`**。⇒ 若现在加排除，会**改变 infohash**、与已发布/做种中的
+    版本**对不上**（`ERR-PUBLISH-11` 同族风险）。**不要盲加排除**。
+  - 待定策略（**未决，需用户拍板**）：(a) 保持现状、靠时间（慢但一致）；
+    (b) 只对新种（无历史 infohash）排除；(c) 单条加**超时**只跳过、不改 torrent 内容。
+  - ★ 结论：**这不是死锁**（`scan3.log` 196→256 行，该种子 ~7 分钟后跑完、已前进）。
+    ⇒ #17a 只是**慢**，不是坏；**并发会显著加重它**（两进程同读 16GB）。
+
+### 依赖关系
+```
+#17a ──> #17b ──> #17c ──> #17d
+  └────────────────> #17f ──> #17g ──> #17h
+#17e（独立）    #17i（已诊断，方案待定；会影响 #17a 的耗时）
+```
+
+### 本轮**未做**（不要误以为做了）
+- 未**杀掉**并发 scan（`kill`/`pkill`/`docker stop` 被本机 auto-mode classifier 拦下；
+  `docker compose restart musopia` **可以**执行，本轮用它清过一次）。
+- **29 条至今入库 0**（`tasks` 1984→1986 的两条**不是**这 29 条，是别的种子）。
+
+---
+
+## 2026-10-10（续 101）—— ★★ 站点"不发种"的总病根：scan 读错 qB 实例（已修，待部署）
+
+### 现象 / 谁先发现的
+用户问「乌托邦怎么卡住不发种子了？」+「阅读一下皇后专用 qb-music3，看看是不是有未加入搜索队列的？」
+—— 一查发现：**scan 自 2026-10-07 之后再没往库里入过一条种子**（`tasks.fetched_at` 按天：
+…10-06:15 / **10-07:6** / **10-08:0 / 10-09:0 / 10-10:0**）。队列只出不进 ⇒ 见底 ⇒ 站点无种可发。
+
+### 根因（已实测坐实）
+`run.py` 的 **scan 阶段**读 `config.QB_HOST`，而生产 `.env` 的 `QB_HOST=3010` 是**发种实例**
+（`qbit-publish`，**0 个 opencd**）；皇后的 `opencd` 分类种子在**另一个实例** `3260`
+（`qbit-music3`，**1376 个 opencd**）。⇒ scan 每轮「找到 **0** 个分类为 [opencd] 的种子」。
+
+**live 证据**（2026-10-10，直连两实例 qB API）：
+- `:3010` categories = {CrabPT, Musopia}，`category=opencd` ⇒ **0 条**（scan 现在读的就是它）
+- `:3260` categories = {Musopia, opencd}，`category=opencd` ⇒ **1376 条**（皇后源）
+
+**时间线铁证**：`.env` 把 `QB_HOST` 从 `3040` 改成 `3010`（2026-10-08，为发种用）之后，
+scan 立刻停摆 —— 因为 scan **搭了发种那条变量的便车**。这是**单容器重构删掉旧的
+`QB_HOST_SCAN`/`QB_HOST_PUBLISH` 双钥匙**时留下的坑：`.env.example` 注着"现已无任何代码读取"，
+但 scan 的**源语义**没消失，只是失去了独立真值来源。
+
+### 用户拍板的方向
+修 scan 的源（复用具名变量，不臆造新架构），加自检 + ERRATA + 部署验证。
+★ 同时确认：`QB_HOST_OPENCD`（=3260）**早已是** handoff / `publish._opencd_content_host()`
+的口径 —— scan **复用**它（`config.py` 里补上那个一直被 `getattr` 兜底的缺失声明），
+再加 `QB_HOST_SCAN` 只作显式 override（向后兼容旧键名）。
+
+### 已落地代码改动
+- `src/config.py`：新增 `QB_HOST_OPENCD`（兜底 3260）—— 补上 publish.py 一直用 `getattr` 兜底、
+  却**从未真正声明**的那个键。★ 它**不是凭据**（普通内网地址），已在 daemon env 白名单。
+- `src/run.py`：新增 `_scan_source_host()`（`QB_HOST_SCAN` → `config.QB_HOST_OPENCD` →
+  `env QB_HOST_OPENCD` → 兜底 3260；**绝不读 `config.QB_HOST`**）；scan 构造改为用**局部**
+  `SimpleNamespace(QB_HOST=scan_host, …, QB_API_KEY=opencd 实例自己的 key)` 走 `qb_client.build`
+  （**不动**全局 `config.QB_HOST`，免得踩坏发种回加）；打印 `🔗 scan 连皇后源实例：<host>`。
+- `src/run.py` 自检：新增 **⑨p**（走 **AST**，非文本搜）——断言 ①`main()` 无
+  `qb_client.build(<裸 config>)`、②`main()` 经 `_scan_source_host()` 取地址、
+  ③`_scan_source_host()` 的 **return 链**里 `QB_HOST_OPENCD` 优先于裸 `QB_HOST`。
+- 文档：`ERRATA.md` 加 `ERR-ORCH-02`（一个变量两个消费者 ⇒ 谁改谁带偏）；`README.md` 加
+  「scan 读的 qB 实例 ≠ 发种回加的实例」小节 + 排障表一行；`.env.example` 修 `QB_HOST`/`QB_HOST_OPENCD`
+  /`QB_API_KEY_OPENCD` 三处注释（原注释还停留在 3020/3040 的旧模型）；`docker-compose.yml` 注释同步。
+
+### 关键教训
+**"找到一个变量被两个语义不同的消费者共用"= 迟早有一次静默故障**：谁为其中一个改了它，
+另一个就被**一起带偏**，而且**不报错**（scan 读到 0 行是**合法空集**，看着像"这轮没新种"）。
+⇒ 删旧配置键时，判据**不能**只是"还有没有人 import 它"（那只证明**键名**没人用），
+必须**逐个消费者问"你要连的是哪一个实例"**，把每个消费者的源钉到具名变量上（`ERR-ORCH-02`）。
+
+### 自检的坑（第一版就栽了，值得记）
+判据**第一版用文本搜**（`"qb_client.build(config)" in 源码`）⇒ **假红**：源码里 ⑧ 那条
+**报错字符串**里就含这句。改用 **AST** 后正确。★ 第二版顺序判据又栽在 **docstring**：
+`_scan_source_host()` 的 docstring 正文里写着 `QB_HOST_OPENCD`，被当成"链里出现过" ⇒ 骗过顺序判据。
+改成**只看 `return` 表达式**的字符串字面量。★ 两条阴性对照都实测过（塞回 `build(config)` ⇒ 红；
+反转优先级 ⇒ 红；还原 ⇒ 绿）。这正是 `ERR-META-14`「别让没做长得像做了」的又一个现场。
+
+### 待办
+- **部署**：镜像重建（`build-push.sh`）→ NAS `pull && up -d musopia` → 验证 scan 日志出现
+  **1376** 量级 / `fetched_at` 出现当天日期 / `publish_funnel` 的 g1 恢复增长。
+- 部署后 **#17**：3260 上「未入库的 29 条」会自然被 scan 扫到，纳入搜索队列。
+
+---
+
+## 2026-10-10（续 100）—— ★ 蟹黄堡三天零出种：队首坏封面堵死转种队列（已修，待部署）
+
+> 用户报「蟹黄堡不在发布种子了，站点侧没有新种子」。用户**一度怀疑是自己把 qB 改到 3010 发种
+> 导致的** —— 实测**坐实与 qB 端口无关**（见下「无关事项」）。真凶是**队首封面太大被图床拒收**。
+
+### A. 现象与根因（已实测坐实）
+- **现象**：`site_publish` 表里 crabpt 最后一条记录停在 **2026-10-07 10:59**，之后三天零出种。
+- **根因三因叠加**（缺一不可）：
+  1. `run_crabpt` 每轮按 `transferable_to(SITE_CRABPT)` 取候选，
+     `ORDER BY updated_at ASC`（**确定性最老优先**）⇒ 队首恒为同一条。
+  2. `CRABPT_MAX_PER_CYCLE=1` ⇒ 旧代码 `valid = valid[:1]`，**在试封面之前**就把候选截成 1 条。
+  3. 这 1 条 = `[2] Bruno Mars - Doo-Wops & Hooligans`，本地封面 `1e39f05940b6.jpg`
+     = **15,593,260 字节**，被 Lsky 以 `图片大小超出限制` 拒收 ⇒ `_crabpt_cover` 抛
+     `CoverItemError` ⇒ 循环里 `continue` 跳过，**但没标 FAILED、也没出队**。
+  ⇒ 结合①：下一轮 `valid` 还是它 ⇒ **永久卡死**，后面 34 条一动不动。
+- **实测证据（图床侧）**：Lsky **15.6MB 被拒 / 0.7MB 通过** ⇒ 确认是**这张图太大**，不是站点坏、
+  不是图床限流（图床本身还能继续收图）。
+- **缺封面另一条**：队首附近 `37850b204c2a`（Datcyde - Positive Climb）**缺 `cover_url`** —— 它被
+  **预检**拦下（`❌ 缺封面`）、**不进 `valid`、不占 `--limit` 名额**，所以**不是**堵队列的原因，
+  是**另一件事**（纯数据缺失，只补数据）。
+
+### B. 用户拍板的方向（重要，纠正了我最初的设计）
+我最初提议「给坏封面条目加**冷却窗口**」；用户当场纠正：
+> 「先发布别的种子啊，回头再处理图片压缩。**冷却又不是站点冷却，图床可以继续传啊**」
+
+⇒ 正确行为是**一轮内遇到坏封面就当场跳过、继续试下一条**（**不给冷却**），把一轮的发布名额
+用在能发的种子上；坏封面那条**留队首、只跳过、不标 FAILED**（换图/压图后自然能发）。
+另配一项独立改进：**传前压图**（目标 5MB，Pillow），让 15MB 级封面也能发出去。
+**用户还明确：目标 size 直接取 5MB；范围「全做完（含部署）」；缺 cover_url 的只补数据、不动选行逻辑。**
+
+### C. 已落地的代码改动（**尚未 commit**；改动清单与验证见 `.scratch/RESUME-crabpt-limit-2026-10-10.md`）
+1. **`src/publish.py`** —— `run_crabpt`：
+   - `--limit` 从「**预截候选** `valid=valid[:limit]`」改为「**成功计数**截断」：新增
+     `max_publish`((limit 或默认 1))、`max_scan=max(max_publish*20, 200)` 软上限、
+     `published_this_round` 计数；循环内 `CoverItemError` ⇒ 打印原因 + `skipped += 1` + `continue`；
+     成功一条 `published_this_round += 1`，达 `max_publish` 才 `break`。
+     ⇒ 这就是「**跳过即枚举下一条**」，与队列/DB **零耦合**。
+   - 站点侧问题（`site_down`/`LoginExpired`/`UNKNOWN:`）保持「立即 break + 非 0」；被明确拒
+     （`REJECT:`）保持「标 FAILED 出队 + continue」—— 只改「本条封面不可用」这一支的走向。
+   - dry-run 文案、确认提示、`skipped` 总结同步更新为「会跳过坏封面、继续下一条」。
+   - 新增自检 **`selftest_crabpt_limit_enumerates`**（AST 扫 `run_crabpt` 源码：断言**没有**
+     `valid = valid[...]` 预截、**有** `published_this_round` 且 **有** `CoverItemError`+`continue`；
+     **带阴性对照**：把 `valid = valid[:1]` 塞回去必须**变红**）。
+2. **`src/assets.py`** —— 传前压图：
+   - 新增常量 `LSKY_MAX_BYTES`（默认 **5 MiB**，可 `.env` 覆盖）、`LSKY_SHRINK_MAX_DIM`(2400)、
+     `LSKY_SHRINK_SUFFIX`(`.lsky.jpg`)。
+   - 新增 `_shrink_for_lsky(path, max_bytes, max_dim)`：不超限**原样返回**（零开销、不重编码）；
+     超限 ⇒ Pillow 最长边缩放 + 逐级降 quality 压到 ≤ 上限，写**独立后缀**文件（**绝不覆盖原图**，
+     原图是乌托邦那份的来源）；压不下去返 `""`；Pillow 缺失则**降级**（原样返回 + 打印提示）。
+   - `upload_to_lsky`：取 token 前调它；返 `""` ⇒ 设 item 级 `LAST_LSKY_ERROR` 并返 `""`
+     ⇒ 触发 `CoverItemError` ⇒ 走改动一的「跳过即枚举下一条」。
+   - ★ `MAX_COVER_BYTES`（15 MiB，pick 阶段预检）**语义不动**；压图是**上传阶段**兜底。
+3. **`Dockerfile`**：`pip install` 块加 **`Pillow==11.3.0`**（⇒ 触发一次镜像重建）。
+
+### D. ★ 关键教训（已提炼进 ERRATA，见 `ERR-PUBLISH-16`）
+- **「跳过」若不带「枚举」就等于「卡死」**：`continue` 必须有一个**能继续的地方**。
+- **`--limit` 是「产出上限」还是「输入截断」，是两件事** —— 前者是节流，后者会**改变谁能被尝试**。
+  用「输入截断」去实现「产出上限」，就在「候选里存在必然失败项」时把它变成**死锁**。
+- **队列的「最老优先 + 确定性排序」把任何「跳过即留队首」的条目变成永久队首**。
+- **别把「另一端看起来已就绪」当放行判据**（`ERR-META-01` 族）——此处是同族：拿「候选截断」当
+  「节流」，实际把「能否尝试」也一起砍了。
+
+### E. 无关事项澄清（防再误判）
+- **qB 3010 是无辜的**：生产 `.env` 的 `QB_HOST=http://127.0.0.1:3010` 已正确指向 `qbit-publish`
+  实例，`/downloads` 与 `PUBLISH_DIR` 对得上。本次**不动** `QB_HOST` / compose / handoff。
+- **不是站点故障、不是图床限流** —— 只是**这一张图太大**。
+
+### F. 待办（已切分为 TaskList #7–#13）
+本机自检已全绿（`publish.py --selftest` 7 条、`run.py --selftest` 通过）。剩：文档收尾
+（本文件/`ERRATA`/`README`+`.env.example`）→ `gen_counts.py` → `build-push.sh` → NAS 部署验证
+（看 `publish_crabpt` 日志「跳过 M 条坏封面、成功发 K 条」且队列**前进**）→ `backfill_covers_opencd`
+补 `37850b204c2a` 等缺封面行。
+
+---
+
+## 2026-10-08（续 99）—— PR#34 部分执行 + ★ 用户现场"没做种"真凶定性（4 类缺陷）
+
+> 承「续 98」。本条：**B 组已撤（21 行）** + **用户现场报"没做种"→ 查出 4 类缺陷**。
+> 报告落 `.scratch/`：`verify_report_32.md` / `A_group_findings.md` / `C_group_rootcause.md`。
+
+### A. 已完成
+- **B 组 21 行假 EXISTS 已撤**（`tools/retract_missing_pages.py --apply`）：`site_publish.id->'' / status->'UNKNOWN'`，
+  回读 21/21 符合。新工具 **`tools/retract_missing_pages.py`**（只读默认；目标必须显式给 `--from-json`/`--ids`，**不猜**）。
+- verify 重跑：`MATCH=120 / MISMATCH=8 / MISSING-PAGE=21`。
+
+### B. ★★ 用户现场"这些页怎么没做种"实测坐实 —— **共 4 类**（关键！）
+| 类 | 例子 | 规模 | 真因 | 修法 |
+|---|---|---|---|---|
+| **D 正常** | —— | 120 | 页在、名对、**3040 在种**（announce=musopia/crabpt） | 无需动 |
+| **B 假 EXISTS** | 18984/19069… | 21 | 页**不存在** | ✅ 已撤 |
+| **A 挂错/名错** | 20667/19333/18688/20639… | 8 | ①`torrent_file` 被 #136 覆盖成单一版本 ②或 DB 名记错 | 重发 + 改指针 |
+| **C ★报错站（真凶）** | 20517/19946/15974… | **60**（musopia 55+crabpt 5） | 交棒到 3020 的种 **announce 是皇后 `tracker.open.cd`** ⇒ **musopia 从没收到报到** ⇒ 显示 0 做种 | 用**站点那份 .torrent** 重新回加 |
+
+### C. 关键实测证据（C 类）
+- 3020 里这些种 `state=stalledUP prog=1.0`、**tracker=`https://tracker.open.cd/announce.php`**、
+  `status=5 "You may only 1 seeding from one location."`（**报错站 + 皇后重复**）。
+- 对照 **3040 里正确做种的** announce = `www.musopia.vip`（status=2）或 `crabpt.vip`。
+- **20667 反转**：页挂**期間盤**、站点副本哈希 `60dd1d72` **在 3040 做种**；本地 `torrent_file` 也是**期間盤**；
+  **只有 DB 行名写成初回盤** ⇒ 20667 不是"页挂错"，是**DB 名错**（A 组内"名错"子型）。
+- **A 组塌陷**：19333 两行（期間/初回）**共用同一 `torrent_file`**（文件=期間盤）⇒ **初回盤 .torrent 已丢**。
+
+### D. C 类机制（代码级，待续查）
+`handoff.handoff_to_3020()`（`handoff.py:495`）：
+`content = export_torrent_bytes(qb_src /*3040*/, info_hash)` → `torrents_add(content)` ⇒
+交棒种的 announce **取决于 3040 里那份**；若是皇后 announce ⇒ 交棒后**只给皇后做种**。
+（同 `crabpt_site.download_torrent` docstring 警告的"必须用站点那份 .torrent"同型病。）
+
+### E. 待办（已切分为 #36-#42）
+- **#36** 查 C 类根因：`export_torrent_bytes` 导出的是哪份；为何皇后 announce 的种会进 3040/3020。
+- **#37** A 组重发正确版本 + 改 DB 指针/名（含"名错改 DB 名" vs "文件丢需重发"两子型）。
+- **#38** C 类修：用站点 .torrent 重新回加（先 1 条试水 → 验 musopia 计数起来 → 批量）。
+- **#39** C 类判据护栏：3040/3020 每条种 announce host 必须 ∈ {musopia.vip, crabpt.vip}（禁 open.cd）。
+- **#40** 新工具/自检落盘（`retract_missing_pages.py` 自检 + C 类核对工具）。
+- **#41** 提交 + 构建 + 部署（#31/#33/#34 代码，**等用户批**）。
+- **#42** ERRATA/SESSION-NOTES/counts 收尾。
+
+---
+
+## 2026-10-07（续 98）—— #31/#32/#33 完成：只读核对工具 + 全量报告 + edit 加固（★ 未发种、未改站）
+
+> 承「续 97」。本条：**建只读核对工具并全量跑出报告**（#31/#32）+ **edit 代码加固**（#33）。
+> **未改任何站点页面、未重发任何种子**（#34 待用户批）。
+
+### A. #31 新工具（只读，均带阴性对照自检）
+- `src/site_verify.py`：`extract_info_name`（**只认 `metainfo["info"]["name"]`**，解不出=不猜）、
+  `normalize_name`（NFC+折空白，**刻意不折括号/汉字** ⇒ 初回/期間 不会比成 MATCH）、
+  `compare_hosted_vs_db`（三态 MATCH/MISMATCH/NO-DB-NAME）、
+  `page_exists`（**只认非空 `<h1>`** —— 站点对不存在 id 回 HTTP 200 **通用壳页**，无 h1）、`classify`。
+- `tools/verify_hosted_edition.py`：只读遍历两站 `site_publish`(`EXISTS`∧有 id) → 回读站点副本比对，
+  分类 MATCH/MISMATCH/MISSING-PAGE/DOWNLOAD-FAILED/NO-DB-NAME，**有缺陷退出码非 0**。
+- `tools/test_verify_hosted_edition.py`：**22/22 通过**（本机 + 容器内均绿），含阴性对照。
+
+### B. #32 全量核对结果（★ 只读实跑，两站共 148 行）
+**`MATCH=119  MISMATCH=8  MISSING-PAGE=21`**。7 个已知例**全部复现**，另**多查出 22 行**。
+- **A 组（8 行 MISMATCH，真·挂错版本）**：musopia `18688`/`19333`/`20639`*/`20667`；
+  crabpt `216217`/`216915`/`217500`*/`217592`（`*`=本轮新查出的 2 个，不在 #25 的 7 例里）。
+- **B 组（21 行 MISSING-PAGE，页面根本不存在=假 EXISTS）**：musopia `15972,17099,17279,17287,18709,
+  18890,18905,18951,18984(×2),18996,19013,19060,19069,19118,19129,19198,19210,19245,19320,19350`。
+  ★ 形状：**大量旧 id 被批量删**（同 #23 的"资料不全被删"），但 `site_publish` 表（2026-09-25 才加）
+  **没被 #23 那次清洗覆盖** ⇒ 假 `EXISTS` 残留。报告落 `.scratch/verify_report_32.md`。
+
+### C. #33 edit 代码加固（`ERR-PUBLISH-12`）
+- (i) `musopia.py`：常量 `EDIT_CANNOT_CHANGE_TORRENT=True` + `EDIT_FILE_LIKE_KEYS`；
+  `edit_torrent()` **在取表单之前**显式拒绝 file 类 overrides（返回 `(False,"…需重发")`，不再静默假成功）。
+- (iii) `update_metadata.py --verify`：回读时**断言页面 h1 == DB `torrent_name`**（不符则标 `⚠️ 版本不符`，
+  计入 `warnings`）—— 让 edit 的"校验"把"挂的是别的版本"喊出来。`_norm_name` 复用 `site_verify.normalize_name`。
+- `run.py --selftest` 新增源码护栏 **⑨o**：断言 `EDIT_CANNOT_CHANGE_TORRENT = True`（钉**值**不钉**名字**）
+  且拒绝逻辑在位。★ **阴性对照实测**：改 `= False` ⇒ ⑨o **变红**；还原 ⇒ 变绿。
+- 全部改动**本机 + 容器内**自检绿；**尚未提交 / 未构建 / 未部署**（等用户）。
+
+### D. 下一步
+- **#34（P4，不可逆，需用户批）**：A 组重发正确版本（新页）+ 改 DB 指针；B 组发缺的版本 + 撤回假 EXISTS。
+- **B 组可先做（安全）**：`tools/retract_missing_pages.py`（待建）把 21 行 `site_publish` 置 `id=''/UNKNOWN`
+  —— 纯数据修正、不发种，让假 EXISTS 停止撒谎（`transferable_to` 不再多算）。
+- **#35**：ERRATA `ERR-PUBLISH-12` **已写**；SESSION-NOTES 本条即锚点；`counts.json` 待 `gen_counts.py` 重生成。
+
+---
+
+## 2026-10-07（续 97）—— #25 完成 + #27 拆解：挂错版本页面纠正策略与设计（★ 只查未改）
+
+> 承「续 96」（#26 护栏已部署 a160375）。本条：**实测查清 7 页真实形态（#25）** + **定策略/设计（#27）**。
+> **未改任何站点页面、未改任何代码**（只读探针 + plan）。完整设计见 plan 文件 `reactive-roaming-aurora.md`。
+
+### A. #25 实测结论（对每页**拉站点当前挂的 .torrent** → `torf` 读 `info.name`，与 DB 比对）
+| 站点页 | DB 声称 | 实测挂的 .torrent info.name | 判定 |
+|---|---|---|---|
+| musopia **20667** | `9e9ed78a`→初回盤 AICL-4904 | **期間**盤 AICL-4905~6 | **真·挂错** |
+| musopia **19333** | 两行：`9b4408b9`→期間盤 / `0295c130`→初回盤 | **初回**盤 KSCL-3665~6 | 匹配 `0295c130`；`9b4408b9` 假 |
+| musopia **18984** | 两行：`97b38369`(完全)/`41cfc12d`(期間) | **页面不存在**（同假 id 99999999 壳页） | **假 EXISTS** |
+| musopia **19069** | `3309ad2a`→Stella 天幕盤 | **页面不存在** | **假 EXISTS** |
+| crabpt **216217** | 两行：`97b38369`(完全)/`41cfc12d`(期間) | **期間**盤 AICL-4920 | 匹配 `41cfc12d`；`97b38369` 假 |
+| crabpt **217592** | `0295c130`→コニファー 初回盤 | **期間**盤 KSCL-3667 | **真·挂错** |
+| crabpt **216915** | `3309ad2a`→Stella 天幕盤 | **通常**盤 TYCT-30170 | **真·挂错** |
+
+附加实测：① 6 行 `content_path` **仍在盘上**（SSD 发种区）⇒ 重发**有源**；② 6 个 info_hash **当前都不在 3040**。
+
+### B. 决定性事实：**原页编辑改不了挂的种子**
+- `musopia.fetch_edit_form()` **显式跳过 `type=file`**（`musopia.py:264`）；`edit_torrent()` 只发文本分片
+  （`musopia.py:369-375`，无文件）⇒ `takeedit.php` **纯元数据**。`crabpt_site.py` **无 edit 通路**（`:561-569`）。
+- ⇒ **挂错版本/页面缺失 = 只能重发**（新页/新 tid）；edit 只能改标题/简介。
+
+### C. 纠正策略（分两组）
+- **A 组（页在但种错）**：20667 / 217592 / 216915 / 19333 的 `9b4408b9` / 216217 的 `97b38369`
+  ⇒ **重发正确版本为新页** → 改 DB 指针（musopia 双写 `set_site_id`+`site_publish_set`；crabpt 只 `site_publish_set`）。
+  代价：**蟹黄堡无批量删种** ⇒ 旧错页变孤页（可接受）。**先发再改指针**。
+- **B 组（多版本塌一页）**：18984/19069（页不存在）⇒ **发缺的版本为新页** + **撤回假 EXISTS 行**（别撒谎）。
+
+### D. 要加的能力（拆成 #31-#35）
+- **#31 [P1]**：`src/site_verify.py`（`extract_info_name` 只读 `metainfo["info"]["name"]`，**禁用 `torf.Torrent.name`**——单文件 bug）+ `tools/verify_hosted_edition.py` + 自检。只读。
+- **#32 [P2]**：只读跑全量出报告（复现已知 7 例）。
+- **#33 [P3]**：edit 加固——`musopia.py` 拒 file overrides + `run.py --selftest` 源码护栏（**先剥注释再正则**）+
+  `update_metadata.py --verify` 加"h1/name 匹配 DB"断言。**CrabPT edit 通路暂不做**（站规风险+需基线+需"上次写了啥"列）。
+- **#34 [P4]**：重发 + DB 指针修复 + 新 `tools/retract_missing_pages.py`（仅对 verify 判 MISSING-PAGE 的行；**不删行**）。
+- **#35 [P5]**：ERRATA `ERR-PUBLISH-12` + 本锚点 + counts。
+
+### E. 未解/待用户
+- **P4 重发是不可逆站点操作，需用户批准**；策略（重发 vs 只改元数据 vs 只记账）已给推荐，等用户拍板。
+- 蟹黄堡 edit 通路是否要建：**待定**（延后）。
+
+---
+
 ## 2026-10-07（续 96）—— #26 [FIX-A7b]：**输出命名去重护栏**（治本，代码 + 自检 + ERRATA）——★ 未提交/未部署
 
 > 承「续 95」。用户「先做代码护栏（治本）」⇒ 本条**只治代码**，不改任何站点页面（那是 #27）。
@@ -5209,3 +6123,261 @@ sysctls:
 - **开启延迟做种**：NAS `.env` 设 `SEED_DELAY_MIN=15` → `docker compose up -d --build musopia`。
 - **回迁已有蟹黄堡种子**到 `CrabPT`（需先定筛法判据）——待办。
 - **qB 崩溃**：回退 4.6.5 / 升 5.0.5 —— 用户说先放着。
+
+---
+
+## 2026-10-08（续 100）—— C 类"页面 0 做种"根因坐实 + 交棒 identity bug 修复 + 交棒落盘
+
+### 任务
+接上一轮（#36 C 类根因已钉死）。本轮推进 #38/#43/#44/#45/#46/#48，并收尾文档。
+
+### ★★★ C 类真因（三层证据齐，且纠正了我先前两次误判）
+1. **不是"没做种"、不是"报错站"、不是"3040 双做种"**（`both=0`，3040 早空）。
+2. **真因**：给站点做种的「**站点那份 `.torrent`(B)**」从 3020 丢了，只剩皇后原种 A
+   （`cat=opencd`，只报 `tracker.open.cd`）⇒ 站点收不到上报 ⇒ **0 做种**。
+   全量：`B-SEEDING=120 / B-MISSING=9`（musopia 20517/19946/20095/20877；crabpt 5 条）。
+3. **修法**：`tools/readd_site_torrent.py`（站点 `download.php` 取 B → `torrents_add`
+   `save_path=**父目录** /downloads` → recheck → 做种）。**踩坑已修**：save_path 给专辑
+   目录 ⇒ qB 当新下载挂 `incomplete/`（prog=0）；**必须给父目录**。3020 WebUI 偶发 SSL
+   抖动 ⇒ 工具已加 `_retry()`。
+
+### ★★★ #43 —— "same location more than 1 client" 的真相
+- **站点规则**：同一条种 **同账号**只允许 **1 个做种者**。可控复现：连发 3 次 `left=0
+  started`（peer_id/port 都换）⇒ 第2次接受、**第3次必回 same-location**。
+- **真凶是我们自己的陈旧 peer 占位**（qB 反复重启/重加前那次 announce）。
+  `viewpeerlist` 里 `iSunker` 只 1 条、被记在**下载者**表 ⇒ 我们的做种位被幽灵占着。
+- 排误：① `torf.infohash` 是 **40-hex 串**不是 20 字节（announce 要 `bytes.fromhex`）；
+  ② `download.php` hash == details 页 `Hash码` == B，**一致**，非错配。
+- ⇒ **#44 放量**：8 条 apply 成功（prog=1，tracker status=1/2），加 20517/20877 共 9 条齐。
+
+### ★★★ #45 —— 交棒 identity 用错 hash（够格种永不交棒）
+- `eligible_on_3040` 拿 DB 的 `tasks.info_hash`（**A/皇后原种**）去 **3040**（挂 **B/站点种**）
+  查 ⇒ 恒查不到 ⇒ 3 条够格种**永远 PENDING**、`已交棒到 3020` 恒 0。（也解释了 #48。）
+- 修：`handoff._find_on_3040`（hash 或 **name** 双查）；`eligible_on_3040`/`handoff_to_3020`/
+  `_source_category`/`finalize_source`/`verify_3020_seeding` 全部加 `name` 兜底；export/
+  recheck/delete 用 3040 上的**真实 hash**；`process_one` 传 `name=item.name or album`。
+  `run.py --selftest` ⑨l 加固（前缀断言 + #45 回归）。**自检 ✅ 通过**（容器内 workspace 副本）。
+
+### ★★★ #46 —— 交棒 11 条（3040→3020）并删 3040（用户选定顺序）
+- 3040 上 **11 条够格**（比原估 6 多）全部：export → add(3020, /downloads, 原分类) →
+  recheck → **3020 就绪（prog=1.00 stalledUP）** → `torrents_delete(delete_files=False)`。
+- 验证：3020 里 11/11 在种；**3040 只剩 1 条**（Hannah Hope 下载中，正确没动）。
+- 安全前置：daemon `/downloads`=/volume1/video/music=3020 的 `/downloads`；daemon
+  `/publish`=3040 的 `/downloads`（**不同盘**）；11 条数据在 3020 目标盘**全部在位**。
+- stale 队列 3 条（DB hash A）已用 `handoff.remove_item` 移除，队列现空。
+
+### ★ #48 —— 交棒线程为何从不实际交棒
+- 线程**正常运行**（`ENABLE_HANDOFF=true dry_run=false`）。日志**从无** `PENDING → …`/`已交棒`/
+  `清盘` ⇒ `process_one` 从未越过 PENDING。**根因 = #45**（非独立 bug）。
+- 附带：复制步有 3020 **读超时**（`ReadTimeout 15.1s` → `跳过复制`）⇒ 建议给该查询加 `_retry`。
+
+### 未部署 / 未提交
+- #45 代码修复**只在工作树**（`src/handoff.py` + `src/run.py`，自检通过），**未构建/未部署**。
+  部署前生产 daemon 仍走旧逻辑（够格种仍会卡 PENDING，但因队列已空，暂无实际影响）。
+- 未 `git commit`（等用户明确要求）。新增/改动见 `git status`。
+
+### 待办（TaskList）
+- #39 护栏：巡检每条 EXISTS 行的 B 在做种 + tracker msg 不含 same-location，丢则加回。
+- #41 DEP：提交 + 构建 + 部署（含 #31/#33/#45 代码）——**需用户批准**。
+- #37 A 组重发正确版本 + 改 DB 指针（8 行）。
+- #40 retract_missing_pages 自检 + C 类核对工具。
+- #42 收尾（ERRATA/SESSION-NOTES/counts 已随本轮更新）。
+- 小任务：3020 读超时加 `_retry`；#39 见 same-location ⇒ 清陈旧 peer。
+
+## 2026-10-08（续 101）—— #39 护栏-1：B 做种只读巡检 + 全量跑（+ 用户问 20667）
+
+### 交付物（新文件）
+- **`src/site_seed_patrol.py`**：库。单条巡检 `patrol_row` + 选行 `iter_exists_rows` +
+  自检 `--selftest`（纯假件，**不需要 `.env`**）。
+- **`tools/check_site_seeding.py`**：CLI（只读）。`--site/--id/--info-hash/--limit/
+  --only-defective/--json`；缺 `--limit` 打全量。退出码 0=全在做种 / 1=有 MISSING|AMBIGUOUS / 2=环境。
+- 两文件已 `docker cp` 进容器；容器内 `--selftest` 全绿。
+
+### 五态判定
+`SEEDING`（在+prog≥1+做种族）/ `PRESENT`（在但 prog<1）/ `MISSING`（查不到 B ⇒ 丢了）/
+`AMBIGUOUS`（同 B 命中多条 ⇒ 同位置/残留）/ `NO_SITE_TORRENT`（没有 B 可查：缺 id/下不动/壳页——
+**不是** MISSING）。
+
+### ★★★ 身份铁律（自检当场抓出的初版 bug，见 ERR-PUBLISH-15）
+- **判据 = `qB.hash == infohash(站点 B)`**。B 从 `download.php` 取，`torf` 算其 infohash。
+- **初版错**：拿 `category ∈ HANDOFF_OWN_CATEGORIES` 当命中 ⇒ 3020 里 **648 条本项目别的专辑**
+  全算进来 ⇒ 每条报 `AMBIGUOUS(649)`，**全假阳性**。已改为 **hash 相等**；`category/name` 只作旁证。
+- 自检含**阴性对照**：同名+同分类+**不同 hash** 的种 ⇒ 必须 `MISSING`（③）。
+
+### 全量跑（只读；两站）
+- **汇总：SEEDING=128  PRESENT=1  MISSING=1**（共 130 行；musopia 66 / crabpt 64）。
+  报告：`/data/c_seeding_report.json`。
+- **MISSING**：`musopia 20889` 'Bruno Mars - Unorthodox Jukebox (2012) [FLAC]-mtpMTP'
+  （B=`2b06eaec5a…`，A=`8bcdecf3ca…`，3020/3040 都查不到 ⇒ **真丢了**）⇒ `#49` 自动加回候选；
+  其 `content_path=/downloads/Bruno Mars - Unorthodox Jukebox…`（HDD 有源）。
+- **PRESENT**：`musopia 20667`（见下）。
+
+### ★ 用户问：20667 为什么"还没做种"
+- **页面 20667 实挂**：`[260617] Hana Hope - blue hour [**期間**生産限定盤][AICL-4905~6]…`，
+  站点 infohash **`60dd1d72…`**（B）；**DB 那条**（`9e9ed78a…`，A）却是 **[初回**生産限定盤][AICL-4904]。
+- 3020 里在做种的是 **初回 A**（`cat=opencd`，tracker=`tracker.open.cd`，msg=`You may only 1 seeding
+  from one location.` —— **皇后站**的抱怨，**与 musopia 无关**）。
+- 页面挂的那条 **期間 B（`60dd1d72…`）在 3040 上存在，但 `stalledDL prog=0`**（文件不在 3040 发种区）
+  ⇒ 站点收不到它的 seeder ⇒ **页面 0 做种**。
+- **定性**：`#136` 错版本页 + `#45` 身份错配的合体 —— **不是"漏做种、加回就行"**，属 **A 组 #52–#55**
+  （重发正确版本为新页 + 改 DB 指针）。页面挂的 期間盤若无效只能弃（无批量删种 ⇒ 留孤页）。
+
+### 未部署 / 未提交（同前）
+- `site_seed_patrol.py` / `check_site_seeding.py` 只在**容器内 `/app`**（docker cp）+ NAS `/data`，
+  **尚未进镜像** ⇒ 随 `#41` DEP 一起提交/构建/部署。
+- `#45` 修复仍在工作树。未 `git commit`（等用户明确要求）。
+
+## 2026-10-08（续 102）—— #49 护栏-2：自动加回丢失的 B（库 + CLI，已实修 20889）
+
+### 交付物
+- **`src/site_readd.py`**（库，`--selftest` 全绿，纯假件不碰 qB）：
+  - `resolve_save_path(qb, a_ih)` —— 由 A 的 `content_path` 取**父目录**（`ERR-PUBLISH-13` 的坑）。
+  - `b_present(clients, b_ih)` —— 幂等判据：B 在不在（**按 hash**，`ERR-PUBLISH-15`）。
+  - `readd_b_torrent(...)` —— add(paused,`is_skip_checking=False`)→recheck→resume→reannounce→
+    **回读 `progress`/`state` + tracker `msg`**；`same-location` 判失败（`ERR-PUBLISH-14`）；
+    `progress<1` 判失败；`tracker status∉{1,2}` 判失败。**dry-run 默认**。
+  - `readd_row` / `readd_missing` —— 批量编排（只对 `MISSING` 动手）。
+- **`tools/readd_missing_from_patrol.py`**（CLI）：巡检→对 `MISSING` 加回；**默认 dry-run**，`--apply` 才写。
+- （`tools/readd_site_torrent.py` 保留为 #38 手工当班 CLI；两者同源逻辑。）
+
+### ★ 实修：`musopia 20889`（Bruno Mars）
+- 巡检判 `MISSING`（B `2b06eaec5a…` 在 3020/3040 都查不到；A `8bcdecf3ca…`）。
+- `--apply` ⇒ `✅ 已加回并在做种 progress=1.00 state=stalledUP trk=[('www.musopia.vip', 2, '')]`。
+- 复巡 ⇒ `SEEDING`（`命中['3020'] how=hash+自分类`）。**全量只剩 20667 那条 PRESENT（属 A 组）。**
+
+### 未部署 / 未提交（同前）
+- `site_readd.py` / `readd_missing_from_patrol.py` 只在容器 `/app`（docker cp）+ NAS `/data`，
+  **未进镜像** ⇒ 随 `#41` DEP。未 `git commit`。
+
+## 2026-10-08（续 103）—— #50 护栏-3：same-location 来源诊断（只读；结论已定）
+
+### 诊断问题：陈旧 peer 从哪来？
+- 全机 qB：**3020**(opencd) / **3040**(publish) / **3060**(reseed, `reseed-cross-seed` 在用)。
+- 扫 **3060 全 3220 条种**的 tracker 主机 ⇒ **14 个别的 PT 站**（hdarea/pterclub/muxuege/
+  btschool/keepfrds/m-team/hdfans/hdtime…），**musopia 命中 0、crabpt 命中 0**。
+- ⇒ **3060 不是**我们 stale peer 的来源（它只辅种外站，从不碰 musopia/crabpt）。
+- ⇒ stale peer 来自**我们自己的 3020/3040**：qB 重启 / re-add / 交棒前后那次 announce
+  留下的幽灵，占着站点"同账号同种只 1 个做种者"的位子（`ERR-PUBLISH-14` 已坐实）。
+
+### 自动化边界（定论，供 #51 实现）
+- **只读可自动**：巡检见 `msg` 含 same-location ⇒ 标"重复占位"（`site_seed_patrol` 已能回读 state，
+  tracker `msg` 已由 `site_readd` 回读）。
+- **清位动作要保守**：本机没有"直接对站点踢 peer"的 API；能做的只是**本机侧去重**——
+  确保同一 B 只在 **一个** qB 实例（3020）持有；若 3040 也残留同 B ⇒ 删 3040 那条（`delete_files=False`）。
+- **不自动删**：等 `interval` 超时是站点侧的事，我们不主动踢（无权限）；**只保证"我们这边只有一个持有者"**。
+- **记录到账本**：同一条 B 的 same-location 反复出现 ⇒ 记一笔（避免每轮重复排查）。
+
+### 状态
+- #50 属**诊断类**，结论如上；**未写新代码**（自动化并入 #51 的巡检线程：发现 same-location ⇒
+  记日志 + 若 3040 有重复实例则本地去重；**默认 dry-run**）。未部署/未提交（随 #41）。
+
+## 2026-10-08（续 104）—— #51 护栏-4：把巡检+加回接进 daemon 线程 + 自检护栏
+
+### 干了什么
+- **`src/daemon.py`**：新增 **C 类护栏巡检线程**（`_seed_patrol_thread_loop` / `_drain_seed_patrol`
+  / `_seed_patrol_build_clients` / `_seed_patrol_retry`），在 `run_main_loop()` 里随
+  readd/handoff 线程**一起启动**（`Thread(target=_seed_patrol_thread_loop, name="patrol")`）。
+  - 复用**同一份** `site_seed_patrol`（眼睛）+ `site_readd`（加回）库逻辑（`ERR-META-03`）。
+  - 加回**不直接 add**：`readd_queue.enqueue(raw, "/downloads", cat, 1, …)` 交给既有 readd
+    线程（复用其发种区就位闸门 `_readd_area_ready` + 退避重试，`#136`/`#134` 纪律）。
+  - qB 取数器带**重试**（3020 SSL 抖动 `#43`）；任一 qB 连不上 ⇒ `RuntimeError` ⇒ **本轮作废**
+    （不写队列），绝不折成行判定。
+  - **双重显式开关**：`ENABLE_SEED_PATROL=false` 默认**不开**（线程第一件事就 return）；
+    即使开了，`SEED_PATROL_DRY_RUN=true` 默认**只巡不修**。要真修须**两键都显式**。
+  - 自动化边界（`#50` 定论）：只对 `MISSING` 入队加回；`AMBIGUOUS`/`PRESENT`/`NO_SITE_TORRENT`
+    **不动**（绝不碰站点）。
+  - `ENV_SNAPSHOT_KEYS` 加 4 键（`ENABLE_SEED_PATROL`/`SEED_PATROL_DRY_RUN`/
+    `SEED_PATROL_THREAD_TICK`/`SEED_PATROL_MAX_PER_ROUND`）—— 让巡检能回答"护栏开没开"。
+
+- **`src/run.py --selftest` ⑨f**：把 `_seed_patrol_thread_loop` 加进"必须接线 + 必须定义"
+  的 AST 判据（照 readd/handoff 同款，`ERR-META-01`：写了不接 = 死代码）。
+
+### 验证
+- 离线 `run.py --selftest` ✅；**阴性对照**：临时删掉 patrol 接线 ⇒ ⑨f 变红（EXIT 1）⇒ 护栏有效。
+- 容器内 `run.py --selftest` ✅（补同步了 `handoff.py`，容器里那份是 #45 之前的旧版）。
+- 容器内 `site_seed_patrol` / `site_readd` 自检 ✅。
+- 容器内**实跑**接线后的 `_drain_seed_patrol()`（dry-run）：`巡 130 行: SEEDING=129 PRESENT=1`
+  —— 20889 已 SEEDING（`#49` 实修保持），唯一 PRESENT = 20667（A 组）。
+- `readd_queue.enqueue` 位置参数实测 `(torrent_bytes, save_path, category, delay_min, …)` 对得上。
+
+### 状态
+- 全部**只在容器 `/app`（docker cp）+ 工作树**，**未进镜像、未 commit** ⇒ 随 `#41` DEP。
+- 默认两键都关 ⇒ **老行为一字不改**（线程起了但不做事，日志明说"未开"）。
+
+## 2026-10-08（续 105）—— #52 A 组-1：全量核对站点实挂版本 vs DB（只读）
+
+### 干了什么
+- `tools/verify_hosted_edition.py` 自检 22/22 通过；在容器内**全量只读跑** 130 行
+  （两站 `site_publish` EXISTS）：报告 `/data/vhe_report.json`（已拷回 `.scratch/vhe_report.json`）。
+
+### 结果：**MATCH=122  MISMATCH=8**（0 MISSING-PAGE / 0 DOWNLOAD-FAILED）
+8 行 MISMATCH，分两子型（详见 `.scratch/A_group_mismatch.md`）：
+
+**① 同专辑多版本塌页 / 共用行（5 行）**
+| DB info_hash | DB 声称 | musopia | crabpt |
+|---|---|---|---|
+| `3870e15b53` | blue hour **期間** | id=18688 **挂初回**❌ | id=215575 ✅ |
+| `9b4408b944` | コニファー **期間** | id=19333 **挂初回**❌ | id=217500 **挂初回**❌ |
+| `0295c1305c` | コニファー **初回** | id=19333 ✅ | id=217592 **挂期間**❌ |
+| `9e9ed78ab8` | blue hour **初回** | id=20667 **挂期間**❌ | — |
+| `97b38369bd` | 女王蜂 星 **完全** | — | id=216217 **挂期間**❌ |
+
+★ **musopia 19333 一个 tid 被两行引用**（`9b4408b944`期間 / `0295c1305c`初回）⇒ 同页不可能
+同时是两版本 ⇒ 必有一行指针是假的（实测 `0295c1305c` MATCH、`9b4408b944` MISMATCH）。
+
+**② 单版本页挂了别的东西（3 行）**
+- musopia 20639：DB `Eric Clapton … 分軌` vs 站上 `… [FLAC] {B0015402-02}`（分轨/整轨差）
+- crabpt 216915：DB Stella **天幕盤** vs 站上 **通常盤**
+- crabpt 216217：DB 女王蜂 星 **完全盤** vs 站上 **期間盤**（= 子型①里 crabpt 侧那条，同 tid）
+
+### 结论与下一步
+- 本批 8 行**全是真·挂错/塌页**，**不含**"页与种都对、只是 DB 名写错"那类
+  ⇒ **#53 预计空操作**（会再逐行确认）。
+- **#54 重发**（不可逆，★ 需你批，先 1 条试水）+ **#55 改指针**（musopia 双写 / crabpt 只 site_publish）。
+- 无 MISSING-PAGE（18984/19069 此前已处理，本轮未再出现）。
+
+## 2026-10-08（续 106）—— #56 收尾-1：retract_missing_pages 自检（阴性对照）
+
+### 干了什么
+`tools/retract_missing_pages.py` 补 `--selftest`（离线、临时 sqlite，不碰生产库/.env）：
+- **抽出核心写逻辑** `_retract(conn, targets, *, apply, out)`（`main` 与自检共用一份，`ERR-META-03`）。
+- **15 项判据 + 4 个阴性对照**：
+  ① `_targets_from_json` **只取** `MISSING-PAGE`（MATCH/MISMATCH 不许被取）；
+  ② 只读预览（apply=False）⇒ **一行不改**；③ apply ⇒ 目标改对 + **MATCH 行原封不动** +
+  **cover/synced_at 保留**；④ **非 EXISTS 行（id 已空）不许改**（点旧 id 查不到 ⇒ 跳过；
+     点名空 id 也不许把空 status 提成 UNKNOWN）；⑤ **跨站同 ih**：撤 M 侧不许动 C 侧；
+  ⑥ 查不到的 id ⇒ 0 行、exit=0。
+- 修了写自检时的两处 fixture/断言 bug（列数不齐、断言期望值写错）——非生产代码问题。
+
+### 验证
+- 本机 `python tools/retract_missing_pages.py --selftest` ✅ 全绿。
+- 容器内同命令 ✅ 全绿。
+
+### 状态
+- 只在工作树 + 容器 `/app`（docker cp），**未提交/未部署**（随 #41）。
+- #40（工具自检）一并关闭（#56 ✅ + #57 ✅）。
+
+## 2026-10-08（续 107）—— #53 A 组-2：确认"改 DB 名"对本批**是空操作**
+
+### 判定（只读，逐行）
+`#53` 的目标是"页与挂的种**都对**，只是 DB 的 `tasks.torrent_name` 写错" ⇒ 改名即可。
+逐行核对本批 8 行：**DB 声称的版本 ≠ 站上实挂的版本，且是不同版本**（初回/期間/完全/通常/天幕）：
+
+| 站点 | id | DB 声称 | 站上实挂 |
+|---|---|---|---|
+| musopia | 18688 | 期間 | **初回** |
+| musopia | 19333 | 期間 | **初回** |
+| musopia | 20639 | 分軌 | **—（整轨命名）** |
+| musopia | 20667 | 初回 | **期間** |
+| crabpt | 216217 | 完全 | **期間** |
+| crabpt | 216915 | 天幕 | **通常** |
+| crabpt | 217500 | 期間 | **初回** |
+| crabpt | 217592 | 初回 | **期間** |
+
+⇒ **8/8 都是"不同版本"** ⇒ 改 `torrent_name` **修不了**（页面挂的 `.torrent` 就是另一个版本的；
+改名只会让 DB 撒另一个谎）。**#53 = 空操作，不做。**
+
+### 唯一正解 = #54（重发正确版本为新页）+ #55（改指针）
+- 方案已落盘 `.scratch/A_group_republish_plan.md`（含正确版本名 / DB info_hash / 试水顺序 /
+  musopia 双写 vs crabpt 只 site_publish 的指针规则 / 执行勾选清单）。
+- **触发条件**：8 个 id 只读复跑全部 `MISSING-PAGE`（= 管理员删除已确认）。**当前搁置。**
