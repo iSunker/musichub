@@ -11,12 +11,50 @@
 
 > ★★ **导航（2026-10-11 整理）** —— 本文件是**逆序**（最新在最上），但历史上有**两套互不相同的「续 N」编号**
 > 撞在一起，读时别混：
-> - **10-11 序列**（本会话链的**待办/结论**）：`续 104 → 105 → 106 → 107 → 108 → 109 → 110 → 111 → 112`
->   （★ `续106` = **待办总清单 T1~T6**；★ `续112` = **全问题待办大纲（BACKLOG）入口**，恢复会话先读它）。
+> - **10-11 序列**（本会话链的**待办/结论**）：`续 104 → 105 → 106 → 107 → 108 → 109 → 110 → 111 → 112 → 113`
+>   （★ `续106` = **待办总清单 T1~T6**；★ `续112` = **全问题待办大纲（BACKLOG）入口**，恢复会话先读它；
+>    ★ `续113` = **B12+B1 发版上线**）。
 > - **10-08 序列**（**另一批**独立编号，现落在文件**末尾**）：`续 100 → 101 → 102 → 103 → 104 → 105 → 106 → 107`
 >   （这里的 `续106` = `#56 retract 自检`，与上面**完全无关**）。
 > ⇒ 找待办看 **顶部「续106」**；找"护栏 #39/#49/#51"那批工作看**末尾的 10-08 序列**。
 > ★ 本次仅**修正顶部四处**：补回丢失的 `续106` 节头、把 `续109/续108` 摆回逆序、加本导航 —— 旧节内容一字未改。
+
+---
+
+## 2026-10-12（续 113）—— ★★ 发版：B12（RSS 反查补 tid + 配额 500）+ B1（#31 精准优先）上线
+
+> 用户拍板：**先 commit 再发** / **全部 WIP 一起发** / commit 后 **push 分支（不开 PR）** / **现在就走整个发版**。
+> 发版细则与验收：`.scratch/B12-release-record.md`（gitignore）。
+
+### ★ 结论（已实测坐实）
+- **commit `2bf9469`**（`feat/crawl-stage-wiring`）已 push：37 files, +7955/-221（26 改 + 11 新）。
+  ★ `.env` / `.scratch/` / `*.db` / pyc 均 gitignore，**未入 commit**（`git check-ignore` 核过）。
+- **镜像**：`isunker/opencd2others:latest` + `:2bf9469`，digest **`sha256:2cbad467…`**。
+- **NAS 部署**（点名 sha，`ERR-DOCKER-13`）：compose `image: …:2bf9469`，容器 **healthy**；
+  NAS `RepoDigest = sha256:2cbad467…` **与推送一致**；`printenv` 配额 **500**、rss_tid **关+干跑**；
+  daemon stage 表 `crawl` 在、**`rss_tid` 不在**（`ENABLE_RSS_TID=false` ⇒ 安全默认，非故障）。
+
+### ★ 新踩的坑（已写进 `ERRATA` 候选 / `build-push.sh` 待改）
+- **ERR-（新，build）**：本机 **Docker Desktop 29.8.0** 下 `docker build` **默认走 buildkit**
+  ⇒ buildkit 不读 dockerd 代理 ⇒ `failed to fetch oauth token`（DNS 污染 IP）。
+  **解法：`DOCKER_BUILDKIT=0`**。`build-push.sh` 默认分支没导出它 ⇒ **建议脚本加 `export DOCKER_BUILDKIT=0`**（待办）。
+- **ERR-DOCKER-13 补充**：验证"跑的是不是刚推的镜像"要**比 `RepoDigests`**
+  （`docker image inspect <ref> --format '{{json .RepoDigests}}'`）；
+  `docker inspect <容器> --format '{{.Image}}'` 给的是**本地 config id**，跨主机**必然不等**，
+  比它 = 假阴性。`build-push.sh` 尾注那条"`.Image` 必须等于本机 image id"**是错的**（待改）。
+
+### ★ 代码内容（本次上线）
+- **B12**：`opencd.py` `parse_rss_index/fuzzy_name/...`（纯函数）；**新** `rss_backfill_tid.py`
+  （cache-first + `rss_tried.jsonl` + 两段式精确→模糊 + 复用 `sync_opencd_tid.apply_tids` 写库）；
+  `daemon.py` 加 `rss_tid` 阶段（默认关）；`nas_health/gen_counts/.env.example` 登记；顺带补 `free_window`；
+  ★ **日配额 50→500**（`crawl.DEFAULT_MAX_PER_DAY` 唯一源头 + 兜底 + 文档；`min_interval` 120s **未动**）；
+  修 `topup_opencd_fields.py` 缺 `--dry-run` 的真 bug。
+- **B1**：`musopia.py` `SEARCH_QUERY_PLAN` 精准优先（高精度短查询先发、命中即停）；
+  `site_verify.py` + `verify_hosted_edition.py`。真站 20 行回归 **14/20**（旧 area=0 = 13/20）。
+
+### ⏳ 未了
+- **#23** 容器小样试跑（报告 0 请求 → `--apply --limit 20` → SQL 核对）；默认仍 `ENABLE_RSS_TID=false`，手动跑。
+- **#29** 文档（本节 + README 阶段表/配额 + BACKLOG B1/B4/B12 已改）。
 
 ---
 

@@ -398,12 +398,12 @@ Lsky（`img.crabpt.vip`）对单图有体积上限，**超限会整条拒收**�
 
 ## Docker 全自动运行
 
-一个常驻容器跑 `daemon.py`，按各自周期**串行**调度六个阶段：
+一个常驻容器跑 `daemon.py`，按各自周期**串行**调度各阶段：
 
 ```
 scan（扫 qB、抽元数据、做种）
   ↓
-publish（发新种子）
+publish / publish_crabpt（发新种子：乌托邦 / 蟹黄堡）
   ↓
 sync（回填 site_torrent_id）
   ↓
@@ -411,12 +411,17 @@ covers（补历史缺失封面）
   ↓
 edit（改标题/副标题/简介，--stale-only 增量）
   ↓
+vtid（读 vertex 外库回填 opencd_tid，零请求）
+  ↓
 crawl（扫 qB 反查皇后、抓详情页入库）★ 默认关（ENABLE_CRAWL=false）
+  ↓
+rss_tid（用皇后 RSS 反查补 opencd_tid）★ 默认关（ENABLE_RSS_TID=false，2026-10-12 加）
 ```
 
-★ `crawl` 与上面五个是**两条独立流水线**（只共用 `tasks` 表、不互为前置），
-放最后只是因为它是新增的、最可能被关掉的那个 —— **与依赖无关**。
-它**只入库、不会产生新发布**（闸门①未打通，理由见下面「OpenCD 转载流水线」）。
+★ `crawl` / `rss_tid` 与上面五个是**两条独立流水线**（只共用 `tasks` 表、不互为前置），
+放最后只是因为它们是新增的、最可能被关掉的那几个 —— **与依赖无关**。
+它们**只入库/只补 tid、不会产生新发布**（闸门①未打通，理由见下面「OpenCD 转载流水线」）。
+★ `vtid`（免费、零请求）排在 `crawl`/`rss_tid`（出网、花配额）**之前** —— 把免费的先吃完。
 
 ### ★★ scan 读的 qB 实例 ≠ 发种回加的实例（两个真值来源，别合并）
 
@@ -1034,12 +1039,20 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
      `opencd_log.py`，离线自检 `python tools/opencd-crawl-selftest.py`
      （本地 mock 皇后，不碰外网；★ 项数见 `counts.json`）。★ **已入库**（`opencd_ingest`），
      且 daemon 里多了 `crawl` 阶段（`ENABLE_CRAWL`，★ **默认 false**）。
-   - **限速（2026-09-19 调）**：每请求最小间隔 **120s**、每日上限 **50**（见 `.env.example`）。
-     ⚠️ **两个旋钮都是「请求」量纲，不是「种子」** —— 用户要的「每天 50 个种子」
-     目前只能**近似**成「每天 50 个请求」（一种子 ≈ 2~3 请求 ⇒ 实际约 17~25 种子/天，偏保守）。
+   - **限速（2026-10-12 调）**：每请求最小间隔 **120s**、每日上限 **500**（见 `.env.example`）。
+     ⚠️ **两个旋钮都是「请求」量纲，不是「种子」** —— 「每天 500 个种子」只能**近似**成
+     「每天 500 个请求」（一种子 ≈ 2~3 请求 ⇒ 实际约 170~250 种子/天）。
+     ★ 2026-10-12：日上限 **50 → 500**（用户要求，站点允许）；`min_interval` 仍 **120s**（未动）。
+     ★ 唯一源头 = `crawl.DEFAULT_MAX_PER_DAY`（其余脚本走 `$OPENCD_MAX_PER_DAY` 兜底）。
      ✅ **2026-09-22 修**：`RateGate` 原先每轮新建 ⇒ 「每日」上限**退化成每轮上限**；
-     现在计数落在 `data.db` 的 `opencd_quota` 表（跨轮持久）⇒ 是**真的每日 50**。
+     现在计数落在 `data.db` 的 `opencd_quota` 表（跨轮持久）⇒ 是**真的每日上限**。
      ⚠️ 但量纲仍是**请求** —— 按种子卡要在入库那步记 `kind='seed'`（表结构已留位置，**还没做**）。
+   - **`rss_tid` 阶段（2026-10-12 加，B12）**：用皇后 RSS `torrentrss.php?search=<名字>` 反查
+     **补 `opencd_tid`**（每条 item 自带 `<guid>`=真 infohash、`<link>`→tid ⇒ 1 请求/条）。
+     ★ **默认关**（`ENABLE_RSS_TID=false`）—— 与 `crawl` 同：会主动出网、花配额。
+     ★ 干跑专用变量 `RSS_TID_DRY_RUN=true`（不复用 `DRY_RUN`）；真闸 = `OPENCD_MAX_PER_DAY`。
+     ★ 写库复用 `sync_opencd_tid.apply_tids()`（**唯一** tid 写口，只填空白、不碰 `updated_at`）。
+     就地在容器里试跑：`docker compose run --rm musopia python rss_backfill_tid.py --limit 20`（报告 0 请求）。
    - **cookie 失效不会静默**：探活失败 ⇒ crawl 退出码 1 ⇒ daemon 指数退避；
      `daemon_state.json` 里 `crawl.last_ok=false`，每小时巡检会报出来。
      ★「发邮件告警」并入每日邮件待办，**本期不实现 SMTP**。
