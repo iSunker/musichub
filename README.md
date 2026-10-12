@@ -1051,6 +1051,8 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
      **补 `opencd_tid`**（每条 item 自带 `<guid>`=真 infohash、`<link>`→tid ⇒ 1 请求/条）。
      ★ **默认关**（`ENABLE_RSS_TID=false`）—— 与 `crawl` 同：会主动出网、花配额。
      ★ 干跑专用变量 `RSS_TID_DRY_RUN=true`（不复用 `DRY_RUN`）；真闸 = `OPENCD_MAX_PER_DAY`。
+     ★★ **需要 `QUEEN_RSS_PASSKEY`**（皇后的 RSS passkey，**≠ `MUSOPIA_PASSKEY`**）——
+       `torrentrss.php` 要 query 里带它；没配 ⇒ 真搜模式开工前退出（不白敲站点）。
      ★ 写库复用 `sync_opencd_tid.apply_tids()`（**唯一** tid 写口，只填空白、不碰 `updated_at`）。
      就地在容器里试跑：`docker compose run --rm musopia python rss_backfill_tid.py --limit 20`（报告 0 请求）。
    - **cookie 失效不会静默**：探活失败 ⇒ crawl 退出码 1 ⇒ daemon 指数退避；

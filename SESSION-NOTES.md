@@ -52,9 +52,23 @@
 - **B1**：`musopia.py` `SEARCH_QUERY_PLAN` 精准优先（高精度短查询先发、命中即停）；
   `site_verify.py` + `verify_hosted_edition.py`。真站 20 行回归 **14/20**（旧 area=0 = 13/20）。
 
-### ⏳ 未了
-- **#23** 容器小样试跑（报告 0 请求 → `--apply --limit 20` → SQL 核对）；默认仍 `ENABLE_RSS_TID=false`，手动跑。
-- **#29** 文档（本节 + README 阶段表/配额 + BACKLOG B1/B4/B12 已改）。
+### ✅ 全部完成
+- **#26-#29** 发版（commit/push/build-push/NAS 部署/文档）全绿。
+- **#23** 容器小样试跑 + 修复 + 复测通过（见下）。
+- ★ 生产运行镜像 = **`922dcfc`**；`ENABLE_RSS_TID` 仍默认 **false**（要不要常开 = 另需用户点头）。
+
+### ★★ #23 试跑追加：抓到并修复一条真 bug（2026-10-12，同日）
+- 初测镜像 `2bf9469`：`--apply --limit 5` ⇒ 请求 5 · **命中 0 · 失败 5**（全 `parse:ParseError`）。
+- 根因（容器内实测坐实）：**`rss_backfill_tid.fetch_index()` 的 RSS 请求从未带 `passkey`**
+  ⇒ 皇后返回纯文本 `passkey error`（13B，非 XML）。★ 且 `crawl.Client` 只带 cookie、**不拼 passkey**；
+  ★ **皇后 RSS passkey ≠ `MUSOPIA_PASSKEY`**（后者是乌托邦的）。
+- 修复：commit **`922dcfc`** → 镜像 **`922dcfc`**（digest `08388b59…`）→ NAS 部署（备份
+  `docker-compose.yml.bak-b12fix-20261012`）；NAS `.env` 加 `QUEEN_RSS_PASSKEY`（备份 `.env.bak-rsspk-*`）；
+  `tools/opencd-crawl-selftest.py` 加**判据㉒**（"请求必须含 passkey" + "未配 ⇒ 0 请求"）⇒ **55/55**。
+- ★ 复测（`--apply --limit 5`）：**请求 6 · 命中 4 · 未中 1 · 失败 0**；SQL 空白 tid **1651→1647（−4）**、
+  4 行 `updated_at` **未变**（纪律 3 守住）。含 1 条模糊档命中（Dua Lipa）。
+- ★ 仍默认 `ENABLE_RSS_TID=false`（daemon 不自动跑）；上面都是手动 `compose run`。
+- 细节：`.scratch/B12-23-trialrun-finding.md`。
 
 ---
 
