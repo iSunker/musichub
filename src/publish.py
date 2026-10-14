@@ -3007,6 +3007,23 @@ def selftest_version_gate(verbose=True):
             else:
                 detail.append("② 强判据：cue 的 FILE 目标缺失 ⇒ 判分轨 ✅")
 
+            # ②b ★★ 阴性对照：**逐轨 cue**（多 FILE 各指一轨、目标**都存在**）⇒ 仍须判分轨。
+            #   ★ 这正是 B16 一修**失手**的形状（Kinks）：只看"目标在不在"会判整轨。
+            #   造法：一份 cue 里 2 条 FILE，分别指向目录里真实存在的两个 flac。
+            with open(os.path.join(content, "x.cue"), "w", encoding="utf-8") as fh:
+                fh.write('FILE "01.flac" WAVE\n  TRACK 01 AUDIO\n    TITLE "a"\n'
+                         'FILE "02.flac" WAVE\n  TRACK 02 AUDIO\n    TITLE "b"\n')
+            live_per = _assets.cue_track_type(content)
+            if live_per != "分轨":
+                fails.append(f"★★ 阴性对照：逐轨 cue（多 FILE 各指一轨、目标都在）"
+                             f"⇒ 应判分轨，实得 {live_per!r}（修复①只治了'目标缺失'，"
+                             f"没治'逐轨 cue'）")
+            else:
+                detail.append("②b 阴性对照：逐轨 cue（多 FILE 各指一轨）⇒ 判分轨 ✅")
+            # 恢复成'目标缺失'夹具，供后面的闸门用例用（库=整轨/盘=分轨）。
+            with open(os.path.join(content, "x.cue"), "w", encoding="utf-8") as fh:
+                fh.write('FILE "missing.wav" WAVE\n')
+
             # 假件 A：库说整轨（旧判据的错值），盘上实况分轨 ⇒ 必须拒发
             if _torf is not None:
                 tp = os.path.join(td, "out.torrent")

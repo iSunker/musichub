@@ -1005,6 +1005,36 @@ def _cue_file_targets(cue_text):
     return targets
 
 
+def _cue_is_image(cue_text, cue_dir, folder_path):
+    """一份 cue 是不是**真·整轨写法**。是返回 True。
+
+    ★★ 判据（2026-10-14 二修，`ERR-PUBLISH-20` 逐轨 cue 复发）：
+
+      **整轨 ⟺ 恰好一条 `FILE` 指令，且它指向的文件真的存在。**
+
+      为什么是"恰好一条"，而不是"至少一条目标存在"（B16 第一版，仍会误判）：
+        实测 Kinks 专辑 —— 12 个分轨 flac + 1 个**逐轨 cue**。那种 cue 是
+        **合法分轨写法**：`FILE "01 ….flac" WAVE` 每首一段，`FILE` 目标**全都存在**
+        ⇒ 只看"目标在不在"的判据判**整轨**，可实际上它是**分轨**。
+      ⇒ 整轨 cue 的结构特征 = **一个镜像文件 + 其后跟着全部 TRACK**；
+        逐轨 cue 的结构特征 = **N 个 FILE，每个 FILE 后面跟一个 TRACK**。
+      ⇒ 所以"整轨"必须**同时**满足：
+          ① `FILE` 指令**恰好一条**（多 FILE 各指一轨 ⇒ 分轨）；
+          ② 这条 `FILE` 的目标文件**真的存在**（21662 那种"cue 指向缺失的 wav"⇒ 分轨）。
+
+    ★ 单条 `FILE` 但目标**不存在** ⇒ 也判**分轨**：证据不足支撑"整轨"，宁可判分轨
+      （整轨会被站点拿去做版本标签，判错的代价比判分轨大得多）。
+    """
+    targets = _cue_file_targets(cue_text)
+    if len(targets) != 1:
+        # 0 条 = 不是合法整轨 cue；≥2 条 = 逐轨 cue（分轨写法的强特征）。
+        return False
+    t = targets[0]
+    # CUE 的 FILE 相对**它自己所在目录**；有的抓轨工具写成相对专辑根 ⇒ 两处都查。
+    return any(os.path.exists(c) for c in
+               (os.path.join(cue_dir, t), os.path.join(folder_path, t)))
+
+
 def has_cue(folder_path):
     """★ 强判据（2026-10-14，`ERR-PUBLISH-20`）：目录是不是**真·整轨**。
 
@@ -1013,11 +1043,10 @@ def has_cue(folder_path):
       那个 `[WAV].wav` **根本不在目录里**（实际是 12 个分轨 flac）⇒ 旧判据判
       "整轨" ⇒ 站点标题/版本挂错（B 版校验只到一半、永远救不活）。
 
-    ⇒ 新判据：**至少一份 cue 的 `FILE` 目标真的存在**，才算整轨；否则判分轨。
-      · 目录里**根本没有 cue** ⇒ 分轨（与旧行为一致）。
-      · 有 cue，但它的 `FILE` 目标一个都不在 ⇒ **分轨**（旧判据在这里会误判整轨）。
-      · `FILE` 目标用**相对 cue 所在目录**的路径解析（CUE 规范如此），也兼容
-        相对 `folder_path` 根——两处都找不到才算"目标不存在"。
+    ⇒ 判据：**至少一份 cue 是"真·整轨写法"**（见 `_cue_is_image`），才算整轨。
+      · 目录里**根本没有 cue** ⇒ 分轨。
+      · 有 cue 但 `FILE` 目标一个都不在 ⇒ **分轨**（B16 一修，治 21662）。
+      · **逐轨 cue**（多 `FILE` 各指一轨，目标都在）⇒ **分轨**（B16 二修，治 Kinks）。
     """
     if not folder_path or not os.path.exists(folder_path):
         return False
@@ -1029,15 +1058,8 @@ def has_cue(folder_path):
             if not f.lower().endswith(".cue"):
                 continue
             cue_path = os.path.join(root, f)
-            for target in _cue_file_targets(_read_text(cue_path)):
-                # CUE 的 FILE 是相对**它自己所在目录**的路径；有的抓轨工具写成
-                # 相对专辑根目录 ⇒ 两处都查一下（任一命中即算"目标存在"）。
-                cand = [
-                    os.path.join(root, target),
-                    os.path.join(folder_path, target),
-                ]
-                if any(os.path.exists(c) for c in cand):
-                    return True
+            if _cue_is_image(_read_text(cue_path), root, folder_path):
+                return True
     return False
 
 
@@ -1049,6 +1071,86 @@ def cue_track_type(folder_path):
       不许任何地方另算一遍。
     """
     return "整轨" if has_cue(folder_path) else "分轨"
+
+
+def selftest_cue_track_type():
+    """`has_cue` / `cue_track_type` 的**判据自检**（纯本地，造目录实测）。
+
+    ★★ 为什么必须有（`ERR-META-01`：「检测方法失效比不检测更危险」）：
+      本判据已**修过两次**，两次都是"上一版看着对、实际对某类目录误判"：
+        · 初版（弱）：有 `.cue` 就当整轨 ⇒ 被"cue 指向缺失镜像"骗（21662）。
+        · B16 一修：`FILE` 目标存在才算整轨 ⇒ 被"**逐轨 cue**"骗（Kinks，合法分轨写法）。
+      ⇒ 留这几条**带阴性对照**的用例，把"判据到底判得准不准"变成能跑的判据。
+
+    返回 `(是否全过, 明细列表)`。**不联网、不写盘**（只建/删临时目录）。
+    """
+    import shutil
+    import tempfile
+
+    detail = []
+    ok = True
+
+    def case(name, files, cue_text, expect_type, cue_dir=""):
+        """在临时目录里摆好 `files`（路径→内容，内容 None 表示空文件），
+        按需写一份 `.cue`（`cue_dir` 指定它放在哪个子目录，默认根），
+        然后跑 `cue_track_type` 比期望。"""
+        nonlocal ok
+        d = tempfile.mkdtemp(prefix="cue_selftest_")
+        try:
+            for rel, content in (files or {}).items():
+                p = os.path.join(d, rel)
+                os.makedirs(os.path.dirname(p) or d, exist_ok=True)
+                with open(p, "w", encoding="utf-8") as fh:
+                    fh.write(content or "")
+            if cue_text is not None:
+                cdir = os.path.join(d, cue_dir) if cue_dir else d
+                os.makedirs(cdir, exist_ok=True)
+                with open(os.path.join(cdir, "x.cue"), "w", encoding="utf-8") as fh:
+                    fh.write(cue_text)
+            got = cue_track_type(d)
+            if got != expect_type:
+                ok = False
+                detail.append(f"★ 用例[{name}] 期望 {expect_type}、实得 {got}")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    # ① 整轨（正例）：一条 FILE + 目标镜像真存在 ⇒ 整轨。
+    case("整轨·单FILE镜像存在",
+         {"album.wav": None, "album.flac": None},
+         'FILE "album.wav" WAVE\n  TRACK 01 AUDIO\n    TITLE "a"\n'
+         '  TRACK 02 AUDIO\n    TITLE "b"\n',
+         "整轨")
+
+    # ② 假整轨（阴性对照 / 21662 形状）：cue 指向的镜像**不存在** ⇒ 必须判分轨。
+    case("假整轨·FILE目标缺失(21662)",
+         {"01 a.flac": None, "02 b.flac": None},
+         'FILE "album.wav" WAVE\n  TRACK 01 AUDIO\n    TITLE "a"\n',
+         "分轨")
+
+    # ③ 逐轨 cue（阴性对照 / Kinks 形状）：多个 FILE 各指一轨、目标**都在** ⇒ 必须判分轨。
+    #    ★★ 这条正是 B16 一修**失手**的用例 —— 目标全存在，旧判据判整轨。
+    case("逐轨 cue·多FILE各指一轨(Kinks)",
+         {"01 a.flac": None, "02 b.flac": None},
+         'FILE "01 a.flac" WAVE\n  TRACK 01 AUDIO\n    TITLE "a"\n'
+         'FILE "02 b.flac" WAVE\n  TRACK 02 AUDIO\n    TITLE "b"\n',
+         "分轨")
+
+    # ④ 无 cue ⇒ 分轨（始终如此）。
+    case("无 cue", {"01 a.flac": None, "02 b.flac": None}, None, "分轨")
+
+    # ⑤ 空 cue（0 条 FILE）⇒ 证据不足 ⇒ 分轨。
+    case("空 cue·0 FILE", {"01 a.flac": None}, "\n", "分轨")
+
+    # ⑥ FILE 目标在**专辑根**（cue 在子目录、但 FILE 写成相对专辑根）⇒ 仍算整轨。
+    #    ★ 结构：cue 在 `CD1/x.cue`，镜像在根 `album.wav`，cue 里 `FILE "album.wav"`。
+    case("整轨·目标在专辑根",
+         {"album.wav": None},
+         'FILE "album.wav" WAVE\n  TRACK 01 AUDIO\n    TITLE "a"\n',
+         "整轨", cue_dir="CD1")
+
+    if not detail:
+        detail.append("6/6 通过（含 2 条阴性对照：假整轨 21662 / 逐轨 cue Kinks）")
+    return ok, detail
 
 
 # ==================== Lsky token 链路的自检 ====================
