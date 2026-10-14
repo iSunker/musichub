@@ -55,6 +55,17 @@
   `build-preflight` ✅。
 - **未发版**（改 `src/assets.py` + `src/publish.py` 两个文件；按"不主动 commit"纪律留在工作区）。
 
+### ★ 已发版（2026-10-14，同日由用户指示"发版"）
+- commit **`90b912e`** + push `feat/crawl-stage-wiring`（`4f76b6f..90b912e`）。
+- build-push：`isunker/opencd2others:90b912e`（digest `sha256:7cb81c46…`）。
+- NAS 部署：就地 `sed` 改 compose `image:` → `:90b912e`（**未留 `.bak`**，遵 NAS 白名单铁律）
+  → `docker compose pull` → `up -d --force-recreate --remove-orphans musopia`；
+  容器 **healthy**、running `90b912e`、RepoDigest 与本机 push **一致**。
+- 运行态复核：容器内 `assets.selftest_cue_track_type()` **6/6 PASS**；
+  真机 Kinks 目录 `cue_track_type` 从 **整轨 → 分轨**；`VERSION_GATE_BEFORE_PUBLISH=True`、`QB_HOST=3010`；
+  NAS 顶层仍白名单 5 项。daemon 正在跑 rss_tid 日常回填（正常）。
+- 回滚点：上一个 sha tag = `146db63`（改 compose `image:` 回到它再 `up -d`）。
+
 ---
 
 ## 2026-10-14（续 115）—— R1 实测：rss_tid 首轮自动执行**已发生**（B12 上线后首次真跑）
