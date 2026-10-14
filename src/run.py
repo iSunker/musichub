@@ -40,7 +40,11 @@ def parse_title(raw_title, folder_path):
     year_match = re.search(r"\(?((?:19|20)\d{2})\)?", raw_title)
     year = year_match.group(1) if year_match else ""
 
-    track_type = "整轨" if assets.has_cue(folder_path) else "分轨"
+    # ★ 2026-10-14（`ERR-PUBLISH-20` 修复①）：版本标签只认 `assets.cue_track_type()`
+    #   这一个**强判据**出口（cue 的 FILE 目标必须真存在才算整轨）。
+    #   旧写法 `assets.has_cue()` 只看"有没有 .cue 文件"⇒ 被"有 cue 但 cue 指向
+    #   文件缺失"的假整轨骗过（实测 21662）⇒ 站点标题/版本挂错。
+    track_type = assets.cue_track_type(folder_path)
 
     upper = raw_title.upper()
     if "FLAC" in upper:
@@ -1975,8 +1979,12 @@ def _scan_main(args):
         logs = assets.read_logs(content_path)
         if not logs:
             print("❌ 跳过：目录里没有 .log 抓轨日志")
+            # ★ 2026-10-14：版本标签即使在"没日志"这条早退支里也**照写** ——
+            #   它是"这一行是什么版本"的**事实**，与有没有日志无关；早退支
+            #   不写它，就会出现"同一条记录有的字段认版本、有的不认"的分歧。
             db.save_task(info_hash=info_hash, torrent_name=name, status="NO_LOG_FILE",
-                         reason="目录里没有 .log 抓轨日志", content_path=content_path)
+                         reason="目录里没有 .log 抓轨日志", content_path=content_path,
+                         track_type=assets.cue_track_type(content_path))
             stats["no_log"] += 1
             continue
 
@@ -2097,7 +2105,8 @@ def _scan_main(args):
         except Exception as e:
             print(f"❌ 种子生成失败: {e}")
             db.save_task(info_hash=info_hash, torrent_name=name, status="FAILED",
-                         reason=str(e), content_path=content_path)
+                         reason=str(e), content_path=content_path,
+                         track_type=track_type)
             stats["failed"] += 1
             continue
 
@@ -2131,6 +2140,7 @@ def _scan_main(args):
                     log_filename=log_filename,
                     logs_json=json.dumps(logs, ensure_ascii=False),
                     content_path=content_path,
+                    track_type=track_type,
                     **mt_col,
                 )
                 stats["ok"] += 1
@@ -2149,6 +2159,7 @@ def _scan_main(args):
             log_filename=log_filename,
             logs_json=json.dumps(logs, ensure_ascii=False),
             content_path=content_path,
+            track_type=track_type,
             **mt_col,
         )
         stats["ok"] += 1
@@ -2158,6 +2169,7 @@ def _scan_main(args):
             "info_hash": info_hash,
             "torrent_name": name,
             "formatted_title": formatted_title,
+            "track_type": track_type,
             "small_descr": small_descr,
             "cover_url": cover_url,
             "tracklist": tracklist,

@@ -1011,6 +1011,71 @@ def _local_info_name(task):
     return name
 
 
+def _version_consistency_gate(task):
+    """★ 发种前**版本一致性闸门**（2026-10-14，`ERR-PUBLISH-20` 修复③）。
+
+    返回 `(ok: bool, reason: str)`。`ok=False` ⇒ 调用方**拒发**（标 FAILED 出队）。
+
+    ═══════════════════════════════════════════════════════════════════════════
+    为什么必须有（`#136` 族第 3 次复发的当场，21662）
+    ═══════════════════════════════════════════════════════════════════════════
+    21662 那次：本地目录**实际是 12 个分轨 flac**，却因为里面躺着一个**指向不存在
+    WAV 的 .cue**，旧判据把它当"整轨"⇒ 站点标题写成整轨版本 ⇒ 站点那条**永远
+    校验不到 100%**（B 版 `prog=0.4893` 卡死，只能人工去站点删种）。
+
+    ⇒ 闸门查**两件事**（都必须一致，任一不符即拒发）：
+      ① **版本标签**：DB 记的 `track_type` vs **现在**从本地目录重算的
+         `assets.cue_track_type()`。二者不一致 = 库里的版本是**旧判据/别的时候**
+         算出来的，与**盘上现在的实况**对不上 ⇒ 拒发（这正是本条要拦的形状）。
+         ★ DB 侧为空（老行/皇后路未写）⇒ **不拦**（无从比，显式报出，不猜）。
+      ② **文件集**：本地 `.torrent` 的文件集 vs **本地内容目录**的文件集。
+         不一致 = 要发的种子**装的东西 ≠ 盘上的东西**（错版本/漏文件）⇒ 拒发。
+         ★ 任一侧读不出 ⇒ **不拦**（比不了 ⇒ 显式报出，不猜 —— 同查重纪律）。
+    ★★ 为什么不比 `info.name`：分轨/整轨**共用同一个目录名** ⇒ 只比名字比不出
+      挂错版本（21662 就是这么漏过去的）。要比的是**文件集**。
+    ★ 纯本地（读盘 + 读本地 `.torrent`），**零网站请求** —— 故放在 `upload_torrent`
+      之前、查重之后（查重会发请求，本闸门不会）。
+    """
+    import site_verify as _sv
+    import assets as _assets
+
+    content_path = (task or {}).get("content_path") or ""
+    torrent_file = (task or {}).get("torrent_file") or ""
+
+    # ① 版本标签：DB vs 盘上实况
+    db_tt = (task.get("track_type") or "").strip()
+    if content_path and os.path.isdir(content_path):
+        live_tt = _assets.cue_track_type(content_path)
+        if db_tt and live_tt and db_tt != live_tt:
+            return False, (f"版本标签不一致：库={db_tt!r} ≠ 盘上实况={live_tt!r}"
+                           f"（目录 {content_path!r}）")
+        if not db_tt:
+            print(f"    ℹ️  版本闸门：库内 track_type 为空（老行？）⇒ 只按实况 {live_tt!r} 记录、不拦")
+    else:
+        print(f"    ℹ️  版本闸门：内容目录不存在（{content_path!r}）⇒ 跳过版本比对、不拦")
+
+    # ② 文件集：本地 .torrent vs 本地内容目录
+    if not torrent_file or not os.path.isfile(torrent_file):
+        print(f"    ℹ️  版本闸门：本地种子文件不存在（{torrent_file!r}）⇒ 跳过文件集比对、不拦")
+        return True, ""
+    try:
+        with open(torrent_file, "rb") as fh:
+            t_bytes = fh.read()
+    except OSError as e:                            # noqa: BLE001
+        print(f"    ℹ️  版本闸门：读本地种子失败（{e}）⇒ 跳过文件集比对、不拦")
+        return True, ""
+    t_files, why = _sv.extract_files(t_bytes)
+    if t_files is None:
+        print(f"    ℹ️  版本闸门：本地种子文件集读不出（{why}）⇒ 跳过比对、不拦")
+        return True, ""
+    l_files = _sv.files_of_dir(content_path)
+    verdict, note = _sv.compare_file_sets(l_files, t_files)
+    if verdict == _sv.MISMATCH:
+        return False, f"文件集不一致 ⇒ 拒发（{note}）"
+    print(f"    ✔ 版本闸门：{note}")
+    return True, ""
+
+
 def _dedup_lookup(client, *, search_name, local_name, site_label):
     """发布**前**查一次目标站点；返回命中的 tid 或 `None`。**出错向上抛**。
 
@@ -2337,6 +2402,19 @@ def run_crabpt(args):
                 print("    ✅ 已关联到蟹黄堡已有页（未重复提交）。")
                 continue
 
+        # ★★★ 发种前**版本一致性闸门**（2026-10-14，`ERR-PUBLISH-20` 修复③）——
+        #   蟹黄堡这一路与乌托邦**同款**（同一 helper、同一开关，`ERR-META-03`：
+        #   同一事实只维护一份口径）。不通过 ⇒ 拒发 + 标 FAILED 出队。
+        if config.VERSION_GATE_BEFORE_PUBLISH:
+            _vg_ok, _vg_why = _version_consistency_gate(t)
+            if not _vg_ok:
+                print(f"    🛑 版本一致性闸门不通过 ⇒ 拒发：{_vg_why}")
+                fail += 1
+                rejected += 1
+                db.save_task(info_hash=t["info_hash"], status="FAILED",
+                             reason=f"version_gate: {_vg_why}")
+                continue
+
         fields = _crabpt_fields(t, args.anonymous)
         print(f"\n🚀 向蟹黄堡提交：《{t.get('formatted_title')}》")
         try:
@@ -2853,6 +2931,123 @@ def selftest_dedup_before_publish(verbose=True):
     return ok, (fails or detail)
 
 
+def selftest_version_gate(verbose=True):
+    """断言两站发布路都在 `upload_torrent` 之前跑**版本一致性闸门**；并运行时验判据。
+
+    返回 `(ok, 明细)`。
+
+    ★★ 阴性对照（能失败）：
+      · 构造"库说整轨 / 盘上是分轨"的假件 ⇒ 闸门**必须** `ok=False`（拒发）；
+      · 构造"文件集不一致"（本地种子比目录少一个文件）⇒ **必须**拒发；
+      · 一致性件 ⇒ **必须**放行（否则闸门变成"一律拒发"，等价于把整条队列停掉）。
+    """
+    import tempfile
+    detail, fails = [], []
+
+    # ---------- ① 结构性：两站都要在 upload_torrent 之前调闸门 ----------
+    src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    tree = _ast.parse(src)
+
+    def _fn_node(name):
+        return next((n for n in _ast.walk(tree)
+                     if isinstance(n, _ast.FunctionDef) and n.name == name), None)
+
+    def _call_lineno(node, func_name):
+        for n in _ast.walk(node):
+            if isinstance(n, _ast.Call):
+                f = n.func
+                nm = f.attr if isinstance(f, _ast.Attribute) else getattr(f, "id", "")
+                if nm == func_name:
+                    return n.lineno
+        return None
+
+    for fname in ("main", "run_crabpt"):
+        fn = _fn_node(fname)
+        if fn is None:
+            fails.append(f"★ 找不到 {fname} —— 函数被改名了？本条自检失效")
+            continue
+        gate_line = _call_lineno(fn, "_version_consistency_gate")
+        upload_line = _call_lineno(fn, "upload_torrent")
+        if gate_line is None:
+            fails.append(f"★★ {fname} 里**没有**调 `_version_consistency_gate`"
+                         f" ⇒ 版本一致性闸门缺失（21662 那种错版本又会被发出去）")
+        elif upload_line is not None and gate_line > upload_line:
+            fails.append(f"★★ {fname} 里闸门（行 {gate_line}）在 `upload_torrent`"
+                         f"（行 {upload_line}）**之后** ⇒ 闸门太晚")
+        else:
+            detail.append(f"① {fname}：先闸门（行 {gate_line}）后 upload（行 {upload_line}）✅")
+
+    # ---------- ② 运行时：真造件，验证判据能失败、也能放行 ----------
+    import assets as _assets
+    import site_verify as _sv
+    try:
+        import torf as _torf
+    except ImportError as e:                        # noqa: BLE001
+        fails.append(f"★ 缺 torf（{e}）⇒ 运行时判据没跑（对照缺失，不算通过）")
+        _torf = None
+
+    _saved_flag = config.VERSION_GATE_BEFORE_PUBLISH
+    config.VERSION_GATE_BEFORE_PUBLISH = True
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            # ★ 内容目录与输出种子的**父目录分开** —— 否则 `out.torrent` 会被算进
+            #   `files_of_dir(td)`（实测踩到：本地 4 个 vs 种子 3 个 ⇒ 假拒发，
+            #   那是我这个夹具自己的 bug，不是判据的）。
+            content = os.path.join(td, "content")
+            os.makedirs(content)
+            t1 = os.path.join(content, "01.flac"); open(t1, "wb").write(b"a")
+            t2 = os.path.join(content, "02.flac"); open(t2, "wb").write(b"b")
+            with open(os.path.join(content, "x.cue"), "w", encoding="utf-8") as fh:
+                fh.write('FILE "missing.wav" WAVE\n')
+            # 强判据应当判**分轨**（cue 的 FILE 目标缺失）
+            live = _assets.cue_track_type(content)
+            if live != "分轨":
+                fails.append(f"★★ 强判据：有 cue 但 FILE 缺失 ⇒ 应判分轨，实得 {live!r}"
+                             f"（修复①未生效）")
+            else:
+                detail.append("② 强判据：cue 的 FILE 目标缺失 ⇒ 判分轨 ✅")
+
+            # 假件 A：库说整轨（旧判据的错值），盘上实况分轨 ⇒ 必须拒发
+            if _torf is not None:
+                tp = os.path.join(td, "out.torrent")
+                tb = _torf.Torrent(path=content, trackers=["http://x/announce"], private=True)
+                tb.generate(); tb.write(tp)
+                fake_task = {"content_path": content, "torrent_file": tp,
+                             "track_type": "整轨"}          # ★ 库内错值
+                ok, why = _version_consistency_gate(fake_task)
+                if ok:
+                    fails.append("★★ 阴性对照：库=整轨/盘=分轨 竟放行 ⇒ 闸门是空真")
+                else:
+                    detail.append(f"③ 阴性对照：库=整轨/盘=分轨 ⇒ 拒发 ✅（{why[:40]}…）")
+                # 一致性件（库=分轨）⇒ 必须放行
+                fake_ok = {"content_path": content, "torrent_file": tp,
+                           "track_type": "分轨"}
+                ok2, why2 = _version_consistency_gate(fake_ok)
+                if not ok2:
+                    fails.append(f"★ 一致性件（库=分轨）竟被拒 ⇒ 闸门会卡死队列：{why2}")
+                else:
+                    detail.append("④ 一致性件（库=分轨/盘=分轨/文件集同）⇒ 放行 ✅")
+                # 文件集不一致 ⇒ 必须拒发（造一个"多一个文件"的目录 vs 旧种子）
+                extra = os.path.join(content, "03.flac"); open(extra, "wb").write(b"c")
+                ok3, why3 = _version_consistency_gate(fake_ok)
+                os.remove(extra)
+                if ok3:
+                    fails.append("★★ 阴性对照：文件集不一致（目录多一个文件）竟放行")
+                else:
+                    detail.append(f"⑤ 阴性对照：文件集不一致 ⇒ 拒发 ✅（{why3[:40]}…）")
+    finally:
+        config.VERSION_GATE_BEFORE_PUBLISH = _saved_flag
+
+    ok = not fails
+    if verbose:
+        print(f"{'✅' if ok else '❌'} 版本一致性闸门自检（结构性 + 运行时，含阴性对照）")
+        for d in detail:
+            print(f"    {d}")
+        for f in fails:
+            print(f"    {f}")
+    return ok, (fails or detail)
+
+
 def main():
     args = parse_args()
 
@@ -2892,6 +3087,11 @@ def main():
         #     删掉查重那一整段，`upload_torrent` 照发、站点照拒、日志看起来一样
         #     （都是"上传失败"）—— **完全静默**（这正是它必须被钉住的理由）。
         ok8, _ = selftest_dedup_before_publish()
+        # ★★ 第 9 条（2026-10-14 加，`ERR-PUBLISH-20` 修复③）：**发种前版本一致性闸门**。
+        #   ★ 独立失效模式：前八条都不查"**要发的这份，版本/文件集与盘上实况对不对得上**"。
+        #     删掉闸门，`upload_torrent` 照发、站点照收，日志一片绿 —— 而那条会像 21662
+        #     一样**永久校验不到 100%**（只能人工去站点删种），**完全静默**。
+        ok9, _ = selftest_version_gate()
         # ★ 七条判据**都要**跑（`and` 而不是 `or`）—— 它们是**独立**的失效模式：
         #   ① 碰了乌托邦的列（"发一条污染四个判据"）
         #   ② 队列取错（"静默多发、不可撤销"）
@@ -2906,7 +3106,7 @@ def main():
         #   ★ 用 `or` 的话，一条报红时另一条**根本没跑**，而"没跑"与"通过"
         #     在输出上应当长得不一样（`ERR-META-14`：兜底不许冒充真结果）。
         #   ★ 2026-10-11：修掉原先的 `ok7 and ok7` 笔误（应为 …and ok7），并接上 ok8。
-        ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8
+        ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9
         # ★★ 必须 `sys.exit`，**不能 `return`** —— `main()` 是被
         #   `if __name__ == "__main__": main()` 调的，那个写法的返回值**会被丢掉**
         #   ⇒ 退出码恒为 0 ⇒ **自检报红也没人看得见**（阴性对照实测踩到这一条）。
@@ -3183,6 +3383,20 @@ def main():
                 db.mark_synced(task["info_hash"])
                 dup_existing += 1
                 print("    ✅ 已关联到站点已有页（未重复提交）。")
+                continue
+
+        # ★★★ 发种前**版本一致性闸门**（2026-10-14，`ERR-PUBLISH-20` 修复③）——
+        #   放在查重之后、`upload_torrent` 之前（查重会发请求，本闸门纯本地零请求）。
+        #   ★ 不通过 ⇒ **拒发**：标 FAILED 出队（同"被拒"的处置，队列自然推进），
+        #     绝不把"版本对不上"的种发出去（那正是 21662 只能人工删种的根因）。
+        if config.VERSION_GATE_BEFORE_PUBLISH:
+            _vg_ok, _vg_why = _version_consistency_gate(task)
+            if not _vg_ok:
+                print(f"    🛑 版本一致性闸门不通过 ⇒ 拒发：{_vg_why}")
+                fail += 1
+                rejected += 1
+                db.save_task(info_hash=task["info_hash"], status="FAILED",
+                             reason=f"version_gate: {_vg_why}")
                 continue
 
         fields = descr.build_form_fields(merge_mapped(task),

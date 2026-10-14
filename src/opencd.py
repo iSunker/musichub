@@ -1953,6 +1953,25 @@ def map_audiocodec(opencd_format):
     return "0"
 
 
+def track_type_from_format(opencd_format):
+    """皇后的 `format`（如 `FLAC 分轨` / `WAV 整轨`）→ 版本标签 `"整轨"` / `"分轨"`。
+
+    ★ 2026-10-14（`ERR-PUBLISH-20` 修复②）：皇后路的**唯一**版本判据。
+      皇后的 `格式` 那一格**已经把版本写明了**（`整轨` = 单文件+CUE，`分轨`
+      = 多文件），这是**事实**、不是要猜的东西 ⇒ 从这里读，别去种名里抠。
+
+    ★ 认不出（空 / 既无「整轨」也无「分轨」）⇒ 返回 `""`（**未知**）——
+      **不猜**。"不知道版本"必须能被表达成空，不能兜底成某一版本
+      （`ERR-META-14`：不确定不许长得像确定）。
+    """
+    blob = opencd_format or ""
+    if "整轨" in blob:
+        return "整轨"
+    if "分轨" in blob:
+        return "分轨"
+    return ""
+
+
 def map_medium(opencd_medium, opencd_format=""):
     """
     `CD` / `SACD` / `DVD` / `VCD` / `Web` → Musopia `medium_sel` 的编号。
@@ -2169,6 +2188,19 @@ TEAM_CASES = [
     ("认不出的 → 0，**不挑一个近的**", "莫名其妙的组", "0"),
 ]
 
+# ★★ 版本标签（2026-10-14，`ERR-PUBLISH-20` 修复②）—— 皇后路的唯一版本判据。
+#   ★ 认不出（既无「整轨」也无「分轨」）⇒ **空串**（未知），**不猜**：
+#     这是本条判据与 `map_audiocodec`（取不到给 "0"）**刻意不同**的地方 ——
+#     "版本未知"必须能与"确定是分轨"区分开，不能兜底成某一版本。
+TRACK_TYPE_CASES = [
+    ("FLAC 分轨", "分轨"),
+    ("WAV 整轨", "整轨"),
+    ("APE 整轨", "整轨"),
+    ("FLAC", ""),          # ★ 只给编码、没给版本 ⇒ 未知（不许猜成分轨）
+    ("", ""),              # ★ 空 ⇒ 未知
+    ("CD", ""),            # ★ 媒介词里没有版本 ⇒ 未知
+]
+
 
 def _check_map():
     ok = fails = 0
@@ -2223,6 +2255,13 @@ def _check_map():
         good = got == want
         ok, fails = ok + good, fails + (not good)
         print(f"  {'✅' if good else '❌'} {label:<48} → {got!r:<4} 期望 {want!r}")
+
+    print("\n③c 版本标签 —— ★ 认不出给空（未知），**不猜成某一版本**")
+    for src, want in TRACK_TYPE_CASES:
+        got = track_type_from_format(src)
+        good = got == want
+        ok, fails = ok + good, fails + (not good)
+        print(f"  {'✅' if good else '❌'} {src!r:<12} → {got!r:<6} 期望 {want!r}")
 
     print("\n④ 端到端：拿真实样本走一遍 map_all()")
     import glob
@@ -2739,6 +2778,11 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
         #    ★ 取 `info["transfer_rule"]`（`opencd_parse` 已归一成三态）；
         #      原始串在 `transfer_rule_raw`，需要时另可取。
         "transfer_rule": info.get("transfer_rule") or "",
+        # ★★ 版本标签（2026-10-14，`ERR-PUBLISH-20` 修复②）：皇后路的**唯一**
+        #    版本判据 = 皇后 `格式` 里写明的词（`FLAC 分轨` / `WAV 整轨`…）。
+        #    ★ 为什么落库：`run.py` 的抓轨路用 `assets.cue_track_type()` 判版本，
+        #      两条路**必须写同一列**，否则同一行的版本又会各说各的（本 bug 的根）。
+        "track_type": track_type_from_format(info.get("format")),
         "status": status,
         "reason": reason,
     }

@@ -107,6 +107,105 @@ def compare_hosted_vs_db(db_name, hosted_name):
     return MATCH if a == b else MISMATCH
 
 
+def extract_files(torrent_bytes, *, torf_mod=None):
+    """从 `.torrent` 字节里取**权威文件集**。返回 `(files_or_None, why)`。
+
+    `files` = 归一化后（正斜杠、去首尾）的文件路径列表，**已排序**；单文件种
+    则为一个元素的列表（`info.name`）。
+
+    ★ 2026-10-14（`ERR-PUBLISH-20` 修复③）：版本一致性闸门要的是**文件集**，
+      不是 `info.name`。实测 21662 —— 分轨/整轨两种版本**共用同一个目录名**
+      （`info.name` 都是那个 basename）⇒ **只比 `info.name` 比不出挂错版本**。
+      要比的是"里面到底装了哪些文件"（12 个分轨 flac vs 1 个整轨 wav）。
+    ★ 只认 `metainfo["info"]`：`files`（多文件）或 `name`（单文件）。
+      解不出 ⇒ `(None, 原因)`，**不猜**（同 `extract_info_name` 的纪律）。
+    """
+    if torf_mod is None:
+        try:
+            import torf as torf_mod                # noqa: PLC0415
+        except ImportError as e:                    # noqa: BLE001
+            return None, f"缺 torf 库（{e}）"
+    try:
+        t = torf_mod.Torrent.read_stream(io.BytesIO(torrent_bytes))
+    except Exception as e:                          # noqa: BLE001
+        return None, f"解析种子失败：{type(e).__name__}: {e}"
+    try:
+        info = t.metainfo.get("info") or {}
+        name = info.get("name") or ""
+        if not isinstance(name, str) or not name:
+            return None, "metainfo 里没有 `info.name`（★ 不许猜成别的字段）"
+        entries = info.get("files")
+        files = []
+        if isinstance(entries, list) and entries:
+            for ent in entries:
+                parts = ent.get("path") if isinstance(ent, dict) else None
+                if isinstance(parts, list) and parts:
+                    files.append(_norm_path("/".join(str(p) for p in parts)))
+                elif isinstance(parts, str) and parts:
+                    files.append(_norm_path(parts))
+            if not files:
+                return None, "`info.files` 存在但一条路径都读不出"
+        else:
+            files = [_norm_path(name)]              # 单文件种
+        files.sort()
+        return files, ""
+    except Exception as e:                          # noqa: BLE001
+        return None, f"取文件集失败：{type(e).__name__}: {e}"
+
+
+def _norm_path(p):
+    """文件路径归一：反斜杠→正斜杠、折叠空白、去首尾（**去开头的 `./`**）。"""
+    s = str(p or "").replace("\\", "/").strip()
+    s = re.sub(r"\s+", " ", s)
+    while s.startswith("./"):
+        s = s[2:]
+    return s
+
+
+def files_of_dir(folder_path):
+    """把一个**本地目录**折成与 `extract_files` **同口径**的文件集（相对路径，已排序）。
+
+    ★ 与 `.torrent` 侧同规矩（`_norm_path` + 排序），否则两边永远比不平
+      （`ERR-META-03`：同一事实只维护一份口径）。
+    ★ 目录不存在 / 读不出 ⇒ `[]`（调用方据此判"比不了 ⇒ 不拦"，不猜）。
+    ★ **不含**目录项本身（`.torrent` 里也不会出现目录名那一层）。
+    """
+    import os
+    if not folder_path or not os.path.isdir(folder_path):
+        return []
+    out = []
+    for root, _dirs, files in os.walk(folder_path):
+        for f in files:
+            full = os.path.join(root, f)
+            rel = os.path.relpath(full, folder_path)
+            out.append(_norm_path(rel))
+    out.sort()
+    return out
+
+
+def compare_file_sets(local_files, torrent_files):
+    """比两个**已归一排序**的文件集。返回 `(verdict, note)`。
+
+    `verdict ∈ {MATCH, MISMATCH, NO_DB_NAME}`（复用同一组三态常量）：
+      · 任一侧为空 ⇒ `NO_DB_NAME`（**比不了** ⇒ 调用方据此不拦，显式报出）。
+      · 相等 ⇒ `MATCH`。
+      · 不等 ⇒ `MISMATCH`（附一份差异摘要：只在一侧的、各自几条）。
+    """
+    a = list(local_files or [])
+    b = list(torrent_files or [])
+    if not a or not b:
+        return NO_DB_NAME, "一侧文件集为空，无从比对"
+    if a == b:
+        return MATCH, f"文件集一致（{len(a)} 个文件）"
+    sa, sb = set(a), set(b)
+    only_local = sorted(sa - sb)
+    only_torrent = sorted(sb - sa)
+    note = (f"文件集不一致：本地 {len(a)} 个 / 种子 {len(b)} 个；"
+            f"只在本地 {len(only_local)} 个 {only_local[:3]}；"
+            f"只在种子 {len(only_torrent)} 个 {only_torrent[:3]}")
+    return MISMATCH, note
+
+
 def edit_target_ok(local_name, hosted_name):
     """★ `#173` 编辑护栏：**站侧页的 `info.name` 是否就是"我的这条"**。
 

@@ -6,6 +6,40 @@
 
 ## A. 生产端 vs 本机：什么放哪
 
+### A.0 生产端顶层**白名单**（只有这 5 项，多一个都算违规）
+```
+docker-compose.yml   .env   .env.example   README.md   data/
+```
+> ★★ 2026-10-14：生产端顶层**只允许**上面 5 项。**禁止**任何 `.bak-*` / 备份 / `.py` /
+> `tools/` / 测试文件 / 工作草稿出现在 NAS 顶层（历史曾堆 20+ 个 `.env.bak-*`）。
+> ★ **上生产只走镜像**：禁止把工作文件（`.py` / `tools/` / 测试 / 文档草稿）直接
+> scp/SMB 传到 NAS ⇒ 本机 `bash build-push.sh` → Docker Hub → NAS `pull && up -d musopia`。
+
+**可执行核查（贴进 bash 直接跑；`NAS=./` 为本地演练、`NAS=<ssh 前缀>` 为真机）**：
+```bash
+# 本机对任意目录做核查（把「有没有违规」变成一条能跑的判据）
+check_nas_top() {
+  local d="$1"
+  # 白名单之外的任何东西 = 违规（. 与 .. 除外）
+  local bad
+  bad=$(ls -A "$d" | grep -vxE 'docker-compose\.yml|\.env|\.env\.example|README\.md|data' || true)
+  if [ -z "$bad" ]; then
+    echo "✅ 顶层无违规（只剩白名单 5 项）"; return 0
+  fi
+  echo "❌ 发现白名单外的项（应清除）："; echo "$bad"; return 1
+}
+# 演练（阴性对照）：构造一个假 .bak ⇒ 必须报红
+_t=$(mktemp -d); touch "$_t/.env" "$_t/docker-compose.yml" "$_t/.env.bak-x"
+check_nas_top "$_t"; rm -rf "$_t"          # 期望：❌ + 列出 .env.bak-x
+
+# 真机（NAS）：先打印清单，确认后再删
+# ssh -p 36688 -i "C:/Users/艾森克/.ssh/id_ed25519" -o StrictHostKeyChecking=accept-new \
+#   -o UserKnownHostsFile=/dev/null iSunker@192.168.0.7 \
+#   'ls -A /volume2/docker_ssd/opencd2others'
+```
+> ★ 核查**必须先在假目录上演练一次**（阴性对照）—— 确认它**真能报红**，否则它是空真
+> （`ERR-META-01`：失效的检测比不检测更危险）。
+
 ### A.1 与 `data/` 平级的（容器定义类，上生产）
 `docker-compose.yml` · `.env` · `.env.example` · `README.md`
 > ★ 2026-10-06：**`Dockerfile` / `.dockerignore` / 27 个 `.py` / `tools/` 不再上生产** ——
@@ -29,7 +63,8 @@ output_torrents/  covers/  raw_html/
     统一走 `tools/_bootstrap.py`（一行 `import _bootstrap`），别各写一套。
 - `tools/` 整个目录（容器内按需 `docker compose run --rm tools ...` —— 跑的是**镜像里**那份；
   源码只在本机维护）。
-- 探测/诊断脚本：`_probe_*.py`、`diag_*.py`、`show_*.py`、`preview_*.py`、`fetch_*.py`。
+- 探测/诊断脚本（**2026-10-14 已批量清理一次性件**；如需再写，用完即删、别留）：
+  `_probe_*.py`、`diag_*.py`、`show_*.py`、`preview_*.py`、`fetch_*.py`。
 - 自测与回归：`tools/test_*.py`、`tools/verify_*.py`、`tools/*-selftest.py`、`tools/build-preflight.sh`。
 - 证据/产物：`*.html`（站点响应快照）、`*.log`、`counts.json`、`.scratch/`、`_preview/`。
 - 构建与部署工具：`Dockerfile`、`.dockerignore`、`build-push.sh`、`deploy.sh`（已弃用）、
@@ -123,3 +158,4 @@ cd /volume2/docker_ssd/opencd2others
 - [ ] 要上线 ⇒ `bash build-push.sh`（本机构建 + 推 Docker Hub），NAS 侧 `pull && up -d`
 - [ ] 文档同步：`README.md`（行为）/ `ERRATA.md`（教训）/ `SESSION-NOTES.md`（追加）
 - [ ] 没有把凭据 / `data/` 状态 / 备份垃圾带到生产端或 git
+- [ ] 若动过生产端 / 部署 ⇒ `check_nas_top`（§A.0）对 NAS 顶层报"✅ 无违规"（先假目录演练确认会报红）

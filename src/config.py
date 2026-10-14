@@ -114,6 +114,23 @@ PUBLISH_CATEGORY = os.getenv("PUBLISH_CATEGORY", "Musopia")
 DEDUP_BEFORE_PUBLISH = (os.getenv("DEDUP_BEFORE_PUBLISH", "true").strip().lower()
                         not in ("0", "false", "no", "off"))
 
+# ---- ★★ 发种前**版本一致性闸门**（2026-10-14，`ERR-PUBLISH-20` 修复③）----
+# ★ 干什么：`upload_torrent` **之前**，纯本地查两件事，任一不符即**拒发**（标 FAILED）：
+#     ① DB 记的 `track_type` vs **现在**从本地目录重算的版本（库 vs 盘上实况）；
+#     ② 本地 `.torrent` 的文件集 vs 本地内容目录的文件集（要发的 ≠ 盘上的）。
+# ★★ 为什么必须有（根因，21662）：本地目录**实际是分轨**，却因一个**指向不存在
+#   WAV 的 .cue**被旧判据当成整轨 ⇒ 站点标题挂错版本 ⇒ 站点那条永久校验不到 100%、
+#   只能人工去删种（`#136` 族第 3 次）。这道闸门让**发之前**就拦住这种"版本对不上"。
+# ★★★ 默认 **开**（用户 2026-10-14 拍板，安全侧）。为什么默认开是安全的：
+#   · 它**零网站请求**（只读盘 + 读本地种子）；
+#   · 一致性 ⇒ **照旧提交**（行为与从前逐字相同）；
+#   · 一致性**比不了**（目录不在 / 种子读不出 / 一侧为空）⇒ **不拦**，显式打印"跳过"
+#     —— 绝不让"不可知"变成"拒发"（同查重纪律，`ERR-META-14`）。
+# ★ 要回旧行为：`.env` 里显式设 `VERSION_GATE_BEFORE_PUBLISH=false`。
+VERSION_GATE_BEFORE_PUBLISH = (
+    os.getenv("VERSION_GATE_BEFORE_PUBLISH", "true").strip().lower()
+    not in ("0", "false", "no", "off"))
+
 # ---- ★★（#23，2026-10-11）查重「召回」子查询上限 ----
 # ★ 为什么需要它：#13 初版**只发一条**搜索串（`formatted_title`），而站点搜索是
 #   **AND + 对标点敏感**（对「显示标题」匹配）⇒ 长名/带标点的标题**整串返回 0 候选**

@@ -17,7 +17,7 @@
 ## 1. 目录与部署（最容易搞错的）
 
 - **本机仓库**：`D:\Projects\opencd2others\zhuanzhong`（= 本项目地址，**git 只在这里**）。
-  源码在 **`src/`**（28 个 `.py`）；`Dockerfile` 用 `COPY src/*.py ./` 保持**镜像内 `/app` 平铺**。
+  源码在 **`src/`**（全部 `.py` 模块）；`Dockerfile` 用 `COPY src/*.py ./` 保持**镜像内 `/app` 平铺**。
 - **生产端（NAS）**：`\\iSunker-DS423\docker_ssd\opencd2others`（SMB 路径）
   = NAS 上的 `/volume2/docker_ssd/opencd2others`。
 - **★ 生产端只有"容器定义类 + 状态"两类东西**（2026-10-06 起）：
@@ -26,6 +26,12 @@
     `daemon_heartbeat` / `daemon_env.json` / `readd_queue.json` / `lsky_token.json` /
     `output_torrents/` / `covers/` / `raw_html/`）。compose 里是 `${STATE_DIR:-./data}:/data`。
   - **不再有** `Dockerfile` / `.dockerignore` / 27 个 `.py` / `tools/` —— 构建已移到本机。
+- **★★ 生产端顶层白名单（只有这 5 项允许出现在 NAS 顶层，别再长别的）**：
+  `docker-compose.yml` / `.env` / `.env.example` / `README.md` / `data/`。
+  ★ **禁止**在生产端留任何 `.bak-*` / 备份 / `.py` / `tools/` / 测试文件 / 工作草稿。
+  ★ **禁止**把工作文件（`.py`/`tools/`/测试/文档草稿）直接 scp/SMB 传到 NAS ——
+    上生产**只走镜像**（本机 `build-push.sh` → Docker Hub → NAS `pull && up -d musopia`）。
+  ★ 可执行核查片段见 `.claude/RULES.md` §A（含阴性对照）。
 - **生产端不留 git**：`.git` 只在本机。
 - **代码上生产 = 本机构建 + 推 Docker Hub + NAS `pull`**，见 §3。
 
@@ -38,7 +44,8 @@
 
 - `.env`（站点 Cookie / qB 密码 / 图床 Key / `QB_API_KEY`）是**生产独有真凭据**：
   - **绝不进 git**（`.gitignore` 已排 `.env` / `.env.*` / `!.env.example`）。
-  - **绝不在生产端做 `.env` 备份**（历史已因此堆了 10+ 个 `.env.bak-*`，已清理）。
+  - **绝不在生产端做 `.env` 备份**（历史因此堆过 20+ 个 `.env.bak-*`；
+    2026-10-14 已按白名单清除，**由 §1 的核查片段持续保证**——别再新建）。
   - **绝不打印、绝不进日志、绝不进 `daemon_env.json` 快照**
     （`daemon.ENV_SNAPSHOT_KEYS` 是白名单，凭据键不在其中）。
   - `.env` **不在镜像里**（`.dockerignore` 排 `.env*`，构建上下文不进它）⇒ 改了

@@ -984,15 +984,71 @@ def read_tracklist(folder_path):
     return _audio_filenames_tracklist(folder_path)
 
 
+# CUE 的 `FILE "xxx.wav" WAVE` 行。CUE 语法是 `FILE <path> <format>`，
+# path 可能带引号也可能不带，format（WAVE/MP3/BINARY…）在最后。
+# 实测（21662 那条）里就是 `FILE "群星.-.[…](1992)[WAV].wav" WAVE`。
+_CUE_FILE_RE = re.compile(r'^\s*FILE\s+(?:"([^"]+)"|(\S+))', re.IGNORECASE)
+
+
+def _cue_file_targets(cue_text):
+    """抽 CUE 里所有 `FILE` 指令指向的文件名（**原样**，可能含子目录，已去引号）。
+
+    返回列表；一条 `FILE` 都没有（或读不出）返回 []。
+    """
+    targets = []
+    for line in (cue_text or "").splitlines():
+        m = _CUE_FILE_RE.match(line)
+        if m:
+            val = (m.group(1) or m.group(2) or "").strip()
+            if val:
+                targets.append(val)
+    return targets
+
+
 def has_cue(folder_path):
+    """★ 强判据（2026-10-14，`ERR-PUBLISH-20`）：目录是不是**真·整轨**。
+
+    ★★ 为什么不能只看"有没有 `.cue` 文件"（旧判据，弱）：
+      实测 21662 —— 目录里**有** `群星.-.[…](1992)[WAV].cue`，但它 `FILE` 指的
+      那个 `[WAV].wav` **根本不在目录里**（实际是 12 个分轨 flac）⇒ 旧判据判
+      "整轨" ⇒ 站点标题/版本挂错（B 版校验只到一半、永远救不活）。
+
+    ⇒ 新判据：**至少一份 cue 的 `FILE` 目标真的存在**，才算整轨；否则判分轨。
+      · 目录里**根本没有 cue** ⇒ 分轨（与旧行为一致）。
+      · 有 cue，但它的 `FILE` 目标一个都不在 ⇒ **分轨**（旧判据在这里会误判整轨）。
+      · `FILE` 目标用**相对 cue 所在目录**的路径解析（CUE 规范如此），也兼容
+        相对 `folder_path` 根——两处都找不到才算"目标不存在"。
+    """
     if not folder_path or not os.path.exists(folder_path):
         return False
     if os.path.isfile(folder_path):
         folder_path = os.path.dirname(folder_path)
-    for _, _, files in os.walk(folder_path):
-        if any(f.lower().endswith(".cue") for f in files):
-            return True
+
+    for root, _, files in os.walk(folder_path):
+        for f in files:
+            if not f.lower().endswith(".cue"):
+                continue
+            cue_path = os.path.join(root, f)
+            for target in _cue_file_targets(_read_text(cue_path)):
+                # CUE 的 FILE 是相对**它自己所在目录**的路径；有的抓轨工具写成
+                # 相对专辑根目录 ⇒ 两处都查一下（任一命中即算"目标存在"）。
+                cand = [
+                    os.path.join(root, target),
+                    os.path.join(folder_path, target),
+                ]
+                if any(os.path.exists(c) for c in cand):
+                    return True
     return False
+
+
+def cue_track_type(folder_path):
+    """`run.parse_title` 用的版本标签：强判据下 `"整轨"` / `"分轨"`。
+
+    ★ 单一出口 —— 全项目"整轨/分轨"只认这一个判据（`ERR-PUBLISH-20` 修复 ①/②）。
+      返回的字符串就是写进站点标题、写进 `torrent_name`/`torrent_file` 的那个词，
+      不许任何地方另算一遍。
+    """
+    return "整轨" if has_cue(folder_path) else "分轨"
 
 
 # ==================== Lsky token 链路的自检 ====================
