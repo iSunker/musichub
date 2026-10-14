@@ -15,7 +15,8 @@
 >   （★ `续106` = **待办总清单 T1~T6**；★ `续112` = **全问题待办大纲（BACKLOG）入口**，恢复会话先读它；
 >    ★ `续113` = **B12+B1 发版上线**；★ `续114` = **`#136`族复发/21662 定性**；
 >    ★ `续115` = R1 实测：rss_tid 首轮自动执行已观测；
->    ★ **`续116` = B16 三条代码修复已实现（最新；未发版）**）。
+>    ★ **`续116` = B16 三条代码修复已实现；
+>    ★ `续117` = B16 **发版上线**（最新）**）。
 > - **10-08 序列**（**另一批**独立编号，现落在文件**末尾**）：`续 100 → 101 → 102 → 103 → 104 → 105 → 106 → 107`
 >   （这里的 `续106` = `#56 retract 自检`，与上面**完全无关**）。
 > ⇒ 找待办看 **顶部「续106」**；找"护栏 #39/#49/#51"那批工作看**末尾的 10-08 序列**。
@@ -88,6 +89,34 @@
   ★ Git Bash 下 `~` 会因**中文用户名**转义坏 ⇒ **必须显式 `-i` 给私钥绝对路径**。
 - **docker 在非交互 ssh 里不在 PATH** ⇒ 用全路径 `/usr/local/bin/docker`。
 - 实例映射实测：**3010=qbit-publish(host 网络,本项目发种)**、**3260=qbit-music3(皇后源)**、3020=qbit-movies1、3040=qbit-movies2。qB 凭据复用容器 `.env`（`QB_USER/QB_PASS`）。
+
+---
+
+## 2026-10-14（续 117）—— ★★ 发版：B16（三条版本判据修复）上线 + GitHub 更新
+
+> 用户指示："先发版，更新镜像和 github，然后部署。" 结论：commit → push → build-push → NAS 点名 sha 部署，全链路完成。
+
+### ★ 结论（已实测坐实）
+- **commit `146db63`**（`feat/crawl-stage-wiring`）已 **push GitHub**（`e96894b..146db63`）：
+  12 改 + 15 删（B16 三修 + tools 探针清理 + 铁律落盘），+653/-13。
+- **镜像**：`isunker/opencd2others:latest` + **`:146db63`**，digest **`sha256:bdfbeeef…`**（本机 push）。
+- **NAS 部署**（点名 sha，`ERR-DOCKER-13`）：compose `image: …:146db63`（备份 `.bak-b16-20261014`，
+  **部署验证后已删** ⇒ 顶层回白名单 5 项）；容器 **healthy**；
+  NAS `RepoDigests = sha256:bdfbeeef…` **与推送一致**（★ 已知 `docker inspect 容器 --format {{.Image}}`
+  给的是本地 config id `af447f6d…`，跨主机不等 ⇒ 只能比 `RepoDigests`，见续113 的 `ERR-DOCKER-13` 补充）。
+- **容器内实测**：`config.VERSION_GATE_BEFORE_PUBLISH = True`（闸门**开**）；`config.QB_HOST = 3010`
+  （发种 = 3010 qbit-publish，**未送错实例**）；`QB_HOST_OPENCD = 3260`（scan 源）；
+  `publish.py --selftest` **全绿（含新 ok9 版本闸门）**。
+- **生产 DB 自动迁移**：daemon 启动日志 `🔧 数据库自动迁移，新增列: track_type` ⇒ B16 第 2 条
+  （`track_type` 单列）已在生产库生效。
+
+### ★ 用户中途强调（已核对坐实）
+- **"通过 3010 发种啊，不要送错 qb"** ⇒ `QB_HOST=http://127.0.0.1:3010`（发种）、
+  `QB_HOST_OPENCD=http://127.0.0.1:3260`（scan 源），NAS `.env` 一字不改、容器内 `printenv` 复核一致。
+
+### 未做 / 下一步
+- **B15**：等用户站点删 21662 ⇒ 用本地分轨 A 重发正确版本（`ERR-PUBLISH-20`）。
+- 其余 BACKLOG（B2/B3/B5/B6/B7）不变，等用户决策。
 
 ---
 
