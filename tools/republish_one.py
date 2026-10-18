@@ -42,11 +42,13 @@ def _fetch_row(prefix):
     con = db.connect()
     cur = con.cursor()
     cur.execute("SELECT info_hash, formatted_title, torrent_name, torrent_file, "
-                "cover_url, site_status, site_torrent_id, transfer_rule, status, opencd_tid "
+                "cover_url, site_status, site_torrent_id, transfer_rule, status, opencd_tid, "
+                "mapped_json, content_path "
                 "FROM tasks WHERE info_hash LIKE ?", (prefix + "%",))
     rows = cur.fetchall()
     cols = ["info_hash", "formatted_title", "torrent_name", "torrent_file", "cover_url",
-            "site_status", "site_torrent_id", "transfer_rule", "status", "opencd_tid"]
+            "site_status", "site_torrent_id", "transfer_rule", "status", "opencd_tid",
+            "mapped_json", "content_path"]
     if not rows:
         return None
     if len(rows) > 1:
