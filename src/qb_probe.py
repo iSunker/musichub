@@ -66,6 +66,7 @@
 import argparse
 import os
 import sys
+import tempfile
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -133,12 +134,194 @@ def qb_index():
         return None, f"{type(e).__name__}: {str(e)[:100]}"
 
 
-def main():
+def selftest():
+    """★ 离线自检（纯本地：**不连库、不连 qB、不发请求**）。返回 `(是否通过, [明细])`。
+
+    ★★★ 为什么必须真的有这个入口（`ERR-META-04` / `ERR-META-37`）：
+      本文件 docstring 底部写着"本机跑的价值只有一个：验代码（`--selftest`）"——
+      而**这个入口一直不存在**：`main()` 只注册了 `--tids`/`--limit`，`--selftest`
+      会被 argparse 当场拒掉。⇒ 一条**承诺了却不存在**的接口比没有承诺更坏
+      （读文档的人会以为"这里测过了"）。本函数即是补上的那一半。
+
+    ★★ 阴/阳对照（`ERR-META-32`：判据必须能失败）：
+      每条"应当如此"的断言都配一条**必须相反**的用例，否则把被测函数改成
+      `return None` 也能全绿。
+    """
+    detail = []
+    ok = [True]
+
+    def chk(name, got, want):
+        if got != want:
+            ok[0] = False
+            detail.append(f"✗ {name}\n     got = {got!r}\n     want= {want!r}")
+        return got == want
+
+    # ── ① `qb_index()` 的返回值契约 ──────────────────────────────────────
+    #   ★ 本脚本最贵的一条纪律（文件头纪律 3）：连不上 ⇒ **返回 `(None, 原因)`**，
+    #     绝不返回空 dict —— 空 dict 会被下游读成"qB 里一条都没有"，
+    #     那是一个**看着像真的**错结论（`ERR-META-01`）。
+    #   ★ 阴性对照：把"连不上"改成返回 `({}, …)` ⇒ 本断言必红。
+    import qb_client as _qbc
+    _orig_build = _qbc.build
+
+    class _Boom(Exception):
+        pass
+
+    def _raise(_cfg):
+        raise _Boom("模拟连不上")
+
+    try:
+        _qbc.build = _raise
+        _idx, _why = qb_index()
+        chk("① qB 连不上时 qb_index() 的第一个返回值必须是 None（不是 {}）",
+            _idx is None, True)
+        chk("① 连不上时原因里应能看出异常类型（不许静默）",
+            "Boom" in str(_why), True)
+    finally:
+        _qbc.build = _orig_build
+
+    # ★ 阳性对照：正常路径**必须**返回 dict（否则上面那条"是 None"靠崩掉也能过）。
+    class _FakeTorrent:
+        def __init__(self, h, cp, nm, sp):
+            self.hash, self.content_path, self.name, self.save_path = h, cp, nm, sp
+
+    class _FakeQB:
+        def torrents_info(self):
+            return [_FakeTorrent("AABBCC", "/d/专辑", "专辑", "/d")]
+
+    try:
+        _qbc.build = lambda _cfg: _FakeQB()
+        _idx2, _why2 = qb_index()
+        chk("① 阳性对照：能连上时必须返回 dict 而非 None",
+            isinstance(_idx2, dict), True)
+        # ★ infohash 必须**统一小写**作键 —— 库里与 qB 两端大小写不一致会让"命中"
+        #   整段静默归零（同 ERR-META-05：口径不一致的相减没有意义）。
+        chk("① infohash 作键时必须小写（库/qB 两端口径一致）",
+            list(_idx2.keys()), ["aabbcc"])
+        chk("① 正常路径的说明里应带种子条数",
+            "1 个种子" in str(_why2), True)
+    finally:
+        _qbc.build = _orig_build
+
+    # ── ② `COLS` 与 SELECT/zip 的列数契约 ────────────────────────────────
+    #   ★ 文件头写着"列名只写一次，从形状上消灭位置对齐"——
+    #     但**列元组与 SQL 字符串仍是两份**，只要有人往 `COLS` 里加一列而忘了同步
+    #     SQL，`zip` 就会**少一格**，后面每列错位（`readiness_probe.py` 踩过）。
+    #     ⇒ 把"SELECT 里的列数 == len(COLS)"变成判据。
+    #   ★ 阴性对照：把 `COLS` 临时加一个元素 ⇒ 本断言必红。
+    _sel = ", ".join(COLS)
+    chk("② SELECT 的列数必须等于 len(COLS)（否则 zip 会错位）",
+        len(_sel.split(",")), len(COLS))
+    chk("② COLS 里不许有重复列名",
+        len(set(COLS)), len(COLS))
+
+    # ── ③ 只读纪律：本文件里不许出现写操作 ──────────────────────────────
+    #   ★ 文件头纪律 1「**只读**」是**行为契约**，靠人记会漂（`ERR-META-01`）。
+    #     用 AST 走一遍：不许有 `torrents_add`/`torrents_delete`/`recheck`，
+    #     也不许有 `open(...,"w")` 一类写文件。
+    #   ★ 阴性对照：本检查若写成"只要文件里有 'torrents' 就红"，那它**恒红**
+    #     （`torrents_info` 合法）—— 此处按**禁止名单**逐个精确匹配，且断言
+    #     合法调用 `torrents_info` 时**不**报红（阳性对照在下面 chk 里）。
+    try:
+        import ast as _ast
+        _src_path = os.path.abspath(__file__)
+        _tree = _ast.parse(open(_src_path, encoding="utf-8").read())
+        _banned = {"torrents_add", "torrents_delete", "torrents_recheck",
+                   "torrents_reannounce", "torrents_edit"}
+        _found = set()
+        for _n in _ast.walk(_tree):
+            if isinstance(_n, _ast.Attribute) and _n.attr in _banned:
+                _found.add(_n.attr)
+        chk("③ 本脚本不许出现 qB 写操作（只读纪律）",
+            sorted(_found), [])
+        chk("③ 阳性对照：合法的 torrents_info 不应被误报",
+            "torrents_info" in _banned, False)
+    except Exception as e:                                        # noqa: BLE001
+        ok[0] = False
+        detail.append(f"✗ ③ 只读纪律检查执行失败：{type(e).__name__}: {e}")
+
+    # ── ④ `--selftest` 入口真的注册了（本函数的存在性自证）───────────────
+    #   ★ 这就是本任务（C2）的病根：docstring 承诺了入口、argparse 里没有。
+    #     ⇒ 直接构造一次 parser 来看它认不认这个 flag。
+    #   ★ 阴性对照：把 `--selftest` 从 `_build_parser()` 删掉 ⇒ 本节抛 SystemExit ⇒ 红。
+    try:
+        _p = _build_parser()
+        _a = _p.parse_args(["--selftest"])
+        chk("④ --selftest 必须被 argparse 认（本任务的病根）",
+            getattr(_a, "selftest", "MISSING"), True)
+        _a2 = _p.parse_args([])
+        chk("④ 不带 --selftest 时默认是 False（不许默认就跑自检）",
+            _a2.selftest, False)
+    except SystemExit:
+        ok[0] = False
+        detail.append("✗ ④ `--selftest` **没有被 argparse 注册** ⇒ "
+                      "docstring 承诺的入口不存在（ERR-META-04）")
+    except Exception as e:                                        # noqa: BLE001
+        ok[0] = False
+        detail.append(f"✗ ④ 入口检查执行失败：{type(e).__name__}: {e}")
+
+    # ── ⑤ 两个口径不许相减（`ERR-META-05`）────────────────────────────────
+    #   ★ 文件头纪律 4 写死了这条：`content_path 非空` 与 `status` 是两个口径，
+    #     "相减"得到的差**没有意义**（却看着像个数）。
+    #   ★★★ 判据必须走 **AST**，不许查文本 —— 我第一版就是 `"len(rows) - " in 源码`，
+    #     而**本自检自己的断言字符串**里就写着 `len(rows) - ` ⇒ 恒红（假阳性）。
+    #     这正是 `ERR-META-32` 的形状：判据把"描述问题的字"当成"问题本身"。
+    #   ★ 真判据 = 语法树里 `BinOp(Sub)` 的两侧，只要**一侧**含 `len(`/计数名、
+    #     另一侧含另一个计数名 ⇒ 红。分段打印用的减法（如"还剩几条"）不受影响。
+    try:
+        _countish = ("n_cp", "n_tf", "n_log", "n_map", "hit", "miss", "len(")
+        _subs = 0
+        for _n in _ast.walk(_tree):
+            if not isinstance(_n, _ast.BinOp) or not isinstance(_n.op, _ast.Sub):
+                continue
+            _l = _ast.unparse(_n.left) if hasattr(_ast, "unparse") else ""
+            _r = _ast.unparse(_n.right) if hasattr(_ast, "unparse") else ""
+            _l_hit = any(t in _l for t in _countish)
+            _r_hit = any(t in _r for t in _countish)
+            if _l_hit and _r_hit:
+                _subs += 1
+                detail.append(f"✗ ⑤ 发现两个口径相减：`{_l} - {_r}`"
+                              f"（ERR-META-05：差没有意义）")
+        if _subs:
+            ok[0] = False
+        else:
+            # ★ 阳性对照：确认本判据**不是**因为"抽不出表达式"才全绿。
+            if not hasattr(_ast, "unparse"):
+                ok[0] = False
+                detail.append("✗ ⑤ 当前 Python 无 ast.unparse ⇒ 本判据没测到东西（ERR-META-14）")
+    except Exception as e:                                        # noqa: BLE001
+        ok[0] = False
+        detail.append(f"✗ ⑤ 口径相减检查执行失败：{type(e).__name__}: {e}")
+
+    return ok[0], detail
+
+
+def _build_parser():
+    """单独抽出来，好让 `selftest()` 直接构造 parser 验 `--selftest` 入口。"""
     ap = argparse.ArgumentParser(description="qB / 本地盘 实证（只读）")
     ap.add_argument("--tids", nargs="*", default=[],
                     help="只看这几个 tid（默认：全部有 tid 的行）")
     ap.add_argument("--limit", type=int, default=12, help="最多打印几条（默认 12）")
-    args = ap.parse_args()
+    # ★★ 2026-10-18（C2）：docstring 早就承诺了这个入口，而 argparse 里**没有** ⇒
+    #   `--selftest` 会被当场拒掉。补齐它（纯离线，不连库不连 qB）。
+    ap.add_argument("--selftest", action="store_true",
+                    help="跑离线自检（不连库、不连 qB、不发请求）")
+    return ap
+
+
+def main():
+    args = _build_parser().parse_args()
+
+    # ★ 自检必须在**任何数据库/qB 动作之前**返回（纯离线纪律）。
+    if args.selftest:
+        ok, detail = selftest()
+        print("=" * 74)
+        print("★ qb_probe 离线自检（不连库 · 不连 qB · 不发请求）")
+        print("=" * 74)
+        for d in detail:
+            print(d)
+        print(("✅ 全绿" if ok else "❌ 有失败项") + f"（{len(detail)} 条明细）")
+        return 0 if ok else 1
 
     db.init_db()
     print("=" * 74)

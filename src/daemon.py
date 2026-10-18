@@ -454,6 +454,20 @@ def preflight(stages):
     """
     import db
 
+    # ★★★ 2026-10-18（C1，`ERR-META-33`）：**"用了兜底"必须看得见**。
+    #   `QB_HOST` 的兜底值曾与生产真值不一致（3040 vs 3010）且**漂了 11 天而无人察觉**，
+    #   因为 `.env` 正常时它根本不出现。⇒ 在这里把两种情况都打到启动日志里：
+    #   · 有 `.env` 值 ⇒ 打出来（至少能对上"到底是哪个实例"）；
+    #   · 用兜底 ⇒ **大声**喊出来（带 ⚠️ 和判据出处），而不是静默照跑。
+    #   ★ 为什么放在 preflight 而不是模块顶层：顶层 `log()` 也会跑，但这一句要和
+    #     "本轮配置已定稿"的其它预检放在同一屏，巡检 tail 日志时一次看全。
+    if getattr(config, "QB_HOST_FROM_DEFAULT", False):
+        log(f"⚠️  QB_HOST **未从 .env 读到**，正在用兜底值 {config.QB_HOST}"
+            f" —— 生产真值是 3010(qbit-publish)。若这不是你要的实例，"
+            f"请在 .env 里显式写 QB_HOST=（ERR-META-33）")
+    else:
+        log(f"🔀 QB_HOST = {config.QB_HOST}（来自 .env）")
+
     st = db.stats()
     if st["total"] > 0:
         log(f"✅ 预检通过：库内已有 {st['total']} 行记录")
@@ -559,6 +573,11 @@ ENV_SNAPSHOT_KEYS = (
     "ENABLE_HANDOFF", "HANDOFF_DRY_RUN", "HANDOFF_SEEDERS_MIN",
     "HANDOFF_SEED_DAYS", "HANDOFF_THREAD_TICK", "HANDOFF_MAX_PER_ROUND",
     "QB_HOST_OPENCD",
+    # ★★ 2026-10-18（C1，ERR-META-33）：把 `QB_HOST`（发种实例）也纳进来。
+    #   理由正是本条教训 —— `.env` 本机读不到（ERR-ENV-02），而 `QB_HOST` 的兜底
+    #   曾与生产真值不一致却**看不见**。★ 它不是凭据（内网地址），可进快照。
+    #   ★ 配套：`config.QB_HOST_FROM_DEFAULT` 让"用了兜底"这件事在启动日志里喊出来。
+    "QB_HOST",
     # ★★ C 类护栏巡检（#51）：同样必须进白名单 —— 巡检要能回答"护栏现在是开是关、
     #   是不是只巡不修(dry_run)"。★ 全是普通布尔/整数，**不含任何凭据** ⇒ 无外溢问题。
     "ENABLE_SEED_PATROL", "SEED_PATROL_DRY_RUN",

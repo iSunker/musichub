@@ -1620,6 +1620,87 @@ def selftest():
         ok[0] = False
         detail.append(f"✗ ⑨s 查重结构护栏执行失败: {type(e).__name__}: {e}")
 
+    # ★★★ 2026-10-18（C1，ERR-META-33）：**兜底默认值三处必须一致，且"用了兜底"要可观测**。
+    #   ★ 为什么必须是判据而不是注释：`QB_HOST` 的兜底曾与生产真值不一致（3040 vs 3010），
+    #     **漂了 11 天没人发现** —— 因为 `.env` 正常时那三处兜底根本不出现。
+    #     `ERR-META-33` 的原话："凡'改生产值就够'的改动都是可疑的"。
+    #   ★ 判据三条（都走**源码/AST**，不靠人记）：
+    #     (a) `config.QB_HOST_DEFAULT` 的三处来源逐字一致：
+    #         compose 的两个 `${QB_HOST:-…}` 与 `config.QB_HOST_DEFAULT`；
+    #     (b) `QB_HOST` 必须由 `QB_HOST_DEFAULT` 派生（不许写第二个字面量）；
+    #     (c) 空串/纯空格必须**回落兜底**（`os.getenv("K", d)` 遇到空串会返回空串 —— 真坑）；
+    #     (d) `QB_HOST` 必须进 `daemon.ENV_SNAPSHOT_KEYS`（否则巡检看不见真实值）。
+    #   ★ 阴性对照：把 compose 任一处改回 3040 ⇒ (a) 必红；把 config 那行的 `_QB_HOST_RAW or`
+    #     删掉 ⇒ (c) 必红（实测见 `ERR-META-33` 落地记录）。
+    try:
+        import re as _re1
+        _root1 = _pl9i.Path(__file__).resolve().parent.parent
+        _cfg_txt = (_pl9i.Path(__file__).resolve().parent / "config.py").read_text(
+            encoding="utf-8")
+        # (a) 从 config 里抽默认值，再逐个比对 compose 的两处
+        _m_def = _re1.search(r'^QB_HOST_DEFAULT\s*=\s*"([^"]+)"', _cfg_txt, _re1.M)
+        if not _m_def:
+            ok[0] = False
+            detail.append("✗ C1(a) config.py 里找不到 `QB_HOST_DEFAULT = \"…\"`"
+                          " ⇒ 本判据没测到东西（ERR-META-14）")
+        else:
+            _qbd = _m_def.group(1)
+            _compose = _root1 / "docker-compose.yml"
+            if not _compose.exists():
+                ok[0] = False
+                detail.append("✗ C1(a) 找不到 docker-compose.yml ⇒ 本判据没测到东西")
+            else:
+                _ctxt = _compose.read_text(encoding="utf-8")
+                _falls = _re1.findall(
+                    r'QB_HOST=\$\{QB_HOST:-([^}]*)\}', _ctxt)
+                if len(_falls) != 2:
+                    ok[0] = False
+                    detail.append(f"✗ C1(a) compose 里 `${QB_HOST:-…}` 兜底应恰好 2 处"
+                                  f"（common + once），实测 {len(_falls)} 处"
+                                  f" ⇒ 判据可能已失准")
+                for _i, _f in enumerate(_falls, 1):
+                    chk(f"C1(a) compose 第 {_i} 处兜底必须 == config.QB_HOST_DEFAULT",
+                        _f, _qbd)
+        # (b) `QB_HOST` 不许写第二个字面量（只许由 `_QB_HOST_RAW or QB_HOST_DEFAULT` 派生）
+        _m_use = _re1.search(r'^QB_HOST\s*=\s*(.+)$', _cfg_txt, _re1.M)
+        if not _m_use:
+            ok[0] = False
+            detail.append("✗ C1(b) config.py 里找不到 `QB_HOST = …` 赋值")
+        else:
+            chk("C1(b) QB_HOST 必须由 QB_HOST_DEFAULT 派生（不许第二处字面量）",
+                "QB_HOST_DEFAULT" in _m_use.group(1), True)
+        # (c) 空串必须回落兜底 —— 这是"os.getenv 默认值对空串无效"这个真坑的判据
+        import subprocess as _sp1
+        import sys as _sys1
+        _env1 = {k: "x" for k in ("QB_PASS", "MUSOPIA_COOKIE", "MUSOPIA_PASSKEY",
+                                  "PICGO_API_KEY", "OPENCD_COOKIE")}
+        _env1["QB_HOST"] = ""                      # ★ 关键：显式空串
+        _env1["DATA_DIR"] = str(_root1 / ".scratch" / "selftest-data")
+        _py1 = _sp1.run(
+            [_sys1.executable, "-c",
+             "import sys;sys.path.insert(0,'src');import config;"
+             "print(config.QB_HOST_FROM_DEFAULT, config.QB_HOST)"],
+            cwd=str(_root1), env=_env1, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=60)
+        _out1 = (_py1.stdout or "").strip().splitlines()
+        _last = _out1[-1] if _out1 else ""
+        chk("C1(c) QB_HOST 为空串时必须回落兜底并标记 FROM_DEFAULT",
+            _last.startswith("True "), True)
+        chk("C1(c) 空串时 QB_HOST 不许是空串（否则 Client(host='') 连到 localhost 默认端口）",
+            _last.split(" ", 1)[1].strip() if " " in _last else "",
+            _re1.search(r'^QB_HOST_DEFAULT\s*=\s*"([^"]+)"', _cfg_txt,
+                        _re1.M).group(1)
+            if _re1.search(r'^QB_HOST_DEFAULT\s*=\s*"([^"]+)"', _cfg_txt, _re1.M) else "?")
+        # (d) 必须在 env 快照白名单里
+        _dae_txt = (_pl9i.Path(__file__).resolve().parent / "daemon.py").read_text(
+            encoding="utf-8")
+        _m_whl = _re1.search(r'ENV_SNAPSHOT_KEYS\s*=\s*\((.*?)\n\)', _dae_txt, _re1.S)
+        chk("C1(d) QB_HOST 必须进 daemon.ENV_SNAPSHOT_KEYS（否则巡检看不见真实值）",
+            (_m_whl is not None) and ('"QB_HOST"' in _m_whl.group(1)), True)
+    except Exception as e:                                        # noqa: BLE001
+        ok[0] = False
+        detail.append(f"✗ C1 兜底一致性检查执行失败：{type(e).__name__}: {e}")
+
     return ok[0], detail
 
 
@@ -2256,6 +2337,8 @@ if __name__ == "__main__":
         print("  ⑧ qB 构造点唯一：qb_client.py 之外零 `Client(` / 零 `auth_log_in`"
               "（ERR-QB-08：别让'第 14 处'长回来）")
         print("  ⑧b 六个 opencd_* 旧模块名零 import（已并入 opencd.py，防复制粘贴回来）")
+        print("  C1 QB_HOST 兜底三处一致 + 空串回落 + 进 env 快照"
+              "（ERR-META-33：改生产值就够的改动都是可疑的）")
         print()
         if _detail:
             print("\n".join(_detail))

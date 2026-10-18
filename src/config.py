@@ -31,17 +31,35 @@ def require_env(key: str) -> str:
 
 
 # ==================== qBittorrent ====================
-# ★ 兜底默认值与 compose 保持一致：`docker-compose.yml` 用的是
-#   `QB_HOST=${QB_HOST:-http://127.0.0.1:3040}`，且该 service 是 `network_mode: "host"`。
-#   ★★ 2026-10-07（#92）：默认从 3020(opencd) 改为 **3040(publish，发种专用实例)**。
-#     发种（readd_to_qb / readd_to_qb_crabpt）改走 SSD 上的发种实例；两条路共用本值
-#     （唯一构造点 qb_client.build）。★ 回滚：改回 `http://127.0.0.1:3020`。
+# ★ 兜底默认值**必须**与 compose 三处逐字一致：`docker-compose.yml` 的两个 service
+#   （`common` 与 `once`）都写 `${QB_HOST:-<同一串>}`，且它们都是 `network_mode: "host"`。
+#   ★★ 2026-10-07（#92）：默认从 3020(opencd) 改为 3040 —— 当时发种落在 SSD 的 publish 实例。
+#   ★★★ 2026-10-18（C1，`ERR-META-33`）：生产 `.env` 后来把发种实例挪到 **3010(qbit-publish)**，
+#     `.env` 改了，但**这三处兜底没跟着改**（还写着 3040）⇒ 一旦 `.env` 漏了这一行
+#     （新环境 / 重写 / 重建），代码**不报错**，直接连 3040 那个**别的实例**——
+#     症状是"发错实例 / 查不到源"，而不是"配置错误"。现已三处统一为 **3010**。
+#   ★★ 回滚语义（不再是"改回 3020"）：本键语义是"**发种实例**"，
+#     回滚 = 把它改回**当时那个发种实例**的端口，并**同时**改 compose 两处 + 下面 QB_HOST_DEFAULT。
 #   ★★ 不要改回 `host.docker.internal` —— **host 网络下没有那条特殊 DNS 记录**
 #      （compose 里紧挨着的注释也是这么写的），它只在 bridge 网络里存在。
 #   这里这个值平时用不到（compose 总会把 QB_HOST 传进来），但一旦有人不经 compose
 #   直接 `python run.py`，旧的 `host.docker.internal` 会给出一个**看起来像配置问题、
 #   其实是"这条域名根本不存在"**的报错。改成与 compose 同形，错了也错得一致。
-QB_HOST = os.getenv("QB_HOST", "http://127.0.0.1:3040")
+QB_HOST_DEFAULT = "http://127.0.0.1:3010"
+# ★★★ 2026-10-18（C1）：`QB_HOST=""`（compose 里写成 `QB_HOST=` 或 .env 留空）**必须**也算用兜底。
+#   ★ 为什么不能直接 `os.getenv("QB_HOST", QB_HOST_DEFAULT)`：`os.getenv` 的默认值**只在键
+#     完全不存在时**生效；键存在但值为空串 ⇒ 返回 `""` ⇒ `QB_HOST` 变成空串 ⇒
+#     `qb_client.build` 里 `Client(host="")` 会去连 **localhost 默认端口**，
+#     而日志却显示"读到了 .env" ⇒ 又一个静默错连（本条目就是治这个病的）。
+#   ★ 本项目其它键用的是 `env_int`/`env_bool` 的"空串=未设"口径（见 `daemon.py`），此处对齐。
+_QB_HOST_RAW = (os.getenv("QB_HOST") or "").strip()
+QB_HOST_FROM_DEFAULT = not _QB_HOST_RAW
+QB_HOST = _QB_HOST_RAW or QB_HOST_DEFAULT
+# ★★ 2026-10-18（C1）：**"用了兜底"必须可观测** —— 这是 `ERR-META-33` 的判据原话：
+#   "把 `.env` 里该键删掉后启动，日志或巡检里应能**看出**它在用兜底，而不是静默照跑"。
+#   ★ 为什么不是"改对默认值就完事"：默认值改了以后，将来再挪实例**又会**漂一次
+#     （本次就是同一个错漂了 11 天）。只有"用兜底会在日志里喊出来"才是**结构性**的护栏。
+#   ★ 消费方：`daemon.preflight()` 启动时打印、`daemon.ENV_SNAPSHOT_KEYS` 收 `QB_HOST` 值。
 # ★★★ 2026-10-10（#16）：**皇后源实例**（opencd 分类的原种/数据所在）的地址 —— 第二个真值来源。
 #   ★ 为什么**必须**是独立一个键（本 bug 的根因，见 ERRATA 的 ERR-ORCH-02）：
 #     `QB_HOST` 被**两个语义不同的消费者**共用 ——

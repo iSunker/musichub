@@ -29,6 +29,70 @@
 
 ---
 
+## 2026-10-18（续 123）—— C1 + C2 两个小缺陷修复（未发版）
+
+> 用户指示："现在就把 C1 和 C2 这两个小缺陷一并修掉。"
+
+### C1 —— `QB_HOST` 兜底值三处不一致（`ERR-META-33` 原文所指的病）
+**症状**：生产 `.env` 是 `3010`，但 `config.py` 与 `compose` 两处兜底仍写 `3040`
+⇒ `.env` 一旦漏这一行（新环境 / 重建 / 被重写），**不报错**，静默连到 3040 那个别的实例。
+漂了 11 天无人察觉，正是因为 `.env` 正常时兜底**根本不出现**。
+
+**已改（4 处）**：
+1. `src/config.py`：抽出 `QB_HOST_DEFAULT = "http://127.0.0.1:3010"`；`QB_HOST` 由它派生。
+   ★ 新增 `QB_HOST_FROM_DEFAULT` 供"可观测"使用。
+2. `docker-compose.yml`：两处 `${QB_HOST:-…}` 都改 3010（`common` + `once`）。
+3. `src/daemon.py` `preflight()`：启动时打印 —— 用兜底 ⇒ `⚠️ QB_HOST 未从 .env 读到 …`；
+   有值 ⇒ `🔀 QB_HOST = …（来自 .env）`。**判据原文要求"能看出来"，不是"改对默认值就完事"。**
+4. `src/daemon.py` `ENV_SNAPSHOT_KEYS`：加 `"QB_HOST"`（原先只有 `QB_HOST_OPENCD`，
+   发种实例的地址在巡检里**看不见**）。
+5. `.env.example`：把"兜底与生产不一致"那段旧注释改成现状 + 可观测说明。
+
+**★ 修的过程中踩到一个真坑（值得记）**：第一版写成
+`QB_HOST = os.getenv("QB_HOST", QB_HOST_DEFAULT)` —— 而 `os.getenv` 的默认值**只在键不存在时**生效，
+`QB_HOST=""` 会返回**空串** ⇒ `Client(host="")` 去连 localhost 默认端口，日志却显示"读到了 .env"。
+⇒ 实测四种情形（未设 / 正常值 / 空串 / 纯空格）后改成 `_QB_HOST_RAW or QB_HOST_DEFAULT`。
+
+**判据（已进 `run.py --selftest`，4 条）**：
+- C1(a) compose 两处兜底 == `config.QB_HOST_DEFAULT`（且兜底必须恰好 2 处，防判据失准）
+- C1(b) `QB_HOST` 必须由 `QB_HOST_DEFAULT` 派生（不许第二处字面量）
+- C1(c) 空串必须回落兜底并标 `FROM_DEFAULT`；且此时 `QB_HOST` **不许**是空串
+- C1(d) `"QB_HOST"` 必须在 `ENV_SNAPSHOT_KEYS` 里
+
+**阴性对照（实测变红）**：compose 改回 3040 ⇒ (a) 红；把 `_QB_HOST_RAW or` 删掉 ⇒ (c) 两条同时红。
+
+### C2 —— `qb_probe.py` 承诺了 `--selftest` 却没有这个入口
+**症状**：docstring 底部写"本机跑的价值只有一个：验代码（`--selftest`）"，
+而 `main()` 只注册了 `--tids`/`--limit` ⇒ `--selftest` 会被 argparse 当场拒掉。
+读文档的人会以为"这里测过了"（`ERR-META-04` 的形状）。
+
+**已改**：
+- 抽出 `_build_parser()`（好让自检**自己**验入口是否存在）；
+- 新增 `--selftest` 入口 + `selftest()`：①`qb_index` 契约（连不上必返回 `None` 不是 `{}`、
+  infohash 小写、阳性对照必须返回 dict）②`COLS` 与 SELECT 列数一致 ③只读纪律（AST 扫禁止的
+  qB 写操作，含"不许误报 `torrents_info`"的阳性对照）④入口真被注册 ⑤两口径不许相减。
+
+**阴性对照（实测变红）**：
+- 入口不注册（同时绕过 argparse 进自检）⇒ ④ 红：`✗ --selftest 没有被 argparse 注册`
+- `qb_index` 连不上改返回 `{}` ⇒ ① 红
+- 真写一处 `n_cp - n_tf` ⇒ ⑤ 红
+
+★ **⑤ 的第一版判据是错的，值得单独记**：我写成 `"len(rows) - " in 源码文本`，
+而**自检自己的断言字符串里就写着 `len(rows) - `** ⇒ 恒红（假阳性）。改成 **AST 找 `BinOp(Sub)`** 才对。
+已写成 `ERR-META-49`。
+
+### 回归（全绿）
+`run.py --selftest` ✅ / `qb_probe.py --selftest` ✅ / `publish.py --selftest` ✅（含 ok9）/
+`opencd.py map --selftest` 91/91 ✅ / `assets.selftest_cue_track_type()` 6/6 ✅ /
+`tools/build-preflight.sh` ✅（CRLF 警告是历史遗留，非本次引入）。
+
+### ★ 状态
+**已改完、未发版、未 commit**（按项目纪律：不主动 commit）。
+生产仍是 `f1f956d`，本改动与生产行为**无差异**（生产 `.env` 显式写了 `QB_HOST=3010`）。
+发版清单见 `.scratch/BACKLOG.md` §4b 任务组 C 的下方批注。
+
+---
+
 ## 2026-10-18（续 122）—— ★★ 发版：#16 counts.json 每日快照上线（`f1f956d`）
 
 > 用户指示："要发版、要继续做。" 本条 = 把上一轮**只躺在工作区**的 #16 收口并发版。

@@ -61,12 +61,15 @@ x-common: &common
     #     不触发下载态 mmap 爆炸。
     #   · 两条发种路径（乌托邦 readd_to_qb / 蟹黄堡 readd_to_qb_crabpt）共用 `config.QB_HOST`
     #     （唯一构造点 qb_client.build）⇒ 改这一处两路都走同一个发种实例。
-    #   · ★ 生产 `.env` 里 `QB_HOST=http://127.0.0.1:3010`（本行兜底 3040，`.env` 优先）。
+    #   · ★ 生产 `.env` 里 `QB_HOST=http://127.0.0.1:3010`（本行兜底**也是** 3010，`.env` 优先）。
+    #   · ★★★ 2026-10-18（C1，ERR-META-33）：本行兜底原先写 3040，与生产真值(3010)**不一致**
+    #     ⇒ `.env` 一旦漏了这一行就**静默**连到 3040 那个别的实例。现三处统一：
+    #     本文件两处 + `src/config.py` 的 `QB_HOST_DEFAULT`。★ 改一处必须改另外两处。
     #   · ★★ 2026-10-10（#16，ERR-ORCH-02）：**scan 不读本值** —— scan 读皇后源，
     #     走 `QB_HOST_OPENCD`（经 `env_file: .env` 传进来，**故意不在这里写第二遍**：
     #     写两处 = 两个真值来源，正是 ERR-ORCH-02 的病根）。
-    #   · ★ 回滚：把下面改回 `:-http://127.0.0.1:3020` 即可（但要同步想清楚 scan 的源）。
-    - QB_HOST=${QB_HOST:-http://127.0.0.1:3040}
+    #   · ★ 回滚：改回**当时那个发种实例**的端口，并同步改另一处 + `config.QB_HOST_DEFAULT`。
+    - QB_HOST=${QB_HOST:-http://127.0.0.1:3010}
     # ★ 上面那个只读挂载的落点。`sync_opencd_tid.py` 读它（容器内路径）。
     #   写在这里而不是 .env：它是**挂载点的配对**，改一处不改另一处必然出错；
     #   放同一份文件里，改挂载的人一定看得见它。（.env 里另有 VERTEX_DB 的
@@ -161,7 +164,7 @@ services:
     restart: "no"
     environment:
       - DATA_DIR=/data
-      - QB_HOST=${QB_HOST:-http://127.0.0.1:3040}
+      - QB_HOST=${QB_HOST:-http://127.0.0.1:3010}
       # 全阶段跑一轮后就不再有到期任务；配合 DRY_RUN=true 可做无副作用演练
       - RUN_ON_START=true
       - DRY_RUN=${DRY_RUN:-true}
