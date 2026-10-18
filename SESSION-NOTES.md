@@ -29,6 +29,43 @@
 
 ---
 
+## 2026-10-18（续 124）—— ★★ 发版：C1 + C2 上线（`4d21fe4`），中途修掉两处自检假红
+
+> 用户指示："提交并走发版流程。"
+
+### 发版链（两次构建，第一个版本已部署又被换掉）
+1. **`40081d1`** → `build-push.sh` ✅ → 镜像 digest `sha256:b054518a…` → NAS 点名 sha 部署 → 容器 healthy。
+   ★ 本机 `docker image inspect` 的 id 与 push 的 digest **逐字相同** ⇒ 证明镜像就是该 commit 编出来的（非 `-dirty`）。
+2. **容器内跑自检 ⇒ 红 3 条**（见下节）。修完再发 **`4d21fe4`** → digest `sha256:0d47557b…`。
+   ★ push 第一次因 `auth.docker.io` EOF 失败（网络抖动），重试即成功 —— **本地镜像已建好，只需重推**。
+
+### ★★ 发版后才暴露的问题：C1 自检在容器里假红（不是代码 bug）
+- **C1(a)** 报"找不到 `docker-compose.yml`"。真因：**镜像只装 `.py` 到 `/app`**，
+  compose 从不进镜像（部署时它在宿主上）—— 这是**正确设计**。原判据把"找不到"一律判红，
+  没区分"仓库丢了 compose（真异常）"与"镜像里本来就没有（合理）"。
+- **C1(c)** 子进程 `sys.path.insert(0, "src")` **写死了仓库布局**，而容器里 `config.py` 在 `/app`
+  （无 `src/` 子目录）⇒ 子进程连模块都进不去 ⇒ 假红。
+
+**修法**：C1(a) 按 `_root1/"src"` 是否存在**分流** —— 仓库 ⇒ 缺 compose 判红；
+镜像 ⇒ `ℹ C1(a) …设计如此…本段跳过`（**带理由地跳过**，不是静默通过）；
+C1(c) 路径改由 `__file__` 推导（`_src_dir1`），与本进程读同一份文件。
+
+**验证（两种布局都跑过）**：本机 ✅；**模拟容器布局**（把 `.py` 平铺到 `/tmp/appsim`、不给 compose）✅
+且 C1(a) 诚实报"跳过"；阴性对照复核：compose 改回 3040 ⇒ C1(a) **仍红**。
+
+### 生产验收（`4d21fe4`）
+- 容器 `opencd2musopia` = `4d21fe4`，**healthy**；NAS digest `sha256:0d47557b…` == 本机 push digest ✅
+- `docker images --digests` 对齐（★ 不用 `{{.Image}}`，那是本机 config id；也不用 `.RepoDigests`，
+  本地构建后推的镜像没有那项 —— `ERR-DOCKER-13` 的坑）
+- 容器内 `run.py --selftest` ✅（C1(a) 输出 ℹ 跳过）、`qb_probe.py --selftest` ✅ 全绿
+- **C1 可观测性实测生效**：启动日志 `🔀 QB_HOST = http://127.0.0.1:3010（来自 .env）`；
+  `/data/daemon_env.json` 的 `values` 里 **`QB_HOST` 已在**（此前只有 `QB_HOST_OPENCD`）
+- NAS 顶层仍白名单（就地 sed 改 tag，**未留 `.bak`**）
+
+★ 回滚点：`f1f956d`（digest `4a85dc40…`）—— 本次改动只影响兜底值与自检，**行为无差异**。
+
+---
+
 ## 2026-10-18（续 123）—— C1 + C2 两个小缺陷修复（未发版）
 
 > 用户指示："现在就把 C1 和 C2 这两个小缺陷一并修掉。"
