@@ -563,6 +563,9 @@ ENV_SNAPSHOT_KEYS = (
     #   是不是只巡不修(dry_run)"。★ 全是普通布尔/整数，**不含任何凭据** ⇒ 无外溢问题。
     "ENABLE_SEED_PATROL", "SEED_PATROL_DRY_RUN",
     "SEED_PATROL_THREAD_TICK", "SEED_PATROL_MAX_PER_ROUND",
+    # ★★ counts.json 每日快照（#16，2026-10-14）：巡检要能回答"快照现在是开是关、
+    #   多久查一次"。★ 都是普通布尔/整数，**不含任何凭据** ⇒ 无外溢问题。
+    "ENABLE_COUNTS_SNAPSHOT", "COUNTS_SNAPSHOT_THREAD_TICK",
     # ★★ 2026-09-24 加的自动发布钥匙。**它必须进白名单**，理由与 ENABLE_PUBLISH
     #   完全相同 —— 而恰恰是"判据要用的"：
     #   · 巡检要能回答"**自动发布现在能不能发**"，而不必去读容器日志；
@@ -1594,6 +1597,125 @@ def _seed_patrol_thread_loop():
     log("🧵 [patrol] C 类护栏巡检线程退出")
 
 
+# ==================== ★★ counts.json 每日快照线程（2026-10-14，#16）====================
+#
+# 干什么：把**会动的量**（阶段新鲜度 / 心跳 / 库计数 / 生效开关）落成一份
+#   `counts.json` 到 `/data`。**谁读它**：跨项目的通知中枢 pt-notice 的「源A(opencd2)」
+#   采集器（`sources/_body/a.py.inc`）——它把 counts.json 当**权威真值**，
+#   据此产出「阶段存活表 / 上传统计 / 回加台账」。没有它，源A 的阶段台账**整块推不出来**
+#   （`state_from_counts({})=={}` ⇒ `build_stage_ledger()` 返回 None）⇒ 日报那节永远空。
+#
+# ★★★ 为什么是**独立线程**（照抄 readd/handoff/patrol 的理由）：主循环单线程同步，
+#   `crawl` 一轮可达 ~38min ⇒ 放主循环里，counts.json 的刷新时刻会被长阶段饿到漂。
+#
+# ★★★ 为什么**在容器内**生成（而不是本机生成后传上去）：`tools/gen_counts.py` 是**本机**
+#   生成器，它要 `.env.example`/`Dockerfile`/`ERRATA.md`/`tools/doc-audit/` —— 这些
+#   **镜像里故意没有**（`.dockerignore`）⇒ 容器内跑它会 FileNotFoundError。改用
+#   `tools/gen_counts_online.py`（只产出源A 需要的 online + offline.env，**不重抄口径**：
+#   online 仍走 `gen_counts.collect_online`，待办口径仍走 `db._published_where`）。
+#
+# ★★★ 默认**不开**（`ENABLE_COUNTS_SNAPSHOT=false`）⇒ 线程函数**第一件事就 return**，
+#   老行为一字不改。要开必须显式在 `.env` 加 `ENABLE_COUNTS_SNAPSHOT=true`（`ERR-ENV-02`）。
+#   ★ 打开后**每天只生成一次**（`day_key` 闸，照 pt-notice `DigestScheduler` 的原子文件惯例），
+#     避免每 tick 重写。状态缺失/跨天 ⇒ 重生成（宁多不少）。
+
+COUNTS_SNAPSHOT_THREAD_TICK = env_int("COUNTS_SNAPSHOT_THREAD_TICK", 3600)   # 1h：一天一生成绰绰有余
+
+
+def counts_snapshot_path() -> str:
+    """counts.json 落点（`/data/counts.json`，与 `daemon_heartbeat` 同目录）。"""
+    return os.path.join(config.DATA_DIR, "counts.json")
+
+
+def _counts_snapshot_day_path() -> str:
+    """「今天已生成」标记文件（原子写，照 pt-notice `DigestScheduler`）。"""
+    return os.path.join(config.DATA_DIR, ".counts-snapshot.last_day")
+
+
+def counts_snapshot_due(now=None) -> bool:
+    """今天是否还没生成过 counts.json。**纯函数式**（读一个文件，可测）。
+
+    ★ 读不到/坏 ⇒ 返回 True（**宁多不少**：没标记就重生成，而不是"以为生成过了"）。
+    """
+    today = time.strftime("%Y-%m-%d", time.localtime(now if now else time.time()))
+    try:
+        with open(_counts_snapshot_day_path(), "r", encoding="utf-8") as f:
+            return f.read().strip() != today
+    except OSError:
+        return True
+
+
+def _mark_counts_snapshot_sent(now=None) -> None:
+    """标记「今天已生成」。**只在真写成功后调用**；写不了也不抛（下轮会重试）。"""
+    today = time.strftime("%Y-%m-%d", time.localtime(now if now else time.time()))
+    path = _counts_snapshot_day_path()
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(today)
+        os.replace(tmp, path)     # 原子写
+    except OSError as e:
+        log(f"⚠️  [counts] 写快照标记失败（下次会重试）: {e}")
+
+
+def _write_counts_snapshot() -> bool:
+    """跑一次 `tools/gen_counts_online.py` 生成 `/data/counts.json`。**绝不抛**。
+
+    返回是否成功（rc==0 且文件存在）。★ 失败**不标已生成** ⇒ 下轮重试。
+    """
+    import subprocess
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "tools", "gen_counts_online.py")
+    # ★ 镜像内 `/app/tools/gen_counts_online.py`；本机 `<repo>/src/../tools/…`。
+    if not os.path.exists(script):
+        # 兜底：本机布局 `<repo>/tools/`（src 的兄弟）
+        alt = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "tools", "gen_counts_online.py")
+        script = alt if os.path.exists(alt) else script
+    if not os.path.exists(script):
+        log(f"⚠️  [counts] 找不到生成器 {script} ⇒ 跳过（不标已生成）")
+        return False
+    out = counts_snapshot_path()
+    try:
+        r = subprocess.run([sys.executable, script, "--out", out,
+                            "--dst", config.DATA_DIR],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=300)
+    except Exception as e:                                        # noqa: BLE001
+        log(f"⚠️  [counts] 生成器异常（吞掉）：{type(e).__name__}: {e}")
+        return False
+    if r.returncode != 0 or not os.path.exists(out):
+        tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or [""]
+        log(f"⚠️  [counts] 生成失败 rc={r.returncode}：{tail[0][:200]}")
+        return False
+    return True
+
+
+def _counts_thread_loop():
+    """独立线程：每天生成一次 `counts.json`。**绝不退出到线程外**。"""
+    if os.getenv("ENABLE_COUNTS_SNAPSHOT", "false").strip().lower() not in ("1", "true", "yes", "y", "on"):
+        log("🧵 [counts] ENABLE_COUNTS_SNAPSHOT 未开 ⇒ counts.json 快照线程不起")
+        return
+    log(f"🧵 [counts] counts.json 快照线程启动（每 {COUNTS_SNAPSHOT_THREAD_TICK}s 查一次；"
+        f"每天只生成一次）")
+    while not _shutdown:
+        try:
+            if counts_snapshot_due():
+                if _write_counts_snapshot():
+                    _mark_counts_snapshot_sent()
+                    log(f"📸 [counts] 已生成 {counts_snapshot_path()}")
+                else:
+                    log("⚠️  [counts] 本轮未生成（下轮重试）")
+        except Exception as e:                                    # noqa: BLE001
+            # 双保险：上面各步已"绝不 raise"。
+            log(f"⚠️  [counts] 线程本轮异常（吞掉，继续）: {type(e).__name__}: {e}")
+        slept = 0.0
+        while slept < COUNTS_SNAPSHOT_THREAD_TICK and not _shutdown:
+            time.sleep(min(1.0, COUNTS_SNAPSHOT_THREAD_TICK - slept))
+            slept += 1.0
+    log("🧵 [counts] counts.json 快照线程退出")
+
+
 def main():
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
@@ -1674,6 +1796,12 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
     #   就 return**（日志说明），所以"起了个空线程"没有副作用，且"开没开"一眼可辨。
     #   ★ 即使开了也默认 `SEED_PATROL_DRY_RUN=true`（只巡 + 只记日志，不真动 qB）。
     threading.Thread(target=_seed_patrol_thread_loop, name="patrol", daemon=True).start()
+
+    # ★★★ 启动 **counts.json 每日快照线程**（#16 接进 daemon，2026-10-14）——
+    #   同样必须在主循环之前起。★ 默认 `ENABLE_COUNTS_SNAPSHOT=false` ⇒ 线程函数
+    #   **第一件事就 return**（日志说明），"起了个空线程"没有副作用。
+    #   ★ 它产出 `/data/counts.json`，供跨项目通知中枢 pt-notice 的「源A(opencd2)」读。
+    threading.Thread(target=_counts_thread_loop, name="counts", daemon=True).start()
 
     while not _shutdown:
         beat()

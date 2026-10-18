@@ -891,8 +891,14 @@ def selftest():
 
         # ── ⑨f 结构性判据：daemon 必须真的接了两个线程（否则"写了不接"）──
         #   照 ⑦ 的教训走 **AST**（不看文本：注释里提到 Thread 不算数）。
+        #   ★ 2026-10-18（#16）：把 `_counts_thread_loop` 也纳进来 —— 它当初就是
+        #     "写了没接"的形状（`ERR-META-01`）：函数定义好了、注释也写得很全，
+        #     但 `run_main_loop()` 里没有 `Thread(target=...)` ⇒ 永远不跑、且**不报错**。
+        #     ⇒ 接线断言必须覆盖**每一个**后台线程，不是"当初想到的那三个"。
         import ast as _ast9
         import pathlib as _pl9
+        _WANT_THREADS = ("_readd_thread_loop", "_handoff_thread_loop",
+                         "_seed_patrol_thread_loop", "_counts_thread_loop")
         _daemon_py = _pl9.Path(__file__).resolve().parent / "daemon.py"
         if not _daemon_py.exists():
             ok[0] = False
@@ -907,17 +913,15 @@ def selftest():
                     for _k in _n.keywords:
                         if _k.arg == "target" and isinstance(_k.value, _ast.Name):
                             _targets.add(_k.value.id)
-            for _want in ("_readd_thread_loop", "_handoff_thread_loop",
-                          "_seed_patrol_thread_loop"):
+            for _want in _WANT_THREADS:
                 if _want not in _targets:
                     ok[0] = False
                     detail.append(f"✗ ⑨f daemon.py 没有 `Thread(target={_want}...)` 调用点 "
                                   f"⇒ 该线程**定义了但没接线**（实测 target={sorted(_targets)}）")
-            # ★ 且这两个函数真的**有定义**（防止 target 指向不存在的名字：只在运行期炸）
+            # ★ 且这些函数真的**有定义**（防止 target 指向不存在的名字：只在运行期炸）
             _defs = {_n.name for _n in _ast9.walk(_dtree)
                      if isinstance(_n, _ast.FunctionDef)}
-            for _want in ("_readd_thread_loop", "_handoff_thread_loop",
-                          "_seed_patrol_thread_loop"):
+            for _want in _WANT_THREADS:
                 if _want not in _defs:
                     ok[0] = False
                     detail.append(f"✗ ⑨f `{_want}` 在 daemon.py 里**没有定义** "
