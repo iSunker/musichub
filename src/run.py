@@ -1719,6 +1719,98 @@ def selftest():
         ok[0] = False
         detail.append(f"✗ C1 兜底一致性检查执行失败：{type(e).__name__}: {e}")
 
+    # ── ⑨i ★★★ ERR-PUBLISH-22：目录里有 qB 下载中临时文件 ⇒ **必须拒发** ──
+    #   ★★ 本节的**全部价值 = 两个方向的对照**（`ERR-PUBLISH-21` 的教训：
+    #     只测"该拒的拒了"= 只验了必要条件；条件写宽一格就会把正常种卡死）。
+    #     ① 有 `.!qB` ⇒ 必拒（阳性）
+    #     ② 干净目录（含长得像但不是临时后缀的名字）⇒ 必放行（阴性对照）
+    #     ③ 判据必须真的**接了线**（AST：`create_musopia_torrent` 里调用了闸门）
+    _tmpE8 = _tf.mkdtemp(prefix="errpub22-selftest-")
+    try:
+        _dir_bad = os.path.join(_tmpE8, "AlbumBad")
+        os.makedirs(os.path.join(_dir_bad, "CD1"))
+        with open(os.path.join(_dir_bad, "CD1", "01.flac"), "wb") as _f:
+            _f.write(b"A" * 100)
+        with open(os.path.join(_dir_bad, "CD1", "02.flac.!qB"), "wb") as _f:
+            _f.write(b"B" * 100)
+        with open(os.path.join(_dir_bad, "back.jpg.!qB"), "wb") as _f:
+            _f.write(b"C" * 100)
+        _hits = find_incomplete_download_markers(_dir_bad)
+        chk("⑨i 有 .!qB ⇒ 必须检出（含子目录）",
+            sorted(_hits), sorted([os.path.join("CD1", "02.flac.!qB"), "back.jpg.!qB"]))
+        try:
+            assert_no_incomplete_download(_dir_bad)
+            ok[0] = False
+            detail.append("✗ ⑨i 阳性对照失败：目录里有 .!qB 竟放行 ⇒ 闸门形同虚设")
+        except IncompleteDownloadError:
+            detail.append("ℹ ⑨i 阳性对照：有 .!qB ⇒ 拒发 ✅")
+
+        # ── ② 阴性对照：干净目录必须放行 ──
+        #   ★ 关键：里面要放**长得像**但不是临时后缀的名字（`Godzilla!.flac`
+        #     就是 ERR-PUBLISH-22 的实测样本名），以及 `.part` 之外的 `.` 开头文件。
+        _dir_ok = os.path.join(_tmpE8, "AlbumOk")
+        os.makedirs(os.path.join(_dir_ok, "CD1"))
+        for _n in ("01 - Godzilla!.flac", "02.flac", "back.jpg", "03.partial.flac"):
+            with open(os.path.join(_dir_ok, "CD1", _n), "wb") as _f:
+                _f.write(b"X" * 50)
+        _hits_ok = find_incomplete_download_markers(_dir_ok)
+        chk("⑨i 阴性对照：干净目录（含 'Godzilla!.flac'）不许误判",
+            _hits_ok, [])
+        try:
+            assert_no_incomplete_download(_dir_ok)
+            detail.append("ℹ ⑨i 阴性对照：干净目录 ⇒ 放行 ✅")
+        except IncompleteDownloadError as _e:
+            ok[0] = False
+            detail.append(f"✗ ⑨i 阴性对照失败：干净目录被拒 ⇒ 闸门会卡死队列（{_e}）")
+
+        # ── ③ 结构性判据：闸门必须**真的接在制种点上**（ERR-ENV-03 形状：写了不接）──
+        import ast as _astE8
+        import pathlib as _plE8
+        _run_py = _plE8.Path(__file__).resolve().parent / "run.py"
+        _treeE8 = _astE8.parse(_run_py.read_text(encoding="utf-8"))
+
+        def _calls_in(func_name, callee):
+            for _fn in _astE8.walk(_treeE8):
+                if isinstance(_fn, _astE8.FunctionDef) and _fn.name == func_name:
+                    for _c in _astE8.walk(_fn):
+                        if (isinstance(_c, _astE8.Call)
+                                and isinstance(_c.func, _astE8.Name)
+                                and _c.func.id == callee):
+                            return True
+            return False
+
+        if not _calls_in("create_musopia_torrent", "assert_no_incomplete_download"):
+            ok[0] = False
+            detail.append("✗ ⑨i create_musopia_torrent **没有**调用 assert_no_incomplete_download"
+                          " ⇒ 闸门没接线，坏种照旧能制出来")
+        else:
+            detail.append("ℹ ⑨i 结构：create_musopia_torrent 已接闸门 ✅")
+        # 闸门调用必须在 Torrent(...) 构造**之前**（之后就已经算完哈希了）
+        _gate_line = _torf_line = None
+        for _fn in _astE8.walk(_treeE8):
+            if isinstance(_fn, _astE8.FunctionDef) and _fn.name == "create_musopia_torrent":
+                for _c in _astE8.walk(_fn):
+                    if isinstance(_c, _astE8.Call):
+                        if (isinstance(_c.func, _astE8.Name)
+                                and _c.func.id == "assert_no_incomplete_download"
+                                and _gate_line is None):
+                            _gate_line = _c.lineno
+                        if isinstance(_c.func, _astE8.Name) and _c.func.id == "Torrent" \
+                                and _torf_line is None:
+                            _torf_line = _c.lineno
+        if _gate_line is None or _torf_line is None:
+            ok[0] = False
+            detail.append(f"✗ ⑨i 取不到闸门/构造行号（gate={_gate_line}, Torrent={_torf_line}）"
+                          " ⇒ 判据没测到东西")
+        elif _gate_line > _torf_line:
+            ok[0] = False
+            detail.append(f"✗ ⑨i 闸门（行 {_gate_line}）在 Torrent 构造（行 {_torf_line}）"
+                          " **之后** ⇒ 太晚")
+        else:
+            detail.append(f"ℹ ⑨i 结构：闸门（行 {_gate_line}）先于制种（行 {_torf_line}）✅")
+    finally:
+        _sh.rmtree(_tmpE8, ignore_errors=True)
+
     return ok[0], detail
 
 
@@ -1796,7 +1888,89 @@ def output_sidecar_paths(formatted_title, info_hash, out_dir=None,
             collided)
 
 
+# ★★★ `ERR-PUBLISH-22`：qB 的**下载中临时后缀**。目录里出现它们 ⇒ qB 还在下，
+#   此刻制种会把临时名（`xx.flac.!qB`）固化进 `info.files`，而 qB 完成下载后会
+#   **改名**成正式名 ⇒ 站点种里一个文件都对不上 ⇒ 那条种永久 `progress=0`，
+#   且**全程不报错**（制种成功、发种成功、回加 HTTP 200），等发现时种已上站（不可逆）。
+# ★ 判据是"**存在即拒发**"，而不是"扫目录时过滤掉" —— 只过滤的话，目录里少一个文件
+#   照样能制出一份**看起来正常**的种，缺的那个要到 qB 校验时才暴露。
+_TEMP_DOWNLOAD_SUFFIXES = (".!qb", ".part", ".!ut", ".!bt", ".aria2")
+
+
+class IncompleteDownloadError(RuntimeError):
+    """★ 目录里还有 qB 下载中临时文件 ⇒ 拒发（`ERR-PUBLISH-22`）。
+
+    ★ 单独一类（而不是裸 `RuntimeError`）是为了让调用点能**分别措辞**：
+      这一类是"还没到时候（下一轮自动好）"，别的情形是"真失败了"。
+      ⇒ 两者混成一个 except 时，日志会把可自愈的情况渲染成故障，反之亦然。
+    """
+
+
+def find_incomplete_download_markers(content_path):
+    """★ 扫 `content_path`，返回所有**下载中临时文件**的相对路径（排好序）。
+
+    ★★ 为什么单列成函数（`ERR-PUBLISH-22` 的落地点）：
+      制种（`create_musopia_torrent`）与发种是两个阶段，中间可能隔很久；只要制种那一刻
+      目录里还有 `.!qB`，坏种就已经诞生且**不可逆**（本项目无删站点种能力）。
+      ⇒ 闸门必须贴在**制种之前**，而且要能单独单测（判据不能只活在调用点的 `if` 里）。
+
+    ★ 判据细节：
+      · 只比**小写后缀**（qB 在不同平台写过 `.!qB`/`.!qb`）。
+      · **不递归跳过隐藏目录**：`.!qB` 可能在子目录（多文件夹种）。
+      · 目录不存在/不是目录 ⇒ 返回空列表（那是**别的**判据的事，别在这里越权判死）。
+      · ★ 不拿"大小写"当唯一依据：`.part` 也可能是合法的专辑内文件名，但那种情况
+        **极罕见**且代价不对称 —— 误拒只是少发一条（可人工确认后处理），
+        漏拒则是**永久坏种**。⇒ 宁可误拒（`ERR-META-01` 一族的"代价不对称"取舍）。
+    """
+    hits = []
+    if not content_path or not os.path.isdir(content_path):
+        return hits
+    for root, _dirs, files in os.walk(content_path):
+        for fn in files:
+            low = fn.lower()
+            for suf in _TEMP_DOWNLOAD_SUFFIXES:
+                if low.endswith(suf):
+                    rel = os.path.relpath(os.path.join(root, fn), content_path)
+                    hits.append(rel)
+                    break
+    hits.sort()
+    return hits
+
+
+def assert_no_incomplete_download(content_path):
+    """★ 制种前的闸门：目录里有下载中临时文件 ⇒ **抛错拒发**（`ERR-PUBLISH-22`）。
+
+    ★★ 为什么 raise 而不是返回 `(bool, why)`：调用点（`create_musopia_torrent`）已经
+      在一个 `try/except` 里，`raise` 会让那条任务落到 `status="FAILED"` + `reason`
+      —— 也就是**这条任务被明确记为失败**，而不是"悄悄跳过、下一轮再来"。
+      ★ 这点是关键：`.!qB` 存在说明 qB 还在下，下一轮重扫时它多半就没了 ⇒
+      如果只跳过，会**每轮静默跳过**直到碰巧干净，而用户永远看不到原因；
+      记成 FAILED 才能在库里查到"这条是被什么挡下的"。
+
+    ★ 判据（自检里必须有**两条**对照，见 `selftest` ⑨i）：
+      · 目录里有 `.!qB` ⇒ 必拒（否则本条形同虚设）；
+      · 干净目录（含长得像但**不是**临时后缀的名字，如 `Godzilla!.flac`）⇒ 必放行
+        （否则闸门会把正常种卡死 —— `ERR-PUBLISH-21` 的教训：条件写宽一格就误判）。
+    """
+    hits = find_incomplete_download_markers(content_path)
+    if hits:
+        _show = "、".join(hits[:5])
+        _more = f"…（共 {len(hits)} 个）" if len(hits) > 5 else ""
+        raise IncompleteDownloadError(
+            f"目录里有 qB **下载中临时文件**，此刻制种会产出永久坏种："
+            f"{_show}{_more}。"
+            f"⇒ 说明 qB 尚未完成下载；等下载完成后重扫即可（ERR-PUBLISH-22）")
+
+
 def create_musopia_torrent(content_path, save_path):
+    """★ 把 `content_path` 做成乌托邦用的 `.torrent`。
+
+    ★★★ 制种**之前**必须先过 `assert_no_incomplete_download`（`ERR-PUBLISH-22`）：
+      本函数是**全项目唯一的制种点**，一旦在这里写进 `.!qB` 名字，坏种就固化进
+      站点种、不可逆。⇒ 闸门放在这里，而不是放在某个上游调用点（放上游会漏掉
+      未来新增的调用者）。
+    """
+    assert_no_incomplete_download(content_path)
     announce = f"{config.MUSOPIA_URL}/announce.php?passkey={config.MUSOPIA_PASSKEY}"
     t = Torrent(path=content_path, trackers=[announce], private=True)
     t.generate()
@@ -2205,6 +2379,15 @@ def _scan_main(args):
         try:
             create_musopia_torrent(content_path, torrent_file)
             print(f"✅ 种子已生成: {torrent_file}")
+        except IncompleteDownloadError as e:
+            # ★ ERR-PUBLISH-22：这不是"故障"，是"还不到时候" —— 但**必须显式可见**，
+            #   否则下一轮又静默跳过，用户永远不知道这条为什么一直没发出去。
+            print(f"⏳ 暂缓制种：{e}")
+            db.save_task(info_hash=info_hash, torrent_name=name, status="FAILED",
+                         reason=str(e), content_path=content_path,
+                         track_type=track_type)
+            stats["failed"] += 1
+            continue
         except Exception as e:
             print(f"❌ 种子生成失败: {e}")
             db.save_task(info_hash=info_hash, torrent_name=name, status="FAILED",
