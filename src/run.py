@@ -1635,8 +1635,10 @@ def selftest():
     try:
         import re as _re1
         _root1 = _pl9i.Path(__file__).resolve().parent.parent
-        _cfg_txt = (_pl9i.Path(__file__).resolve().parent / "config.py").read_text(
-            encoding="utf-8")
+        # ★★ 路径要同时认两种落地形态：本机仓库（`<repo>/src/run.py`）与
+        #   容器镜像（`/app/run.py`，**所有 .py 平铺在 /app**、无 `src/` 子目录）。
+        _src_dir1 = _pl9i.Path(__file__).resolve().parent
+        _cfg_txt = (_src_dir1 / "config.py").read_text(encoding="utf-8")
         # (a) 从 config 里抽默认值，再逐个比对 compose 的两处
         _m_def = _re1.search(r'^QB_HOST_DEFAULT\s*=\s*"([^"]+)"', _cfg_txt, _re1.M)
         if not _m_def:
@@ -1645,10 +1647,22 @@ def selftest():
                           " ⇒ 本判据没测到东西（ERR-META-14）")
         else:
             _qbd = _m_def.group(1)
+            # ★★★ 2026-10-18：**compose 不进镜像**（只装 .py 到 /app）⇒ 容器里这条
+            #   既不该判红、也不该"静默跳过"。按 `ERR-META-01` 的口径：
+            #   **没测到就说没测到**，并且说明"为什么合理"，不是当成通过。
             _compose = _root1 / "docker-compose.yml"
+            _sub = _root1 / "src" / "docker-compose.yml"      # 防备别处布局
             if not _compose.exists():
-                ok[0] = False
-                detail.append("✗ C1(a) 找不到 docker-compose.yml ⇒ 本判据没测到东西")
+                _compose = _sub if _sub.exists() else None
+            if _compose is None:
+                # ★ 只有"本机仓库缺失"才是异常；容器内缺 compose 是**设计如此**。
+                if (_root1 / "src").is_dir():
+                    ok[0] = False
+                    detail.append("✗ C1(a) 本机仓库里找不到 docker-compose.yml"
+                                  " ⇒ 判据没测到东西（ERR-META-14）")
+                else:
+                    detail.append("ℹ C1(a) **容器内无 docker-compose.yml**（设计如此："
+                                  "镜像只装 .py）⇒ 本段跳过，改由发版前的本机自检覆盖")
             else:
                 _ctxt = _compose.read_text(encoding="utf-8")
                 _falls = _re1.findall(
@@ -1670,6 +1684,10 @@ def selftest():
             chk("C1(b) QB_HOST 必须由 QB_HOST_DEFAULT 派生（不许第二处字面量）",
                 "QB_HOST_DEFAULT" in _m_use.group(1), True)
         # (c) 空串必须回落兜底 —— 这是"os.getenv 默认值对空串无效"这个真坑的判据
+        #   ★★★ 2026-10-18：子进程的 `sys.path` 要**按实际落地形态给**：
+        #     本机仓库是 `<repo>/src/config.py`，容器镜像是 `/app/config.py`。
+        #     写死 `"src"` ⇒ 容器里 `import config` 会落到别处/失败 ⇒ 假红（实测踩到）。
+        #     判据 = **沿 config.py 所在目录**（`_src_dir1`），与本进程同一份文件。
         import subprocess as _sp1
         import sys as _sys1
         _env1 = {k: "x" for k in ("QB_PASS", "MUSOPIA_COOKIE", "MUSOPIA_PASSKEY",
@@ -1678,8 +1696,8 @@ def selftest():
         _env1["DATA_DIR"] = str(_root1 / ".scratch" / "selftest-data")
         _py1 = _sp1.run(
             [_sys1.executable, "-c",
-             "import sys;sys.path.insert(0,'src');import config;"
-             "print(config.QB_HOST_FROM_DEFAULT, config.QB_HOST)"],
+             f"import sys;sys.path.insert(0,{str(_src_dir1)!r});import config;"
+             f"print(config.QB_HOST_FROM_DEFAULT, config.QB_HOST)"],
             cwd=str(_root1), env=_env1, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=60)
         _out1 = (_py1.stdout or "").strip().splitlines()
