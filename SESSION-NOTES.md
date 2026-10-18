@@ -19,11 +19,105 @@
 >    ★ `续117` = B16 **发版上线**；
 >    ★ `续118` = B15 收尾（根因`.!qB`坐实 / 正确分轨种入队 / 顺发新页 `21669`）；
 >    ★ `续119` = 删 qB 坏种 B / 查清"未上站不自动发"=闸门④ / 新任务:逐轨 cue 判据；
->    ★ `续120` = 逐轨 cue 判据**已修**（`has_cue` 二修：整轨⟺恰好1条 FILE 且目标存在）（最新）**）。
+>    ★ `续120` = 逐轨 cue 判据**已修**（`has_cue` 二修：整轨⟺恰好1条 FILE 且目标存在）；
+>    ★ `续121` = **旧会话归档前的全量落盘**（10-14 全部可复用信息 + 项目文件地图 + 已知待收口项）（最新）**）。
 > - **10-08 序列**（**另一批**独立编号，现落在文件**末尾**）：`续 100 → 101 → 102 → 103 → 104 → 105 → 106 → 107`
 >   （这里的 `续106` = `#56 retract 自检`，与上面**完全无关**）。
 > ⇒ 找待办看 **顶部「续106」**；找"护栏 #39/#49/#51"那批工作看**末尾的 10-08 序列**。
 > ★ 本次仅**修正顶部四处**：补回丢失的 `续106` 节头、把 `续109/续108` 摆回逆序、加本导航 —— 旧节内容一字未改。
+
+---
+
+## 2026-10-18（续 121）—— 旧会话归档前的**全量落盘**（10-14 会话有用信息 + 项目文件地图）
+
+> ★ 背景：用户要求「剔除噪音 → 把前面几个会话有用的信息落盘 → 删除旧会话 jsonl」。
+> 本节的判据是 **10-14 长会话（`4304fd50` / `41bb2411` 之前那份）的内容除已在
+> 续116–120 落盘者外，还有没有只活在 jsonl 里的结论**。逐条比对后，**补以下五块**
+> （其余已覆盖，不重复抄）。★ 本节**不含会变的数字**，随时间的量见 `counts.json`。
+
+### ★ 1. 发布链路定性（用户问过、但只在对话里说清过）
+- **种子是本地制作的，不是"下载站点发布的种子"**：`run.create_musopia_torrent` 从本地目录
+  生成 `.torrent`（`info.name` / 文件集取自盘上真文件）→ `publish.upload_torrent` 把它上传给站点。
+  站点会按自己口径**另存一份**（站点 Hash码 = 另一个 infohash，即本项目文档里的 **B**）；
+  本地那份 = **A**。★ 两端 hash 不同 ⇒ `ERR-PUBLISH-15` 的身份铁律（比对只能按 B）。
+- **"皇后 1700 多个种，能发的一个都没有"= 闸门④，不是 bug**：`PENDING_PUBLISH_WHERE` 四道闸门，
+  瓶颈在 `transfer_rule='ALLOW'`（皇后页明确写"允许转载"才放行）。**结论：这是按用户铁律
+  "拿不准就不发"的正确行为**，不要为了"发得多"去放宽它。
+- **"未上站为什么不自动扫描"**：**在扫**（scan/publish 每 1800s），只是被闸门挡住。见续119 ②。
+
+### ★ 2. 已坐实的操作级事实（当时只在对话里，现已落盘）
+- **qB 实例映射（10-14 实测，6 个实例全查过）**：`3010`=qbit-publish（**发种/回加**）/
+  `3260`=qbit-music3（**皇后源**，scan 走 `QB_HOST_OPENCD`）/ `3020`=qbit-movies1（**交棒目标**）/
+  `3040`=qbit-movies2 / `3220`、`3240`=music1-2。★ 容器单 `.env` 提供凭据（`QB_USER/QB_PASS`）。
+- **删 qB 种一律 `torrents_delete(delete_files=False)`**（只删种、不动磁盘）—— 21662 的坏种 B 即如此。
+- **db 备份命名**：`data.db.bak-<任务>-<日期>`（如 `data.db.bak-b15-20261014`），**只留在 NAS `data/`**。
+- **站点删种只能人工**：程序**没有**"删站点种"的能力 ⇒ `#136` 族每次复发都以人工删种收场。
+
+### ★ 3. 项目整理任务的最终状态（`.scratch/RESUME-2026-10-14-cleanup.md` 的 A~F）
+- **A（NAS 顶层净化）✅**：删 20 个 bak，顶层只剩白名单 5 项
+  （`docker-compose.yml` / `.env` / `.env.example` / `README.md` / `data/`）。
+- **B（`tools/` 清理）✅**：`git rm` 15 个一次性探针（`_probe_*`×6 / `diag_*`×2 /
+  `publish_probe` / `uploads_probe` / `show_response` / `qb_state_probe` / `queue_probe` /
+  `probe_crabpt_upload_page` / `probe_subtitles`）。
+- **C（`.scratch/` 归档）✅**：建 `archive/` 移入 18 个已闭环报告（**只移不删**）。
+- **E（铁律落盘）✅**：`CLAUDE.md` §1/§2、`.claude/RULES.md` §A.0 —— NAS 白名单 +
+  **可执行核查片段 `check_nas_top`**（含阴性对照：假 `.bak`/`.py` 必报红）。
+- **F（收尾）✅**：`run.py --selftest` / `publish.py --selftest`（含 ok9）/ `opencd.py map --selftest` /
+  `build-preflight` 全绿。
+- **用户明确拍板（别再问）**：NAS 备份**直接删不留档**；本机**删一次性探针 + 归档 `.scratch`**（只移不删）；
+  代码**轻度整理**（不深度合并）；规则落点 `CLAUDE.md` + `.claude/RULES.md`；
+  部署链路 **本机构建→Docker Hub→NAS pull（不改）**。
+
+### ★ 4. 环境与命令（复核过、值得留）- NAS：`ssh -i C:/Users/艾森克/.ssh/id_ed25519 -o UserKnownHostsFile=/dev/null -p 36688 iSunker@192.168.0.7`。
+  ★ Git Bash 下 `~` 因**中文用户名**坏 ⇒ **必须显式 `-i` 绝对路径**；非交互 ssh 里 docker
+  **不在 PATH** ⇒ 用 `/usr/local/bin/docker`；本机比 NAS 慢 8 小时（NAS=CST）。
+- 本机自检要 dummy env（`config.require_env` 会 `sys.exit`）：
+  `export QB_PASS=x MUSOPIA_COOKIE=x MUSOPIA_PASSKEY=x PICGO_API_KEY=x DATA_DIR="$PWD/.scratch/selftest-data"`。
+- 部署验证**只能比 `RepoDigests`**：`docker inspect <容器> --format '{{.Image}}'` 给的是本地 config id，
+  **跨主机不等**（`ERR-DOCKER-13` 的补充）。
+- ★ `ERR-DOCKER-13` 同族：NAS 镜像站缓存可变 `latest` ⇒ 部署**必须点名 `:<git-sha>`**。
+
+### ★ 5. 项目文件地图（给下一轮会话省一次全量扫描）
+- **`src/` 30 个模块**（镜像内 `/app` 平铺）：底座 `config/net/db/assets`；抓取 `crawl/opencd/descr/run/
+  update_metadata/topup_opencd_fields/sync_opencd_tid/rss_backfill_tid`；发布 `publish/musopia/
+  crabpt_site/site_verify/readd_queue/handoff/qb_client/free_window/flip_status`；护栏 `site_seed_patrol/
+  site_readd`；诊断 `readiness_probe/qb_probe/check_db`；入口 `daemon/healthcheck`；其余 `sync_site/
+  backfill_covers*/cover_fetch/opencd_sanitize/observe_custom_fields`。
+  ★ 体量第一 = `publish.py`（约 3.5k 行），其后 `opencd.py`、`run.py`、`daemon.py`、`db.py`。
+- **`daemon.py` 调度**：串行 `scan → publish → publish_crabpt(关) → sync → covers → edit → vtid →
+  rss_tid(关) → crawl(关) → free_window(关)`；后台线程 `readd / handoff(关) / patrol(关) / counts(关)`。
+- **`tools/` 50 项**：运行时真正被调用的**只有两个** —— `build-preflight.sh`（被 `build-push.sh` 调）、
+  `gen_counts_online.py`（被 `counts` 线程 `subprocess` 调）；其余是单测 `test_*`、验证 `verify_*`、
+  运维修复、回填、诊断与文档投影 `doc-audit/`。★ `doc-audit/` 被 `.dockerignore` 排除。
+- **顶层**：`README.md`=人的操作手册/事实源；`ERRATA.md`=教训表（每条 `### ERR-XX-NN`）；
+  本文件=会话归档；`PLAN-crabpt.md`=已实现的历史方案；`counts.json`=会变的数字（生成物，别手改）；
+  `deploy.sh`=**已弃用**，只保留 `NEVER` 名单与教训；`build-push.sh`=本机构建+推 Docker Hub。
+- **gitignore 的大件**：`repos/`（5 个第三方参考仓库）、`opencdhtml/` 原始页面（**含 passkey/用户名，
+  不入库**；只有 `sanitized/` 7 份脱敏样本入库）、`.scratch/`、`x/*.json`、`opencd_tid_backfill.json`。
+
+### ★ 6. 归档时发现的**待收口项**（不修，只记判据）
+1. **B18（#16 counts 快照）代码只在工作区**：`src/daemon.py` +128 行、`.env.example` +13 行、
+   `tools/gen_counts_online.py`、`tools/test_counts_snapshot.py` —— **未 commit / 未发版 / 未落盘**。
+   ★ 缺口：`run.py --selftest` 的 ⑨ 族**没有** counts 线程的接线断言（`ERR-META-01`：写了不接 = 死代码）。
+2. **`qb_probe.py` docstring 声称有 `--selftest`，但代码里没有该入口**（文档与实现不符，`ERR-META-04`）。
+3. **`config.py` / compose 的 `QB_HOST` 兜底值仍是 `3040`**，与生产 `3010` 不一致；漏配 `.env` 会
+   **静默**连到交棒实例（`.env.example` 已警告，代码兜底未改）。★ 未拍板是否收口。
+4. **`.scratch/RESUME.md` 与 `RESUME-2026-10-14-cleanup.md` 已过期**（还写着"生产=922dcfc / B16 未发版"）
+   ⇒ 恢复会话**以本文件顶部 + `.scratch/BACKLOG.md` 为准**，那两份只作历史。
+
+### ★ 7. 首次调查期的误判（**别再走一遍** —— 均已被上面结论取代）
+> 10-14 会话最初对 21662 有几轮错误定性，最后全部推翻。只记"错在哪"，免得下一轮从同一个坑开始。
+- ❌ **"文件残损还能发种"** ⇒ 不是数据残损，是**种子里写的是 `.!qB` 临时名**（续118 / `ERR-PUBLISH-20`）。
+- ❌ **"发布时把种做坏了"** ⇒ 实测 `.torrent` **内容是对的**（总字节与盘一致），错的是**文件名清单**；
+  ⇒ 站上那颗种里条目数 > 磁盘文件数，多出来的正是 `.!qB` 那一族。
+- ❌ **"是 `site_readd.py` 的 bug / 历史遗留种"** ⇒ 时间链证伪（发布时间晚于 `#134` 修复上线）。
+- ❌ **"重跑校验 / 改 announce 就能救活"** ⇒ 站点种 B 的文件集与本地**永远对不上**，救不活；
+  正解只有"**站点删页 + 本地重发正确版本**"。
+- ❌ **"先删后发 / 先发后删都行"** ⇒ 两条页同 `info.name`：**必须先删旧页再发**（否则 NexusPHP
+  回「上传失败！」= 重复）。★ 顺带：`DEDUP_BEFORE_PUBLISH` 比的是**名字/版本**，旧页挂的是**另一版本**
+  ⇒ **查重不会替我们挡住"两页并存"**，顺序必须人盯。
+★ 一般化：每次翻案都是同一条（`ERR-META-01`）——**先有结论、再找证据**。
+  正确取证顺序：**盘上真文件 → 种子内清单 → 站点页**。
 
 ---
 
