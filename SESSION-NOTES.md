@@ -29,6 +29,112 @@
 
 ---
 
+## 2026-10-18（续 131）—— S6 落地：发种区完整性从"文件数+字节数"加强到**逐片校验**
+
+### 一、为什么必须做
+
+`ERR-PUBLISH-23` 实测过：`21811` 那条站上 44 文件、盘上 44 文件、**逐文件字节数一个不差**、
+`du -sb` 两边同为 `954748123`，而按 torrent **自己的文件顺序**逐片校验是 **ok=49 / bad=407**。
+⇒ `verify_publish_area_complete` 当时用的"文件数相同 且 总字节相同"**两个必要条件凑一起，仍然不是充分条件**：
+拼接顺序一错，每片都错位，而 `progress` 会卡在一个漂亮数字上、**永不报错**。
+
+### 二、做了什么
+
+| 名字 | 位置 | 作用 |
+|---|---|---|
+| `verify_pieces(src_root, torrent_bytes, *, max_pieces=None)` | `src/handoff.py` | 按 torrent 声明的**片长 + 文件顺序**把字节串成一条流，逐片 sha1 比对 |
+| `_file_piece_hashes` | `src/handoff.py` | 分块读字节的生成器（分片是**跨文件**的，切的时机归调用方） |
+| `verify_publish_area_complete(..., torrent_file=None)` | `src/handoff.py` | **两级**：一级（便宜）文件数+字节；二级（贵）给了 `.torrent` 才逐片 |
+| `run.py` ⑨h-2 四条 | `src/run.py` | 阳性 + **对调阴性** + 缺文件 + `max_pieces` 措辞 |
+
+★ 二级做成**可选**（`torrent_file=None` 时只有一级）的原因：`begin_handoff_for_task` 在**复制刚结束**
+时调它，那一刻 `.torrent` 未必已生成；强制要求会把整条交棒链打挂。⇒ 没给种子时，
+返回的说明里**明写**"未做逐片校验"，不让读日志的人以为已经验过了。
+
+### 三、★ 本轮踩的四个坑
+
+| 坑 | 现象 | 教训 |
+|---|---|---|
+| `torf` 片长必须 16 KiB 的倍数 | `PieceSizeError: 512` | 用 `16384`；样本文件要放大到能跨片（每文件 20 KiB） |
+| **`verify_pieces` 的根是"含专辑目录的那一层"** | `AlbumP/AlbumP/a.bin` 不存在 | torrent 的 `info['name']` 会自己拼进去 ⇒ 传父层 |
+| **单字节重复样本让阴性对照假绿** | `b"A"*20480` / `b"B"*20480` 对调后竟判通过 | 样本内容必须**逐字节真不同**（改用 `bytes(range(256))*80`） |
+| **另建 `AlbumQ` 测不到东西** | 阴性对照假绿 | `verify_pieces` 按 `info['name']`（`AlbumP`）找目录 ⇒ 必须**就地**改 `AlbumP` 的内容 |
+
+★ 后两个是同一种病：**夹具自己配错，测试就说谎**（假绿/假红一样坏）。
+
+### 四、变异验证
+
+把 `verify_pieces` 桩成 `return True, "stub"`（= `ERR-PUBLISH-23` 那个坑重开）⇒
+⑨h-2 的**四条判据全红**。⇒ 这一节不是"测了个寂寞"。
+
+### 五、验证
+
+`run.py --selftest` ✅ / `tools/test_*.py` 12 个全绿 ✅ / `build-preflight.sh` ✅ —— **未发版**。
+
+### 六、还剩什么
+
+- `S5` 观察 counts.json 跨天自然重生成（**明天**才可验）
+- `U1`/`U2` 删站点页 `21811`/`21884`（**只能你做**）；`U3` 删 `21662`
+
+---
+
+## 2026-10-18（续 130）—— S3 + S4 落地：同名冲突的**判**与**诊**分桶（`ERR-PUBLISH-26`）
+
+### 一、做了什么
+
+用户点「继续 S3」或「继续 S6」⇒ 先做 **S3 + S4**（两者同源，一起改才不返工；S6 见续 131）。
+
+| 改动 | 文件 | 作用 |
+|---|---|---|
+| `diag` 参数 | `musopia.search_and_compare` / `MusopiaClient.find_existing_by_name` / `crabpt_site.CrabptClient.find_existing_by_name` | 可选的证据累加器；**不传则行为逐字不变** |
+| `same_name` / `near_miss` 两个桶 | `musopia.search_and_compare` | 逐条候选时分开记：**同名**（该拒）vs **近亲**（只记） |
+| `site_verify.is_near_miss` / `name_tokens` | `site_verify.py` | 近亲的**纯判据**（零网络、可单测） |
+| `_same_name_precheck` | `publish.py` | 提交**前**的同名闸门（两站共用） |
+| `_diag_kind` / `_diagnose_upload_reject` | `publish.py` | 被拒后**分诊**：同名冲突 / 必填项缺失 / 权限配额 / 种子被拒 / 未分类 |
+| 两站闸门 + 分诊接线 | `publish.main` / `publish.run_crabpt` | 闸门在 `upload_torrent` **之前**；`reason` 落库带上分诊类别 |
+| 自检 ①b + ④ | `publish.selftest_dedup_before_publish` | 结构性 AST + 桩 + **真实路径**判据 |
+
+### 二、分桶的依据（这一节是本次的全部要点）
+
+| 信号 | 归哪个桶 | 为什么 |
+|---|---|---|
+| 站点上 `info.name` **逐字相同** | **判据**（拒发 + FAILED 出队） | 与站点的拒发判据**同构** |
+| 名字**极像但不等** | **只记日志** | 不同构 ⇒ 拿去判 = 会跳过站点**本来会收**的条目，且**静默** |
+| 查重证据账（查询数/候选数/预算） | **只记日志** | 只用来解释"为什么没命中"，不参与任何放行/拒绝 |
+
+★ 一句话：**诊断信号一旦当判据用，它的假阳性就变成了产品的假阴性**。多发至少站点会拒（当轮可见）；少发是**静默**的。
+
+### 三、三次变异测试（全红才算数）
+
+| 变异 | 结果 | 红了哪条判据 |
+|---|---|---|
+| M1：`_same_name_precheck` 改成 `return []` | ❌ 红 | ④ 同名闸门阳性对照 |
+| M2：`musopia` 把 `near_miss` 塞进 `same_name` | ❌ 红 | ④ **真实路径**判据 |
+| M3：删掉 `main` 里那次闸门调用 | ❌ 红 | ①b 结构性 AST 判据 |
+
+### 四、★★ 本轮我自己犯的三处错（都记进 `ERR-PUBLISH-26`）
+
+1. **`git checkout -- src/musopia.py` 把整个 S4 改动抹了。** 那时 `musopia.py` 是**未提交**的修改，`git checkout` 直接回到 `4141a49` 的版本。是 M2 变异测试里为了"还原"而敲的 —— 我用 `git checkout` 去撤销一个**临时变异**，却连**真实改动**一起撤了。★ 教训：**在未提交的工作树上永远不要用 `git checkout <file>` 做"还原"**；要还原变异就用 `cp` 备份。已全部重打并复核 `git diff --stat`。
+2. **桩测试绕过被测的正主。** 见上 M2：`_NearOnlyFake` 直接伪造 `diag["near_miss"]`，所以查不出 `musopia` 往哪个桶写。补了**真实路径**判据。
+3. **真实路径判据第一次是假红。** `_Fake.get` 吐的链接永远指向 `self.target_tid`（默认 `"5998"`），我只给了 `hit_map={"777": …}` ⇒ `download_torrent("5998")` 拿不到 ⇒ 静默跳过 ⇒ `near_miss` 恒空。补 `target_tid="777"` 后转绿。★ 教训：**夹具自己配错，会把测试写成假红**（跟假绿一样是"测试在说谎"）。
+
+### 五、验证
+
+- `run.py --selftest` ✅
+- `publish.selftest_dedup_before_publish` / `selftest_version_gate` / `selftest_crabpt_isolation` ✅
+- `tools/republish_one.py --selftest` ✅（6/6）
+- `tools/test_*.py` **12 个全绿**
+- `tools/build-preflight.sh`（`PREFLIGHT_SELFTEST=1`）✅
+
+★ **未发版**（本次只落本机）。发版要另起 build-push → NAS pull。
+
+### 六、还剩什么
+
+- `S5` 观察 counts.json 跨天自然重生成（**明天**才能验）
+- `U1`/`U2` 删站点页 `21811`/`21884`（**只能你做**）；`U3` 删 `21662`
+
+---
+
 ## 2026-10-18（续 129）—— 待办全量自查（用户问"还有哪些未完成"）
 
 ### 一、本轮顺手核实/订正的事实

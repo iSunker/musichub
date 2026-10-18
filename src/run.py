@@ -1018,6 +1018,86 @@ def selftest():
                 ok[0] = False
                 detail.append("✗ ⑨h handoff.py 仍是旧判据「目录非空 ⇒ 跳过复制」"
                               "（`Beyond` 的病根，ERR-PUBLISH-06）")
+
+            # ── ⑨h-2 ★★★（S6 / ERR-PUBLISH-23）逐片校验：文件数+字节数全对，仍必须能报错 ──
+            #   ★★ 为什么要这一节：`21811` 实测 —— 站点种 44 文件、盘上 44 文件、
+            #     **逐文件字节数一个不差**、`du -sb` 两边同为 `954748123`，
+            #     而按 torrent 自己的顺序逐片校验是 **ok=49 / bad=407**。
+            #     ⇒ "文件数+字节数"是**必要条件不是充分条件**；只有逐片比 hash 才够。
+            #   ★★★ 阴性对照的构造（缺了它本节就是"测了个寂寞"）：
+            #     造一个**两个文件**的样本，用 A|B 的顺序制种，
+            #     再把发种区写成 **B|A** —— 文件集合、每个文件字节数**全等**，
+            #     只有**拼接顺序**不同 ⇒ 一级判据必绿、二级判据**必红**。
+            #     这正是在验证"一级判据挡不住的东西，二级挡得住"。
+            import torf as _torf9h
+            _pp = os.path.join(_tmp3, "pieces")
+            _srcP = os.path.join(_pp, "hdd", "AlbumP")
+            os.makedirs(_srcP)
+            # ★★ 两个文件的内容**必须真的不同**（不能用 `A*N` / `B*N` 里的 `A`/`B`
+            #   这种单字节重复 —— 那样"对调"之后整体字节流几乎一样，阴性对照会**假绿**）。
+            #   实测踩到一次：`b"A"*20480` 与 `b"B"*20480` 对调后分片 hash 竟然一致。
+            _A = bytes(range(256)) * 80        # 20 KiB，逐字节各不同
+            _B = bytes(reversed(range(256))) * 80  # 20 KiB，与 A 逐字节不同
+            with open(os.path.join(_srcP, "a.bin"), "wb") as _f:
+                _f.write(_A)
+            with open(os.path.join(_srcP, "b.bin"), "wb") as _f:
+                _f.write(_B)
+            # 制种（★ 片长必须是 16 KiB 的倍数 —— `torf` 会抛 `PieceSizeError`。
+            #   16 KiB ⇒ 2000 字节只有 1 片，跨不了文件 ⇒ 样本要更大才能验"跨文件拼接"。
+            #   ⇒ 用 16 KiB 片长 + 每文件 20 KiB（共 40 KiB = 3 片，第 2 片横跨两文件）。
+            _tP = _torf9h.Torrent(path=_srcP, trackers=["http://x/announce"],
+                                  private=True, piece_size=16384)
+            _tP.generate()
+            _torfP = os.path.join(_pp, "AlbumP.torrent")
+            _tP.write(_torfP)
+
+            # ① 阳性对照：发种区**就是**那份数据（顺序正确）⇒ 逐片必须通过
+            _dstP = os.path.join(_pub_root3, "AlbumP")
+            os.makedirs(_dstP)
+            for _n in ("a.bin", "b.bin"):
+                with open(os.path.join(_srcP, _n), "rb") as _s, \
+                        open(os.path.join(_dstP, _n), "wb") as _d:
+                    _d.write(_s.read())
+            _ok1, _why1 = _ho.verify_publish_area_complete(_srcP, "AlbumP",
+                                                           torrent_file=_torfP)
+            chk("⑨h-2 顺序正确的副本·逐片校验通过", _ok1, True)
+
+            # ② 阴性对照（本节的核心）：**文件集合与字节数全等**，只有**内容/顺序不同**
+            #    ⇒ 一级判据（文件数+总字节）必绿；二级（逐片）**必红**。
+            #   ★★ 关键：`verify_pieces` 按 torrent 的 `info['name']`（= `AlbumP`）去找目录
+            #     ⇒ 必须**就地**把 `_dstP` 里的内容换成对调版（另建 `AlbumQ` 没用 —— 它不在
+            #     torrent 的路径上，测的还是 `AlbumP`，于是阴性对照**假绿**。实测踩到）。
+            _orig_a = open(os.path.join(_dstP, "a.bin"), "rb").read()
+            _orig_b = open(os.path.join(_dstP, "b.bin"), "rb").read()
+            with open(os.path.join(_dstP, "a.bin"), "wb") as _f:
+                _f.write(_orig_b)          # a ← 原 b 的内容
+            with open(os.path.join(_dstP, "b.bin"), "wb") as _f:
+                _f.write(_orig_a)          # b ← 原 a 的内容
+            _lvl1_bytes = _ho._dir_total_bytes(_dstP)
+            chk("⑨h-2 对调样本·字节数与源**相同**（一级判据挡不住，前提成立）",
+                _lvl1_bytes, _ho._dir_total_bytes(_srcP))
+            _okq, _whyq = _ho.verify_pieces(os.path.dirname(_dstP),
+                                            open(_torfP, "rb").read())
+            chk("⑨h-2 ★对调样本（字节数全等）·逐片校验**必须报错**（阴性对照）", _okq, False)
+            if _okq:
+                detail.append("✗ ⑨h-2 逐片校验对'同字节数、不同内容/顺序'的样本判了通过 "
+                              "⇒ 它退化成了'文件数+字节数'，ERR-PUBLISH-23 的坑重开")
+
+            # ③ 缺一个文件 ⇒ 逐片必须报错（且理由是"缺文件"，不是"读不出"）
+            os.remove(os.path.join(_dstP, "b.bin"))
+            _okr, _whyr = _ho.verify_pieces(os.path.dirname(_dstP),
+                                            open(_torfP, "rb").read())
+            chk("⑨h-2 缺文件·逐片校验报错", _okr, False)
+
+            # ④ 恢复正确内容后，用 max_pieces 限流：理由里必须带"前 N 片"
+            with open(os.path.join(_dstP, "a.bin"), "wb") as _f:
+                _f.write(_orig_a)
+            with open(os.path.join(_dstP, "b.bin"), "wb") as _f:
+                _f.write(_orig_b)
+            _okn, _whyn = _ho.verify_pieces(os.path.dirname(_dstP),
+                                            open(_torfP, "rb").read(), max_pieces=2)
+            chk("⑨h-2 max_pieces=2 时理由写明'前 2 片'", "前 2 片" in _whyn, True)
+
         finally:
             _ho.config.PUBLISH_CONTAINER_DIR = _saved_pub3
             _ho.config.ENABLE_HANDOFF = _saved_handoff3

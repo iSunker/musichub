@@ -107,6 +107,75 @@ def compare_hosted_vs_db(db_name, hosted_name):
     return MATCH if a == b else MISMATCH
 
 
+# ★★「名字相近」的判据（`S4` / `ERR-PUBLISH-25`）—— **只用于诊断，绝不用于判定重复**。
+#
+#   为什么存在：`21811` 那次站点**真的**挂着一条 `info.name` 与本方**逐字相同**的页，
+#   而 `search_and_compare` 返回了 `None`。调用方只看到"未发现同版本"一句话，
+#   无法分辨"站点上没有"与"站点上有、但我没搜到/没验到"。于是我只能去猜字段，
+#   连猜三轮全错（`ERR-PUBLISH-25`）。
+#   ⇒ 这里给"**近亲条目**"一个判据：它出现 ⇒ 这条大概率是**同名冲突**，
+#     而不是"站点上没有这条"。
+#
+#   ★★★ 边界（这条最要紧）：**近亲 ≠ 重复**。它在 `search_and_compare` 里**只写 diag、
+#     绝不改返回值**；`compare_hosted_vs_db` 的精确相等仍是唯一判"重复"的判据。
+#     若把近亲当重复 ⇒ 会跳过**本该发**的条目（少发一条，且**看不见** —— 比多发危险得多，
+#     因为多发至少站点会拒，少发是静默的）。
+#   ★ 为什么不用"编辑距离 ≤ N"：编辑距离对**长名**太松（改一个字就"不近"了）、
+#     对**短名**太紧（`AB` vs `AC` 距离 1 就算近）。而实测的同类冲突形态是
+#     **一方是另一方的前缀/包含**（`…FLAC` vs `…FLAC TESTNAME`）。⇒ 用包含关系 + 词级 Jaccard，
+#     两个都**不看顺序**、都**只在线性时间**内算完，且**不读 config**（纯函数可单测）。
+_NEAR_MISS_MIN_JACCARD = 0.8      # 词集重合度下限（0.8 ⇒ 改一个词以内）
+_NEAR_MISS_MIN_TOKENS = 3         # 名称至少 3 个词才走 Jaccard（太短的名字随便两个都"像"）
+_NEAR_MISS_MIN_LEN = 12           # 包含关系的短边至少要这么长（挡 `CD1` 这种"包含于一切"）
+
+
+def name_tokens(name):
+    """把名字切成**词级**集合（小写、按非字母数字切、去空）。
+
+    ★ 为什么按非字母数字切：`群星 - HIGH PARTY2 2005 FLAC` 与
+      `…FLAC TESTNAME` 的差别落在**词**上，不在**字符**上。
+    ★ 用 `str.isalnum()` 而不是正则 `\\w`：`\\w` 的语义随 Python 构建/Unicode 版本漂移，
+      本项目不容这种不确定（同 `musopia._SEARCH_SPLIT_RE` 的理由）。
+    """
+    if not isinstance(name, str):
+        return set()
+    out, cur = set(), []
+    for ch in unicodedata.normalize("NFC", name):
+        if ch.isalnum():
+            cur.append(ch)
+        elif cur:
+            out.add("".join(cur).lower())
+            cur = []
+    if cur:
+        out.add("".join(cur).lower())
+    return out
+
+
+def is_near_miss(a, b):
+    """两个名字是否**极像但不相等**（**仅供诊断**，见上面那段「边界」）。
+
+    判据（任一成立即算近亲，且**必须先不相等**）：
+      ① **包含**：短的一方（规范化后）是长的一方的子串，且短边长度 ≥ 12
+         —— 覆盖实测形态 `…FLAC` vs `…FLAC TESTNAME`；
+      ② **词集 Jaccard ≥ 0.8** 且两侧词数都 ≥ 3
+         —— 覆盖"换了一个词/多加一个词"。
+
+    ★ 相等 ⇒ 返回 False（相等的处置是 `compare_hosted_vs_db` 的 MATCH，不归这里）。
+    ★ 两侧任一为空 ⇒ False（无从比，别当近亲 —— 否则"名字读不出"会被报成"同名冲突"）。
+    """
+    x, y = normalize_name(a), normalize_name(b)
+    if not x or not y or x == y:
+        return False
+    short, long_ = (x, y) if len(x) <= len(y) else (y, x)
+    if len(short) >= _NEAR_MISS_MIN_LEN and short in long_:
+        return True
+    ta, tb = name_tokens(x), name_tokens(y)
+    if len(ta) < _NEAR_MISS_MIN_TOKENS or len(tb) < _NEAR_MISS_MIN_TOKENS:
+        return False
+    union = ta | tb
+    return bool(union) and (len(ta & tb) / len(union)) >= _NEAR_MISS_MIN_JACCARD
+
+
 def extract_files(torrent_bytes, *, torf_mod=None):
     """从 `.torrent` 字节里取**权威文件集**。返回 `(files_or_None, why)`。
 

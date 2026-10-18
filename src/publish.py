@@ -1108,13 +1108,168 @@ def _dedup_lookup(client, *, search_name, local_name, site_label):
               f" ⇒ {_plan}")
     except Exception as _e:                         # noqa: BLE001 —— 只影响日志，不影响查重
         print(f"    ℹ️  查重计划打印失败（不影响查重）：{_e}")
-    hit = client.find_existing_by_name(search_name, local_name=local_name)
+    # ★★（`S4` / `ERR-PUBLISH-25`）诊断累加器 —— 让"查重返回 None"带上**证据**。
+    #   ★ 为什么这是必须的：`21811` 那次站点**真的**挂着同名页，`find_existing_by_name`
+    #     却返回 `None`，调用方只印一句"未发现同版本" ⇒ 无法分辨"站点上没有"与
+    #     "站点上有、但我没搜到/没验到/预算被吃光" ⇒ 我改去猜字段，猜了三轮全错。
+    #   ★ 无证据时的合理行为是**去猜**，而猜在不可逆操作前是最贵的错。
+    _diag = {}
+    try:
+        hit = client.find_existing_by_name(search_name, local_name=local_name, diag=_diag)
+    except TypeError:
+        # ★ 兼容：站侧客户端若还是旧签名（没有 diag 参数）⇒ 退回旧调用，
+        #   绝不让"多一个诊断参数"把整个发布路径打挂（`ERR-META-01` 的反面）。
+        _diag = {}
+        hit = client.find_existing_by_name(search_name, local_name=local_name)
     if hit:
         print(f"    🔍 查重命中：{site_label} 已有同版本 ⇒ id={hit}"
               f"（本地名={local_name!r}）⇒ 关联已有页、**不再重复提交**")
     else:
         print(f"    🔍 查重：{site_label} 未发现同版本 ⇒ 照旧提交")
+        if _diag:
+            print(f"       ↳ 证据：查询 {len(_diag.get('queries') or [])} 条 / "
+                  f"候选 {_diag.get('candidates', 0)} 个 / "
+                  f"验证 {_diag.get('verified', 0)} 个")
+            if _diag.get("near_miss"):
+                _nm = "、".join(f"id={t}({n!r})" for t, n in _diag["near_miss"][:3])
+                print(f"       ⚠️  ★有名字极像但不是同版本的候选：{_nm}"
+                      f" ⇒ 提交时若被拒，优先怀疑**同名冲突**（见下一条闸门）")
+            if _diag.get("why"):
+                print(f"       ↳ {_diag['why']}")
     return hit
+
+
+# ==================== 同名冲突：提交**前**的确定性查询（`S4`）====================
+#
+# ★★ 为什么必须有这一道（`ERR-PUBLISH-25`，`21811` 实测）：
+#   NexusPHP 有**两种**「重复」，响应**完全不同**，而本方只认第一种：
+#     · 同一 infohash ⇒ HTTP 302 `details.php?id=…&existed=1`（**明确**）
+#     · 同 `info.name`、不同种 ⇒ **HTTP 200「上传失败！」**，正文零线索
+#   ⇒ 第二种在日志里长得和"必填项没填"**一模一样**。我当时据此连续怀疑了
+#     `medium_sel` / `custom_fields` / 种子损坏三件事，**全错**（`ERR-PUBLISH-25` 记了全过程）。
+#   ⇒ 真正该做的是**提交前就问**：「站点上有没有**名字撞车**的条目？」
+#     这是**只读**的一问，代价是一次搜索；而问错的代价是**不可逆**的发布。
+#
+# ★★ 判据是「同名」而**不是**「近亲」（`site_verify.is_near_miss`）：
+#   近亲只进日志、**绝不拒发**。拒发判据必须与站点的拒发判据**同构**
+#   （站点拒的正是 `info.name` 逐字相同），否则我们会拒掉站点本来会收的条目 ——
+#   少发是**静默**的，比多发更危险（多发至少站点会拒）。
+#
+# ★ 这一道是 #13 查重的**补充**，不是替代：查重回答"站点上有没有**同一版本**"，
+#   本闸门回答"有没有**同名的别的东西**"。两者都对 ⇒ 提交大概率不会被那句
+#   「上传失败」闷死；两者之一命中 ⇒ 各有明确的处置（关联 / 拒发交人）。
+
+
+def _same_name_precheck(client, *, search_name, local_name, site_label):
+    """提交**前**问一句：目标站点上有没有 `info.name` **逐字相同**的条目？
+
+    返回 `[(tid, hosted_name), …]`（**可能为空**）；**网络/解析异常向上抛**
+    （与查重同一条纪律：搜不了 ⇒ 停轮非 0，绝不把"搜不了"当"没有同名"）。
+
+    ★ 为什么复用 `client.find_existing_by_name(..., diag=…)` 而不是自己再搜一遍：
+      ① 召回（`SEARCH_QUERY_PLAN` 的多子查询、精准优先、命中即停）已经在那一处，
+         另写一份就是 `ERR-META-03`（判据漂移）的标准产地；
+      ② 它**本来就**逐条下载站侧 `.torrent` 取了 `info.name` —— 同名条目它一定见过，
+         只是**撞上就等于"同版本"**，于是走 MATCH 分支返回了。
+      ⇒ 我们只需要从 `diag` 里把"见过的名字"再取一次：`diag["same_name"]`
+         （由 `musopia.search_and_compare` 逐条填；**相等就 return 了，所以它恒为空**）。
+      ★★ 换句话说：本闸门**在正常路径上不会命中** —— 它命中的唯一情形是
+         "站点上有同名条目，但那条的名字没被读到 / 没进候选"。
+         这恰恰是 `21811` 当时的形态（本条查重返回 `None`，站点上却真有同名页）。
+      ⇒ 因此本闸门**必须有单元级证据**（自检里用假 client 造"同名但没进 MATCH 分支"的场面），
+        不能靠"生产上没见它报过"来证明它没用（那是空真）。
+    ★★ 空 `local_name` ⇒ 返回 `[]`（无从比，**不拒发**：拒发是更强的主张，不能凭空给）。
+    """
+    diag = {}
+    try:
+        hit = client.find_existing_by_name(search_name, local_name=local_name, diag=diag)
+    except TypeError:
+        # ★ 兼容：站侧客户端若还是旧签名（没有 `diag` 参数）⇒ 退回旧调用。
+        #   绝不让"多一个诊断参数"把整条发布路径打挂（`ERR-META-01` 的反面：
+        #   为了更好的检测手段，反而把被执行的主路径弄没了）。
+        #   ★ 但此时**拿不到同名证据** ⇒ 本闸门退化为"放行"，且必须说出来：
+        #     静默放行会让人以为"闸门查过了、没问题"。
+        print("    ℹ️  同名预检：站侧客户端不支持 diag ⇒ 本次**查不了**（按放行处理）")
+        diag = {}
+        hit = client.find_existing_by_name(search_name, local_name=local_name)
+    if hit:
+        # 连"同版本"都命中 ⇒ 调用方本该走"关联已有页"分支（这里只是兜底）。
+        return [(str(hit), diag.get("local_name") or local_name)]
+    out = list(diag.get("same_name") or [])
+    if out:
+        print(f"    ⚠️  同名预检：{site_label} 上已有 info.name 逐字相同的条目 "
+              f"{'、'.join(f'id={t}({n!r})' for t, n in out[:3])}")
+    return out
+
+
+# ==================== 被拒后的**分诊**（`S4` / `ERR-PUBLISH-25`）====================
+#
+# ★★ 为什么这不是"日志美化"：`ERR-PUBLISH-25` 的全部代价都花在**分诊错误**上。
+#   站点对"同名冲突"和"字段没填"回的是**同一句**「上传失败！」，
+#   我当时把它读成"字段没填"，于是改 `medium_sel` → 拆 `custom_fields` → 重新制种，
+#   三轮全错，每次都靠"再来一次真发种"验证 —— 而重跑 = 一次**不可逆**的写。
+#   ⇒ 分诊的作用是：**把"下一次该查什么"从猜测变成结论**，并且写进 `reason` 落库，
+#     让它在日志滚动之后仍然可查。
+#
+# ★ 判据必须**能被证伪**：这里只做"按站点文案归类 + 指出最可能的成因"，
+#   **不**声称"就是它" —— 真正的裁决仍是 `_same_name_precheck` 的**事先**查询
+#   （它若命中，本条根本走不到这里）。所以下面每条都同时说"下一步怎么验证"。
+
+# ★ 站点文案 → 分诊类别。**精确匹配优先**（同一句话在不同站有不同含义时，
+#   按"先到先得"会随字典顺序漂 —— 本项目不容这种不确定，故用有序元组）。
+_REJECT_HINTS = (
+    ("同名冲突", ("上传失败",),       # NexusPHP 对"同 info.name 不同种"的通用文案
+     "站点上有 info.name 逐字相同的条目。验证：用另一个**已知能发**的种子"
+     "打同一套字段 ⇒ 若 302 则字段无罪（ERR-PUBLISH-25 的决定性对照）；"
+     "或在站点搜该 info.name。"),
+    ("必填项缺失", ("请选择", "未选择", "必须选择", "不能为空", "请填写"),
+     "表单某格为空（常见：medium_sel/audiocodec_sel/tags 的**分区下标**错了 —— "
+     "`[4]` 音乐区 vs `[7]` 视频区）。验证：`python tools/preview_form.py` 看渲染出的值。"),
+    ("权限/配额", ("权限", "不允许", "配额", "超过", "无权", "没有权限"),
+     "账号侧限制。验证：看 `check_login` 的 user_id 与站点个人页的今日发种计数。"),
+    ("种子被拒", ("无效", "不是合法的", "种子文件", "torrent", "无法识别"),
+     "上传的 .torrent 本身被拒。验证：本地 `torch`/`torf` 读一遍 + 逐片自校验。"),
+)
+
+
+def _diag_kind(msg):
+    """把站点消息归类成一个**短标签**（落库用）。未知 ⇒ `"未分类"`。
+
+    ★ 只认**机器可读前缀先于文案**：`SITE_DOWN:`/`UNKNOWN:` 已在上层分流，
+      走到这里的一定是"这条被拒"，所以这里只分**为什么**被拒。
+    """
+    s = msg or ""
+    for kind, needles, _advice in _REJECT_HINTS:
+        if any(n in s for n in needles):
+            return kind
+    return "未分类"
+
+
+def _diagnose_upload_reject(msg, *, local_name=""):
+    """给"这条被拒"写一句**下一步该查什么**。返回人话字符串（落进 `reason`）。
+
+    ★ 入参 `local_name` 只用于把"我们要发的 info.name"写进结论 ——
+      同名冲突的排查**必须有这个值**，否则到了站点上还得再翻一次库。
+
+    ★★ 未知文案**不猜**：返回"文案无已知特征"并**列出**可做的三步对照，
+      而不是硬套一个类别。硬套就是 `ERR-META-01` 那个形状
+      （"检测手段只覆盖一部分，于是'结论'看起来总是有的"）。
+    """
+    s = (msg or "").strip()
+    kind = _diag_kind(s)
+    for k, _needles, advice in _REJECT_HINTS:
+        if k == kind:
+            if k == "同名冲突":
+                return f"{advice} 本方要发的 info.name = {local_name!r}"
+            return advice
+    return ("站点文案无已知特征（不是本表覆盖的任何一类）⇒ **不要**顺着文案猜字段。"
+            "按 ERR-PUBLISH-25 的顺序做三步对照："
+            "① 换一个**已知发过**的种子打同一套字段（302 ⇒ 字段无罪）；"
+            "② 只改 `info.name` 再发一次（302 ⇒ 是**同名冲突**）；"
+            "③ 用盘上数据重新制种（infohash 不变 ⇒ 不是种子坏了）。"
+            f" 本方要发的 info.name = {local_name!r}")
+
+
 
 
 class CoverItemError(Exception):
@@ -2375,10 +2530,11 @@ def run_crabpt(args):
         #     **绝不碰** `site_status`/`site_torrent_id`（那是乌托邦的两列，见下）；
         #     未命中 ⇒ 照旧提交；出错 ⇒ 停轮非 0（`site_down`）。
         if config.DEDUP_BEFORE_PUBLISH:
+            _local_nm = _local_info_name(t)
             try:
                 _hit = _dedup_lookup(client,
                                      search_name=t.get("formatted_title"),
-                                     local_name=_local_info_name(t),
+                                     local_name=_local_nm,
                                      site_label="蟹黄堡")
             except LoginExpired as e:
                 print(f"    🛑 查重时登录失效，停止本轮（不标 FAILED）: {e}")
@@ -2400,6 +2556,23 @@ def run_crabpt(args):
                 db.mark_synced(t["info_hash"])
                 dup_existing += 1
                 print("    ✅ 已关联到蟹黄堡已有页（未重复提交）。")
+                continue
+
+            # ★★ 同名闸门（`S4` / `ERR-PUBLISH-25`）—— 与乌托邦**同一处判据、同一套处置**
+            #   （`ERR-META-03`：两站共用，绝不各写一份）。
+            #   ★ 蟹黄堡不命中时的表现是 `UNKNOWN:`（"可能真发成功了"，不许当 REJECT），
+            #     比乌托邦的「上传失败」更不可判 ⇒ 这一问在这里的价值更高。
+            _sn = _same_name_precheck(client, search_name=t.get("formatted_title"),
+                                      local_name=_local_nm, site_label="蟹黄堡")
+            if _sn:
+                _why = (f"同名冲突：蟹黄堡上已有 info.name 逐字相同的条目 "
+                        f"{'、'.join(tid for tid, _ in _sn[:3])} ⇒ 提交会被静默吞掉。"
+                        f"处置：先在站点删掉那条旧页，再重发（`tools/republish_one.py`）")
+                print(f"    🛑 同名闸门不通过 ⇒ 拒发：{_why}")
+                fail += 1
+                rejected += 1
+                db.save_task(info_hash=t["info_hash"], status="FAILED",
+                             reason=f"crabpt_same_name_conflict: {_why}")
                 continue
 
         # ★★★ 发种前**版本一致性闸门**（2026-10-14，`ERR-PUBLISH-20` 修复③）——
@@ -2454,10 +2627,15 @@ def run_crabpt(args):
             # 明确 REJECT（`REJECT:` 前缀）：内容被站点拒 ⇒ 标 FAILED 出队
             #   （`CRABPT_QUEUE_WHERE` 不含 FAILED ⇒ 立刻出队）+ 继续发下一条。
             if msg.startswith("REJECT:"):
+                # ★★（`S4`）与乌托邦同款分诊 —— 两站共用同一份判据与措辞
+                #   （`ERR-META-03`：一处生效，绝不各写一份）。
+                _why_c = _diagnose_upload_reject(msg, local_name=_local_nm)
                 print(f"    ❌ 发布被拒（本条标 FAILED 出队，继续下一条）: {msg}")
+                print(f"       ↳ 分诊：{_why_c}")
                 rejected += 1
                 db.save_task(info_hash=t["info_hash"], status="FAILED",
-                             reason=f"crabpt_publish_rejected: {msg}")
+                             reason=(f"crabpt_publish_rejected[{_diag_kind(msg)}]: "
+                                     f"{msg} | 分诊:{_why_c}"))
                 continue
 
             # ★ 兜底：**没见过**的前缀 ⇒ 归到"停 + 非 0 + 要人核对"（安全侧）。
@@ -2611,6 +2789,24 @@ def selftest_dedup_before_publish(verbose=True):
             detail.append(f"① {fname}：先 `_dedup_lookup`（行 {dedup_line}）"
                           f"后 `upload_torrent`（行 {upload_line}）✅")
 
+    # ---------- ①b（S4）结构性：同名闸门必须在 `upload_torrent` 之前 ----------
+    #   ★ 与 ① 同一条纪律：这个闸门**删掉也不会报错**（站点会自己拒，只是用那句
+    #     零线索的「上传失败」） ⇒ 不钉住就会静默失效。
+    for fname in ("main", "run_crabpt"):
+        fn = _fn_node(fname)
+        if fn is None:
+            continue                            # 上面已经记过 fails 了
+        sn_line = _call_lineno(fn, "_same_name_precheck")
+        upload_line = _call_lineno(fn, "upload_torrent")
+        if sn_line is None:
+            fails.append(f"★★ {fname} 里**没有**调 `_same_name_precheck` ⇒ 同名冲突"
+                         f"又会以『上传失败』的形式闷在通用文案里（ERR-PUBLISH-25）")
+        elif upload_line is not None and sn_line > upload_line:
+            fails.append(f"★★ {fname} 里同名闸门（行 {sn_line}）在 `upload_torrent`"
+                         f"（行 {upload_line}）**之后** ⇒ 闸门太晚（种已发出去）")
+        else:
+            detail.append(f"①b {fname}：同名闸门（行 {sn_line}）在 upload（行 {upload_line}）之前 ✅")
+
     # ---------- ② 结构性：命中分支必须 `continue`（不许落到提交）----------
     #   ★ 判据：源码里命中分支的那段**必须**含 `continue`，且**不**含 `upload_torrent`。
     #   ★ 用**源码文本**（不是 AST unparse）—— 这里要的是"那段长什么样"，
@@ -2697,11 +2893,12 @@ def selftest_dedup_before_publish(verbose=True):
             return self.hit_map.get(tid)
 
         def find_existing_by_name(self, name, *, local_name, base_path="/torrents.php",
-                                  max_candidates=8):
+                                  max_candidates=8, diag=None):
             # ★ 夹具显式给 8（镜像生产旧默认）；生产走 config（`find_existing_by_name` 默认 None）。
             return musopia.search_and_compare(self, name, local_name=local_name,
                                               base_path=base_path,
-                                              max_candidates=max_candidates)
+                                              max_candidates=max_candidates,
+                                              diag=diag)
 
     # ---- #23 核心：AND-语义假站点上，「单串」必须**漏**、「多子查询」必须**中** ----
     # 本地名与站点标题共享 token：`Stravinsky`、`Chamber`、`Works`、`2024`（站侧标题里也有）。
@@ -2920,6 +3117,115 @@ def selftest_dedup_before_publish(verbose=True):
             detail.append("③ `_dedup_lookup` 开关关 ⇒ 短路 None（旧行为）✅")
     finally:
         config.DEDUP_BEFORE_PUBLISH = _saved
+
+    # ---------- ④（S4 / ERR-PUBLISH-25）同名闸门 + 被拒分诊 ----------
+    #
+    # ★★ 为什么这些判据必须存在（而不是"生产上没见过它报"就算数）：
+    #   `_same_name_precheck` 在**正常路径上永远返回空**（同名 ⇒ 查重已 MATCH ⇒ 走了
+    #   "关联已有页"分支）。它命中的唯一场面是"站点上有同名条目，但那条**没进候选**"——
+    #   这正是 `21811` 的真实形态。⇒ 生产日志里看不到它命中，**恰恰是它没被验证过**，
+    #   不能当成"它没问题"（那是空真，`ERR-META-32`）。
+    #   ⇒ 必须用假 client **造**这个场面，并证明它**真的能被拒**（有阳性对照）。
+    # ★ `_diag_kind`/`_diagnose_upload_reject` 同理：文案归类错了不会报错、不会崩，
+    #   只会**安静地把人引向错的排查方向**（`ERR-PUBLISH-25` 的全部代价）。⇒ 逐类钉住。
+
+    # 阳性：假 client 报"站点上有同名条目"（走新签名的 diag 通道）
+    class _SameNameFake(_Fake):
+        def find_existing_by_name(self, name, *, local_name, base_path="/torrents.php",
+                                  max_candidates=None, diag=None):
+            # ★ 只模拟"站上真有同名条目"的**结论**：查重没命中（None），
+            #   但 diag 里带着同名的 tid —— 正是 21811 那个局面的最小复刻。
+            if diag is not None:
+                diag["same_name"] = [("21811", local_name)]
+                diag["local_name"] = local_name
+            return None
+
+    _sn = _same_name_precheck(_SameNameFake({}), search_name=_one, local_name=_one,
+                              site_label="测试站")
+    if not (_sn and _sn[0][0] == "21811"):
+        fails.append(f"★★ 同名闸门：假客户端的同名条目没被识别出来（得到 {_sn!r}）"
+                     f" ⇒ 21811 那种『上传失败』仍会闷死在通用文案里")
+    else:
+        detail.append("④ 同名闸门：站点上有同名条目 ⇒ 识别为冲突 ✅")
+
+    # ★ 阴性对照：站点上**没有**同名条目 ⇒ 必须返回空（否则闸门会拒掉本来能发的条目）
+    _sn2 = _same_name_precheck(_Fake({"5998": _tb("Some Other Album")},
+                                     site_title="Some Other Album x"),
+                               search_name="Some Other Album",
+                               local_name=_one, site_label="测试站")
+    if _sn2:
+        fails.append(f"★★ 阴性对照：站点上没有同名条目，闸门却报冲突 {_sn2!r}"
+                     f" ⇒ 会拒发站点本来会收的条目（少发是静默的，比多发危险）")
+    else:
+        detail.append("④ ★ 阴性对照：无同名 ⇒ 闸门放行 ✅")
+
+    # ★★ 近亲 ≠ 同名（`site_verify.is_near_miss` 的边界）：近亲**只进日志**、
+    #   **绝不**进 `same_name` ⇒ 绝不拒发。这条是上面阴性对照的加强版：
+    #   名字"极像"（只多一个词）仍必须放行，否则闸门会大面积误杀。
+    if site_verify.is_near_miss(_one, _one + " TESTNAME"):
+        detail.append("④ 近亲判据能认出『同名加尾缀』✅")
+    else:
+        fails.append("★ 近亲判据认不出『同名加尾缀』 ⇒ near_miss 诊断失效")
+
+    class _NearOnlyFake(_Fake):
+        """只报「近亲」，**不**报「同名」—— 闸门必须**放行**。"""
+        def find_existing_by_name(self, name, *, local_name, base_path="/torrents.php",
+                                  max_candidates=None, diag=None):
+            if diag is not None:
+                diag["local_name"] = local_name
+                diag["near_miss"] = [("777", local_name + " TESTNAME")]
+            return None
+
+    if _same_name_precheck(_NearOnlyFake({}), search_name=_one, local_name=_one,
+                           site_label="测试站"):
+        fails.append("★★ 近亲（非同名）竟被判成同名冲突 ⇒ 会拒发站点本来会收的条目"
+                     "（少发是**静默**的，比多发危险 —— ERR-PUBLISH-25 的边界）")
+    else:
+        detail.append("④ ★ 近亲（非同名）⇒ **不**判冲突 ✅")
+
+    # ★★★ 上面 `_NearOnlyFake` 是**桩**：它直接伪造 `diag["near_miss"]`，
+    #   因此**结构上查不出** `musopia.search_and_compare` 把近亲塞进 `same_name` 的错误
+    #   （实测：把 musopia 里那句改成 `diag["same_name"].append(...)`，上面两条**全绿**）。
+    #   ⇒ 必须再走一遍**真实**的 `search_and_compare`（用 `_Fake` 假站点），
+    #     让 musopia **自己**决定往哪个桶里放。这才是这条边界的真正判据。
+    # ★ 造场面：本地名 = `_one`，站点上挂的是**多一个词**的 `_one + " TESTNAME"`。
+    #   两者不相等 ⇒ 查重返回 None ⇒ 走"记 diag"这条路（正是我们要验的）。
+    #   ★★ `target_tid` 必须**显式**给，并与 `hit_map` 的键一致 —— `_Fake.get` 吐的
+    #     链接永远指向 `self.target_tid`（默认 `"5998"`）。第一次写这条判据时我漏了它，
+    #     于是 `download_torrent("5998")` 取不到 ⇒ 静默跳过 ⇒ `near_miss` 恒空 ⇒
+    #     **判据红在一个与它无关的理由上**（这类"夹具自己配错"最容易把测试写成假绿/假红）。
+    _real_diag = {}
+    _rr = musopia.search_and_compare(_Fake({"777": _tb(_one + " TESTNAME")},
+                                           site_title=(_one + " TESTNAME") + " x",
+                                           target_tid="777"),
+                                     _one, local_name=_one, diag=_real_diag)
+    if _real_diag.get("same_name"):
+        fails.append(f"★★ 真实 `search_and_compare` 把**近亲**（不是同名）放进了 "
+                     f"`same_name` {_real_diag['same_name']!r} ⇒ 同名闸门会大面积误杀"
+                     f"（这是桩测试查不出的：桩直接伪造了桶）")
+    elif not _real_diag.get("near_miss"):
+        fails.append("★ 真实 `search_and_compare` 没把近亲记进 `near_miss` ⇒ "
+                     "诊断证据为零（21811 那种『查重说没有、站点上偏有』又无从解释）")
+    else:
+        detail.append("④ ★ 真实路径：近亲只进 `near_miss`、**不**进 `same_name` ✅")
+
+    # 分诊：四类文案各归各类，且未知文案**不**硬套类别
+    for _msg, _want in (("REJECT: 音乐乌托邦 :: 上传失败！", "同名冲突"),
+                        ("REJECT: 请选择类别", "必填项缺失"),
+                        ("REJECT: 你没有权限发布", "权限/配额"),
+                        ("REJECT: 无效的种子文件", "种子被拒"),
+                        ("REJECT: 站点说了句没有特征的话", "未分类")):
+        _got = _diag_kind(_msg)
+        if _got != _want:
+            fails.append(f"★ 分诊错：{_msg!r} 归成 {_got!r}，应为 {_want!r}")
+    if _diag_kind("REJECT: 音乐乌托邦 :: 上传失败！") == "同名冲突":
+        detail.append("④ 「上传失败」⇒ 分诊为**同名冲突**（不是字段）✅")
+    # ★ 未知文案的结论里必须**带上三步对照法**、且**不许**自称已定位
+    _unk = _diagnose_upload_reject("REJECT: 站点说了句没有特征的话", local_name=_one)
+    if "三步对照" not in _unk or "info.name" not in _unk:
+        fails.append("★★ 未知文案的分诊没给出下一步动作 ⇒ 又会去猜字段（ERR-PUBLISH-25 重演）")
+    else:
+        detail.append("④ 未知文案 ⇒ 给出三步对照法 + 要发的 info.name ✅")
 
     ok = not fails
     if verbose:
@@ -3372,10 +3678,11 @@ def main():
         #     · 出错（`LoginExpired`/`SiteError`，含"搜索 HTTP≠200"）⇒ **停轮 + 非 0**
         #       （`site_down=True`），**绝不**把"搜不了"当"没重复"照发。
         if config.DEDUP_BEFORE_PUBLISH:
+            _local_nm = _local_info_name(task)
             try:
                 _hit = _dedup_lookup(client,
                                      search_name=title,
-                                     local_name=_local_info_name(task),
+                                     local_name=_local_nm,
                                      site_label="乌托邦")
             except LoginExpired as e:
                 print(f"    🛑 查重时登录失效，停止本轮（不标 FAILED）: {e}")
@@ -3400,6 +3707,25 @@ def main():
                 db.mark_synced(task["info_hash"])
                 dup_existing += 1
                 print("    ✅ 已关联到站点已有页（未重复提交）。")
+                continue
+
+            # ★★★ 提交**前**的同名闸门（`S4` / `ERR-PUBLISH-25`）——
+            #   查重回答"有没有同一版本"；本闸门回答"有没有**同名的别的东西**"。
+            #   ★ 站点对后者的处置是 HTTP 200「上传失败！」（零线索），
+            #     而我当时据此猜了三轮字段、全错 ⇒ 现在改成**事先问清楚**。
+            #   ★ 命中 ⇒ **拒发 + 标 FAILED 出队**（同"被拒"处置）：不可逆动作前的
+            #     一声"停"，代价只是少发一条且**当轮可见**；猜错的代价是不可逆。
+            _sn = _same_name_precheck(client, search_name=title,
+                                      local_name=_local_nm, site_label="乌托邦")
+            if _sn:
+                _why = (f"同名冲突：站点上已有 info.name 逐字相同的条目 "
+                        f"{'、'.join(t for t, _ in _sn[:3])} ⇒ 提交必被「上传失败」拒。"
+                        f"处置：先在站点删掉那条旧页，再重发（`tools/republish_one.py`）")
+                print(f"    🛑 同名闸门不通过 ⇒ 拒发：{_why}")
+                fail += 1
+                rejected += 1
+                db.save_task(info_hash=task["info_hash"], status="FAILED",
+                             reason=f"same_name_conflict: {_why}")
                 continue
 
         # ★★★ 发种前**版本一致性闸门**（2026-10-14，`ERR-PUBLISH-20` 修复③）——
@@ -3452,11 +3778,18 @@ def main():
             #   ⇒ 队列自然推进，不会每条都卡在同一条上。
             #   `FAILED ∈ PROTECTED_STATUSES` ⇒ scan 重扫不会把它冲回 SUCCESS。
             #   （这与 2026-10-04 应急时手动做的那步是**同一动作**，此处自动化。）
+            # ★★★（`S4` / `ERR-PUBLISH-25`）**先诊断再落库**：
+            #   站点那句「上传失败！」对**字段错**与**同名冲突**用的是**同一句话**，
+            #   一律记成 `publish_failed: …` 等于把两种相反处置的分诊线索丢在日志里。
+            #   ⇒ 落库 reason 必须写明**我们判断是哪一类**，否则下一个看日志的人
+            #     （很可能是我）又会顺着文案去猜字段（`ERR-PUBLISH-25` 记了三轮全错的经过）。
+            _diag_why = _diagnose_upload_reject(msg, local_name=_local_nm)
             print(f"    ❌ 发布被拒（本条标 FAILED 出队，继续下一条）: {msg}")
+            print(f"       ↳ 分诊：{_diag_why}")
             fail += 1
             rejected += 1
             db.save_task(info_hash=task["info_hash"], status="FAILED",
-                         reason=f"publish_failed: {msg}")
+                         reason=f"publish_failed[{_diag_kind(msg)}]: {msg} | 分诊:{_diag_why}")
             continue
 
         ok += 1

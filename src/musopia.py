@@ -507,7 +507,7 @@ class MusopiaClient:
     # ---------- 发布前跨站查重（#13 / #11 核心）----------
 
     def find_existing_by_name(self, name, *, local_name, base_path="/torrents.php",
-                              max_candidates=None):
+                              max_candidates=None, diag=None):
         """在**本站全站范围**搜 `name`，返回**已存在同版本**的 tid；没有则返回 `None`。
 
         ═══════════════════════════════════════════════════════════════════════
@@ -556,7 +556,8 @@ class MusopiaClient:
         :return: 命中的 tid（`str`）或 `None`。
         """
         return search_and_compare(self, name, local_name=local_name,
-                                  base_path=base_path, max_candidates=max_candidates)
+                                  base_path=base_path, max_candidates=max_candidates,
+                                  diag=diag)
 
     @staticmethod
     def SEARCH_PARAMS(name):
@@ -820,7 +821,7 @@ def SEARCH_QUERY_PLAN(local_name, *, search_name="", max_queries=5):
 
 
 def search_and_compare(client, name, *, local_name, base_path="/torrents.php",
-                       max_candidates=None, max_queries=None):
+                       max_candidates=None, max_queries=None, diag=None):
     """**两站共用**的查重核心（`ERR-META-03`：一处生效、两站不漂）。
 
     `client` 需提供：`.get(path, params=…)`、`.download_torrent(tid)`、
@@ -840,12 +841,40 @@ def search_and_compare(client, name, *, local_name, base_path="/torrents.php",
       绝不被宽扇出查询的噪声吃光（旧形状的 13/20→11/20 亏损即此）。
     :param max_queries: 子查询条数上限；`None` ⇒ 读 `config.DEDUP_MAX_SEARCH_QUERIES`
       （读不到时兜底 5）；`<=0` ⇒ 只发 `name` 一条（旧行为）。
+    :param diag: ★（`ERR-PUBLISH-25` / `S4`）可选的**诊断累加器**（`dict`）。传入则本函数
+      往里记「为啥返回 None」的可解释证据：`queries`（发过的查询）/ `candidates`（见过的候选数）/
+      `verified`（已花预算验证的候选数）/ `near_miss`（**不是**同版本、但**名字像**的候选 `[(tid,name)]`）。
+      ★ 为什么必须记 `near_miss`：`21811` 那次站点**真的**有一条同 `info.name` 的页，
+        本函数却返回 `None` —— 而调用方只看到一句"未发现同版本"，**无法分辨**
+        「查得窄了/预算被噪声吃了/站点标题排序把它挤出去了」。没有这份证据时，
+        唯一出路就是像我当时那样去猜字段（猜了三轮全错）。
+      ★ 不传 ⇒ 行为**逐字不变**（旧调用方零回归）。
     :return: 命中的 tid（`str`）或 `None`（搜到了但不重复 / `local_name` 为空无从比）。
     """
     import site_verify
 
+    # ★（`S4` / `ERR-PUBLISH-25`）诊断累加器：**不传则零改动**。传了就一路记证据，
+    #   让"返回 None"从一句无法反驳的话变成一份可核对的账。
+    if diag is not None:
+        diag.setdefault("queries", [])
+        diag.setdefault("candidates", 0)
+        diag.setdefault("verified", 0)
+        diag.setdefault("near_miss", [])
+        # ★★ `same_name` = 站点上 `info.name` 与 local_name **规范化后逐字相同**、
+        #   却**没进** MATCH 分支的条目。正常路径下它恒为空（相等就 `return tid` 了）；
+        #   能出现只有一种成因：`compare_hosted_vs_db` 返回了 `NO_DB_NAME`
+        #   （`normalize_name` 的一侧为空，理论上与"相等"互斥 ⇒ 防御性记录）。
+        #   ★ 保留它，是要让 `publish._same_name_precheck` 的判据**显式**：
+        #     它读 `same_name`，**不**去把 `near_miss` 当同名用 ——
+        #     混用两者 = 把"极像"当"相同" ⇒ 会拒发站点本来会收的条目
+        #     （少发是静默的，`ERR-PUBLISH-25` 的教训）。
+        diag.setdefault("same_name", [])
+        diag["local_name"] = local_name
+
     if not local_name:
         # 没有本地权威名 ⇒ 无从比 ⇒ 如实返回 None（不是"没重复"，是"比不了"）。
+        if diag is not None:
+            diag["why"] = "local_name 为空 ⇒ 无从比（不是'没重复'）"
         return None
 
     if max_queries is None:
@@ -863,6 +892,8 @@ def search_and_compare(client, name, *, local_name, base_path="/torrents.php",
     plan = SEARCH_QUERY_PLAN(local_name, search_name=name, max_queries=max_queries)
     if not plan:
         # 无串可搜（本地名切完为空且没兜底串）⇒ 不是"没重复"，是"搜不了" ⇒ None。
+        if diag is not None:
+            diag["why"] = "查询计划为空 ⇒ 搜不了（不是'没重复'）"
         return None
 
     sp = getattr(client, "SEARCH_PARAMS", None)
@@ -884,6 +915,8 @@ def search_and_compare(client, name, *, local_name, base_path="/torrents.php",
     for q in plan:
         params = sp(q) if callable(sp) else SEARCH_PARAMS(q)
         r = client.get(base_path, params=params)
+        if diag is not None:
+            diag["queries"].append(q)
         if r.status_code != 200:
             # ★ 纪律：**任一**子查询非 200 ⇒ 抛（"搜不了"绝不静默降级成"没重复"）。
             raise SiteError(f"查重搜索失败：{base_path}?search=… HTTP {r.status_code}")
@@ -899,6 +932,8 @@ def search_and_compare(client, name, *, local_name, base_path="/torrents.php",
                 continue
             seen.add(tid)
             fresh.append(tid)
+        if diag is not None:
+            diag["candidates"] = len(seen)
 
         room = max_candidates - verified
         for tid in fresh[:max(0, room)]:
@@ -918,6 +953,31 @@ def search_and_compare(client, name, *, local_name, base_path="/torrents.php",
             if verdict == site_verify.MATCH:
                 return tid                 # ★ 命中 ⇒ 即停（后续宽查询不再发）
             # MISMATCH/NO_DB_NAME ⇒ 不是这条 ⇒ 继续试下一个候选
+            # ★（`S4` / `ERR-PUBLISH-25`）两条**互斥**的旁证，都**只记不判**（见 diag 的 docstring）：
+            #   ① `same_name`：规范化后**逐字相同**却没进 MATCH 分支 ——
+            #      只有 `NO_DB_NAME`（读不出名字）能造成这种局面。这是真·同名冲突证据。
+            #   ② `near_miss`：**极像但不等** —— 说明站点上有近亲条目，
+            #      提交被拒时优先怀疑同名/近名冲突，而不是字段。
+            if diag is not None:
+                if site_verify.normalize_name(hosted) == site_verify.normalize_name(local_name):
+                    diag["same_name"].append((tid, hosted))
+                elif site_verify.is_near_miss(local_name, hosted):
+                    diag["near_miss"].append((tid, hosted))
+    if diag is not None:
+        diag["verified"] = verified
+        if diag["same_name"]:
+            diag["why"] = (f"★站点上有 info.name **逐字相同**的条目 "
+                           f"{[t for t, _ in diag['same_name']]}（但未进 MATCH 判定，"
+                           f"见同名校验）⇒ 提交**必被**「上传失败」拒")
+        elif diag["near_miss"]:
+            diag["why"] = (f"有 {len(diag['near_miss'])} 条**名字极像但不是同版本**的候选"
+                           f"（同 info.name 判定仍为不匹配）⇒ 很像同名冲突")
+        elif verified >= max_candidates:
+            diag["why"] = (f"预算被吃光（verified={verified} ≥ max_candidates={max_candidates}）"
+                           f"⇒ 真目标可能**没被验到**")
+        else:
+            diag["why"] = ("搜到了、逐条比过都不重复，且没有名字相近的候选"
+                           "⇒ 站点上确实没有同版本/同名条目")
     return None                            # 搜到了、但不重复
 
 

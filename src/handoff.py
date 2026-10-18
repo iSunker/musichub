@@ -274,16 +274,160 @@ def _dir_total_bytes(path):
         return -1
 
 
-def verify_publish_area_complete(src_path, album_name):
-    """★★★ 判据：`src_path`(HDD 源) 是否**逐字节**已复制到发种区 `<PUBLISH_CONTAINER_DIR>/<专辑>`。
+# ==================== 逐片校验（`S6` / `ERR-PUBLISH-23`）====================
+#
+# ★★ 为什么"文件数 + 总字节数"不够（`ERR-PUBLISH-23`，`21811` 实测）：
+#   那条种在站点上 44 个文件、盘上 44 个文件、**逐文件字节数一个不差**、
+#   `du -sb` 两边同为 `954748123` —— 按"文件数+字节数"判据**完全就位**。
+#   但按 torrent 自己声明的顺序逐片校验：**ok=49 / bad=407**，qB 永远 `progress<1`。
+#   ⇒ **字节数相同是必要条件，不是充分条件**：同名同长、内容可以完全不同；
+#     更隐蔽的是**拼接顺序**不同 —— 每个文件都对，拼起来的分片全错位。
+# ⇒ 唯一的强判据是**逐片比 hash**（片长由 torrent 自己声明，别假设）。
+#   ★ 这一步是纯本地读盘，但要读**全部字节** ⇒ 只在"文件数+字节数已过"之后做，
+#     即"已经很像对了"的时候才花这个钱（顺序不能反：先用便宜判据筛，再用贵的确认）。
+
+
+def _file_piece_hashes(path, piece_length, *, _chunk=1 << 20):
+    """按 1 MiB 读这个文件、产出它与前文**同一个跨文件哈希流**的片段。
+
+    ★ 为什么要做成**生成器**而不是"返回 sha1"：bittorrent 的分片是**跨文件连续**的
+      （一片可以横跨两个文件）。⇒ 必须让调用方按 torrent 声明的**文件顺序**把
+      所有字节串进同一个 hasher，中途只在"凑满一片"时切一刀。
+      ⇒ 本函数只负责吐字节块，**切片的时机归调用方**（顺序错在调用方，不该在这里藏）。
+    ★ 读不出 ⇒ 抛 `OSError`（调用方转成"校验不了"，绝不静默当通过）。
+    """
+    with open(path, "rb") as fh:
+        while True:
+            b = fh.read(_chunk)
+            if not b:
+                return
+            yield b
+
+
+def verify_pieces(src_path, torrent_bytes, *, max_pieces=None):
+    """按 `torrent_bytes` 自己声明的**文件顺序 + 片长**逐片比对 `src_path` 的字节。返回 `(ok, 说明)`。
+
+    ★★ 这是 `ERR-PUBLISH-23` 落地的那条强判据：**文件集合/字节数相同推不出分片相同**。
+      ⇒ 判据 MUST 是「按 torrent 的顺序把字节串起来，逐片算 sha1，与 torrent 里的
+        `pieces` 逐片比对」，全对才算"这个目录能做出这个种"。
+
+    ★★★ 路径拼接的两个坑（同一个坑踩了三次，`ERR-PUBLISH-23`）：
+      ① `torf` 的 `str(f)` **已含顶层目录名**；`metainfo['info']['files'][i]['path']`
+         **不含**。本函数用 `info['files']` 的 `path` 列表 ⇒ 需要 `join(root, name, *path)`。
+      ② 单文件种没有 `info['files']`，路径就是 `join(root, info['name'])`。
+      ⇒ 两种形状分开处理，**不许**用"试着找一下"的模糊逻辑（那会把"找不到"变成"猜对了"）。
+
+    :param src_path: **发种区的根** —— 即 `join(PUBLISH_CONTAINER_DIR, album_name)`
+        （★ 不是 HDD 源；源的路径形状可能完全不同，本函数只验"发种区这份能不能做出这个种"）。
+    :param torrent_bytes: `.torrent` 的原始字节（需要 `pieces`/`piece length`/`name`/`files`）。
+    :param max_pieces: 只验前 N 片（`None` = 全验）。★ 调试/大种时用来限时；
+        **生产必须传 `None`**（验一半的判据不是判据）。
+    :return: `(True, "…")` 全部对上；`(False, "…")` 有错/读不出 —— 说明里带**第一个错片的下标**。
+    """
+    import hashlib
+
+    import torf
+    try:
+        t = torf.Torrent.read_stream(io.BytesIO(torrent_bytes))
+    except Exception as e:                                   # noqa: BLE001
+        return False, f"解析种子失败：{type(e).__name__}: {e}"
+    info = t.metainfo.get("info") or {}
+    try:
+        piece_length = int(info["piece length"])
+        pieces = info["pieces"]
+        name = info["name"]
+    except (KeyError, TypeError, ValueError) as e:
+        return False, f"种子里缺必要字段：{e}"
+    if piece_length <= 0:
+        return False, f"片长为非正数：{piece_length}"
+
+    # ---- 按 torrent 自己声明的顺序，列出 (绝对路径, 字节数) ----
+    files = info.get("files")
+    entries = []
+    if files:
+        for i, f in enumerate(files):
+            parts = f.get("path") or []
+            length = f.get("length")
+            if length is None:
+                # ★ BEP47 padding 文件（`attr: p`）没有 length？实际有；这里只挡住畸形。
+                return False, f"文件表第 {i} 项没有 length ⇒ 无法校验"
+            entries.append((os.path.join(src_path, name, *parts), int(length)))
+    else:
+        entries.append((os.path.join(src_path, name), int(info.get("length") or 0)))
+
+    # ---- 先把"文件在不在、长度对不对"过一遍（便宜判据先走）----
+    for abspath, length in entries:
+        if not os.path.isfile(abspath):
+            return False, f"发种区缺文件：{abspath}"
+        try:
+            got = os.path.getsize(abspath)
+        except OSError as e:
+            return False, f"读不到文件大小（{abspath}）：{e}"
+        if got != length:
+            return False, (f"文件长度不符：{abspath}（种 {length} / 盘 {got}）"
+                           f" ⇒ 拼接起来必然错片")
+
+    # ---- 逐片比对 ----
+    want = len(pieces) // 20
+    if max_pieces is not None:
+        want = min(want, max(0, int(max_pieces)))
+    buf = bytearray()
+    idx = 0
+    h = hashlib.sha1()
+    for abspath, _length in entries:
+        try:
+            for chunk in _file_piece_hashes(abspath, piece_length):
+                pos = 0
+                while pos < len(chunk):
+                    need = piece_length - len(buf)
+                    take = chunk[pos:pos + need]
+                    buf += take
+                    h.update(take)
+                    pos += len(take)
+                    if len(buf) == piece_length:
+                        if h.digest() != pieces[idx * 20:(idx + 1) * 20]:
+                            return False, (f"第 {idx} 片对不上（torrent 声明片长 {piece_length}）"
+                                           f" ⇒ 这个目录做不出这个种")
+                        idx += 1
+                        h = hashlib.sha1()
+                        buf = bytearray()
+                        if idx >= want:
+                            label = (f"前 {idx} 片" if max_pieces is not None else f"{idx} 片")
+                            return True, f"逐片校验通过（{label}）"
+        except OSError as e:
+            return False, f"读文件失败（{abspath}）：{e}"
+    # 尾部不满一片的情况：bittorrent 也把它算作最后一片
+    if buf:
+        if idx >= want:
+            return True, f"逐片校验通过（{idx} 片，尾部 {len(buf)} 字节未验）"
+        if h.digest() != pieces[idx * 20:(idx + 1) * 20]:
+            return False, f"末片（第 {idx} 片，{len(buf)} 字节）对不上 ⇒ 这个目录做不出这个种"
+        idx += 1
+    if want > 0 and idx < want:
+        return False, f"只读到 {idx} 片，种子声明 {want} 片 ⇒ 数据不完整"
+    return True, f"逐片校验通过（{idx} 片）"
+
+
+
+def verify_publish_area_complete(src_path, album_name, *, torrent_file=None):
+    """★★★ 判据：`src_path`(HDD 源) 是否**完整**已复制到发种区 `<PUBLISH_CONTAINER_DIR>/<专辑>`。
+
+    ★ 两级判据，**便宜的先走、贵的后走**（顺序不能反）：
+      · **一级（必要条件）**：文件数相同 且 总字节相同 —— 挡"只拷了头几个文件"。
+      · **二级（强判据，`S6` 新增）**：给了 `torrent_file` 就再**逐片比 hash**
+        —— 挡"字节数全对但内容/拼接顺序不同"（`ERR-PUBLISH-23`：`21811` 44 文件、
+        逐文件字节数一个不差、`du -sb` 完全一致，逐片却是 **ok=49 / bad=407**）。
+      ★★ 为什么二级是**可选**（`torrent_file=None` 时只有一级）：本函数被 `begin_handoff_for_task`
+        在**复制刚结束时**调用，那一刻 `.torrent` 未必已生成（`publish.py` 里制种与交棒顺序
+        不保证）⇒ 强制要求会把整条交棒链打挂（`ERR-ENV-02` 的味道：新判据不许改变旧调用方的行为）。
+        ⇒ 调用方**有**种子时必须传；没传就在说明里留一句"只做了一级"，免得读日志的人
+        以为"已逐片验过"（`ERR-META-01`：判据覆盖面要写清楚）。
 
     ★★ 为什么必须有这一步（2026-10-07 #134 实测踩到，**这就是那两个种的病根**）：
       原先 `begin_handoff_for_task` 复制完就 `return True`，**从不核对**复制结果；
       调用方（`publish.py`）又**丢弃**了它的返回值 ⇒ 复制**失败/半截**时照样把任务
       推进 3040 ⇒ qB 去 `<save_path>/<album>` 找不到文件 ⇒ **progress=0 变下载**
       （实测：`☆ac8.13f` 在 SSD 发种区**根本没有目录**，3040 上却是 `stalledDL`、10 leechers）。
-    ★ 判据 = **文件数相同 且 总字节相同**（而非只看"目录存在/非空"）——
-      "非空"挡不住"只拷了头几个文件"，而正是那种半截状态让 qB 校验失败变下载。
     ★ 返回 `(是否完整, 说明)`。`src_path` 不存在 ⇒ `(False, …)`（**绝不当成"没得比"而放行**）。
     """
     if not os.path.exists(src_path):
@@ -292,19 +436,40 @@ def verify_publish_area_complete(src_path, album_name):
         # 单文件源：比文件字节
         dst_file = os.path.join(publish_target_dir(album_name), os.path.basename(src_path))
         src_sz, dst_sz = _dir_total_bytes(src_path), _dir_total_bytes(dst_file)
-        if src_sz >= 0 and src_sz == dst_sz:
-            return True, f"单文件已就位（{src_sz} 字节）"
-        return False, f"单文件未就位（源 {src_sz} / 发种区 {dst_sz} 字节）"
-    dst = publish_target_dir(album_name)
-    if not os.path.isdir(dst):
-        return False, f"发种区目录不存在: {dst}"
-    src_bytes, dst_bytes = _dir_total_bytes(src_path), _dir_total_bytes(dst)
-    if src_bytes < 0 or dst_bytes < 0:
-        return False, f"无法统计字节（源 {src_bytes} / 发种区 {dst_bytes}）"
-    if src_bytes != dst_bytes:
-        return False, (f"字节不符（源 {src_bytes} / 发种区 {dst_bytes}，"
-                       f"差 {src_bytes - dst_bytes}）⇒ 复制未完成")
-    return True, f"已逐字节就位（{src_bytes} 字节）"
+        if not (src_sz >= 0 and src_sz == dst_sz):
+            return False, f"单文件未就位（源 {src_sz} / 发种区 {dst_sz} 字节）"
+        _ok, _why = True, f"单文件已就位（{src_sz} 字节）"
+        _publish_root = publish_target_dir(album_name)
+    else:
+        dst = publish_target_dir(album_name)
+        if not os.path.isdir(dst):
+            return False, f"发种区目录不存在: {dst}"
+        src_bytes, dst_bytes = _dir_total_bytes(src_path), _dir_total_bytes(dst)
+        if src_bytes < 0 or dst_bytes < 0:
+            return False, f"无法统计字节（源 {src_bytes} / 发种区 {dst_bytes}）"
+        if src_bytes != dst_bytes:
+            return False, (f"字节不符（源 {src_bytes} / 发种区 {dst_bytes}，"
+                           f"差 {src_bytes - dst_bytes}）⇒ 复制未完成")
+        _ok, _why = True, f"已逐字节就位（{src_bytes} 字节）"
+        _publish_root = dst
+
+    # ---- 二级：逐片校验（给了 .torrent 才做）----
+    if not torrent_file:
+        return _ok, _why + "；★ 未做逐片校验（调用方没给 .torrent）"
+    try:
+        with open(torrent_file, "rb") as fh:
+            tb = fh.read()
+    except OSError as e:
+        # ★ 种子读不出 ⇒ **不**放行二级、但也**不**把一级的绿色推翻：
+        #   如实报"二级没做成"，让调用方/看日志的人知道覆盖面。
+        return _ok, _why + f"；★ 逐片校验**未做**（读 .torrent 失败：{e}）"
+    # ★★ 根目录的口径：`verify_pieces` 自己会把 `info['name']`（= 专辑目录名）拼进去，
+    #   ⇒ 传它的**父层**。传 `_publish_root` 本身会变成 `<专辑>/<专辑>/…`（实测踩到）。
+    p_ok, p_why = verify_pieces(os.path.dirname(_publish_root), tb)
+    if not p_ok:
+        return False, f"{_why}，但**逐片校验不过**：{p_why}"
+    return True, f"{_why}，且 {p_why}"
+
 
 
 def begin_handoff_for_task(src_path, album_name, info_hash, task=None,

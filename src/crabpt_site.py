@@ -628,7 +628,7 @@ class CrabptClient:
     # ---------- 发布前跨站查重（#13 / #11 核心）----------
 
     def find_existing_by_name(self, name, *, local_name, base_path="/torrents.php",
-                              max_candidates=None):
+                              max_candidates=None, diag=None):
         """在**蟹黄堡全站范围**搜 `name`，返回**已存在同版本**的 tid 或 `None`。
 
         ★★ 与 `musopia.MusopiaClient.find_existing_by_name` 是**同一套判据**（复用
@@ -644,11 +644,15 @@ class CrabptClient:
           共用连接会有回归风险）⇒ 只复用**函数**，不复用**连接与提交**。
         ★★ 任何网络/解析异常**向上抛**（`publish._dedup_lookup` 按"停轮非 0"处理）；
           `None` 的语义**只有**"搜到了、但不重复"。
+        ★★ `diag`（`S4` / `ERR-PUBLISH-25`）：可选的诊断累加器（`dict`），原样转给
+          `musopia.search_and_compare`。**不传则行为逐字不变**。两站共用同一份诊断口径
+          （`ERR-META-03`），免得一边有证据一边只有一句话。
         """
         import musopia
         return musopia.search_and_compare(self, name, local_name=local_name,
                                           base_path=base_path,
-                                          max_candidates=max_candidates)
+                                          max_candidates=max_candidates,
+                                          diag=diag)
 
     def have_cookie(self):
         return bool((self.cookie or "").strip())
