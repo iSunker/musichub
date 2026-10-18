@@ -20,7 +20,8 @@
 >    ★ `续118` = B15 收尾（根因`.!qB`坐实 / 正确分轨种入队 / 顺发新页 `21669`）；
 >    ★ `续119` = 删 qB 坏种 B / 查清"未上站不自动发"=闸门④ / 新任务:逐轨 cue 判据；
 >    ★ `续120` = 逐轨 cue 判据**已修**（`has_cue` 二修：整轨⟺恰好1条 FILE 且目标存在）；
->    ★ `续121` = **旧会话归档前的全量落盘**（10-14 全部可复用信息 + 项目文件地图 + 已知待收口项）（最新）**）。
+>    ★ `续121` = **旧会话归档前的全量落盘**（10-14 全部可复用信息 + 项目文件地图 + 已知待收口项）；
+>    ★ `续122` = **#16 counts 快照发版上线**（`f1f956d` + ⑨f 接线断言 + 生产 `-dirty` 镜像的真相）（最新）**）。
 > - **10-08 序列**（**另一批**独立编号，现落在文件**末尾**）：`续 100 → 101 → 102 → 103 → 104 → 105 → 106 → 107`
 >   （这里的 `续106` = `#56 retract 自检`，与上面**完全无关**）。
 > ⇒ 找待办看 **顶部「续106」**；找"护栏 #39/#49/#51"那批工作看**末尾的 10-08 序列**。
@@ -28,7 +29,60 @@
 
 ---
 
-## 2026-10-18（续 121）—— 旧会话归档前的**全量落盘**（10-14 会话有用信息 + 项目文件地图）
+## 2026-10-18（续 122）—— ★★ 发版：#16 counts.json 每日快照上线（`f1f956d`）
+
+> 用户指示："要发版、要继续做。" 本条 = 把上一轮**只躺在工作区**的 #16 收口并发版。
+
+### ★ 发版前补的缺口（本轮的实质工作量）
+- **`run.py` ⑨f 接线断言扩到 `_counts_thread_loop`**（原来只查 readd/handoff/patrol 三个）。
+  ★ 这正是 `ERR-META-01` 的形状：函数定义好了、注释写得很全，但**没接线也不报错**。
+- **阴性对照实测**：临时把 `Thread(target=_counts_thread_loop…)` 摘掉 ⇒ ⑨f **变红**
+  （`✗ daemon.py 没有 Thread(target=_counts_thread_loop...) 调用点`）、自检 **EXIT 1**；
+  恢复后回绿。★ 判据本身能失败，才算判据。
+- 顺手把 `_WANT_THREADS` 提成元组常量，避免"两处列表改一处忘一处"。
+
+### ★★ 生产镜像的真相（**重要，之前一直没记账**）
+- 部署前实测：NAS compose 写的是 `isunker/opencd2others:6586f97-dirty`，容器 healthy。
+- 查镜像内容 ⇒ **它里面已经有 counts 代码**（`/app/tools/gen_counts_online.py` +
+  `daemon.py` 第 1804 行接线），且 `/data/counts.json` 已按天生成。
+- 但 **`git show 6586f97:src/daemon.py` 里 `_counts_thread_loop` 出现 0 次** ⇒
+  这个 **`-dirty` 镜像 ≠ commit `6586f97`**：它是 15:55 构建的、含**未提交**工作区代码。
+- ⇒ ★ 纪律订正：**`:<sha>-dirty` 这种 tag 名不具"可回滚"语义** —— 它记录的是**构建时的
+  工作区状态**，不是那个 commit。`ERR-DOCKER-13` 只说了"点 sha"，这里补一条：
+  **点 `-dirty` = 没点**。真要留脏镜像，必须同时记下它是基于哪个 sha + 打了什么补丁。
+
+### ★ 发版链路（全部实测）
+- commit **`f1f956d`**（5 文件 +568/−5），已 push `feat/crawl-stage-wiring`。
+- build-push（`DOCKER_BUILDKIT=0`，Docker Desktop 29.x 必需）：`:latest` + `:f1f956d`，
+  digest **`sha256:4a85dc40…`**。
+- NAS：就地 `sed` 把 `image:` 改成 **`:f1f956d`**（点名 sha）；
+  ★ 同时**删掉**遗留的 `docker-compose.yml.bak-pre6586` ⇒ 顶层回白名单 3 项 + `data/`。
+- `compose pull && up -d --force-recreate --remove-orphans musopia` ⇒ 容器 **healthy**；
+  NAS 侧 `docker images --digests` 取到 `f1f956d = sha256:4a85dc40…` **与推送一致**。
+- ★ 教训（`ERR-DOCKER-13` 补充）：**`docker inspect <容器> --format '{{.Image}}'` 给的是
+  本地 config id（`c915efe5…`），与 push 的 digest 天然不等**；且该镜像**没有
+  `.RepoDigests`**（本地构建后再 push，不是 pull 来的）⇒ 在容器上查 RepoDigests **报错**。
+  正确比法是 `docker images --digests | grep <tag>`。
+
+### ★ 运行态验证（新镜像，实测）
+- `ENABLE_COUNTS_SNAPSHOT=true` / `COUNTS_SNAPSHOT_THREAD_TICK=3600`（NAS `.env` 早已打开）。
+- 启动日志：`🧵 [counts] counts.json 快照线程启动（每 3600s 查一次；每天只生成一次）`。
+- **强制重生成实测**：删掉 day 标记 ⇒ `counts_snapshot_due()=True` ⇒ `_write_counts_snapshot()=True`
+  ⇒ 标记写回 `2026-10-18`；`/data/counts.json` 的 `generated_at` 从 `16:17:54Z` 更新到
+  `12:49:48Z`（即 20:49 CST）⇒ **新镜像这条路真的通**。
+- 产出结构：`schema=1` + `online{generated_at,reachable,source_host,heartbeat,stages,db}` +
+  `offline{env}`；`stages` 7 项（`scan/publish/sync/covers/edit/crawl/rss_tid`）。
+- **凭据零泄漏**：`grep -ciE 'cookie|passkey|password|api_key|token' /data/counts.json` = **0**。
+- 容器内 `run.py --selftest` ✅（含新 ⑨f）/ `tools/test_counts_snapshot.py` ✅ 全绿。
+
+### 回滚点
+改 compose `image:` 回 **`90b912e`**（干净镜像，无 counts）再 `up -d`。
+
+### 未做 / 下一步
+- **B19**（= B15 站点侧）：仍等你到乌托邦**删 21662** ⇒ 队列里 `41dba1e8…` 下一轮 publish 自动重发。
+- 备忘：`config.QB_HOST` / compose 兜底仍是 `3040`（见续121 §6-3），本轮**未动**。
+
+---
 
 > ★ 背景：用户要求「剔除噪音 → 把前面几个会话有用的信息落盘 → 删除旧会话 jsonl」。
 > 本节的判据是 **10-14 长会话（`4304fd50` / `41bb2411` 之前那份）的内容除已在
