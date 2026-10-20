@@ -2279,9 +2279,16 @@ def _scan_main(args):
     conn = db.connect()
     cur = conn.cursor()
     cur.execute("SELECT info_hash, status, torrent_file, site_status, cover_url, "
-                "opencd_tid, mapped_json FROM tasks")
-    known = {row[0]: (row[1], row[2], row[3], row[4], row[5], row[6])
-             for row in cur.fetchall()}
+                "opencd_tid, mapped_json, transfer_rule FROM tasks")
+    _rows = cur.fetchall()
+    known = {r[0]: (r[1], r[2], r[3], r[4], r[5], r[6]) for r in _rows}
+    # ★★ 2026-10-20：`transfer_rule` 单独一张表 —— 理由是**别动 `known` 的元组形状**。
+    #   上面那个 6 元组被下面按**位置**解包（`known[h][4]` = `opencd_tid`、
+    #   `[5]` = `mapped_json`），往里插一列会在**没人注意的地方**静默错位
+    #   （`ERR-META-03` 的形状：加了一列、读的人没跟）。⇒ 另起一个字典，
+    #   只给"无 log 时要不要制种"这一处用。
+    #   闸门④ 的唯一真源仍是 `db.py`；本处只是**读同一列**做早退判断（不重新定义判据）。
+    _known_rule = {r[0]: r[7] for r in _rows}
     conn.close()
 
     stats = {"skipped": 0, "no_log": 0, "ok": 0, "failed": 0, "skipped_no_log": 0}
@@ -2326,7 +2333,15 @@ def _scan_main(args):
             # 不是重新去读目录判断 —— 那才是"省掉重复劳动"这件事本身。
             # ★ `--recheck` 时**不短路**：那个开关的语义就是"无视缓存重做一遍"，
             # 若它也被短路，就没法用它来复核"这些真的还是没日志吗"了。
-            if status == "NO_LOG_FILE":
+            #
+            # ★★★ 2026-10-20 改：短路条件多了「**已制过种**」。
+            #   为什么：蟹黄堡与乌托邦已解耦 —— **蟹黄堡允许无 log**
+            #   （`crabpt_site.py` 必填项不含 log；`publish.py` 预检也不拦）。
+            #   而旧逻辑在这里 `continue` ⇒ 无 log 的种**永远没有 `torrent_file`**
+            #   ⇒ 蟹黄堡预检的"种子文件缺失"把它们全挡掉（实测新池子 289 条里
+            #   211 条正是这样，只有 78 条有种子文件）。
+            #   ⇒ 已经制过种的（`tfile` 存在）才短路；没制过的落下去走制种。
+            if status == "NO_LOG_FILE" and tfile and os.path.exists(tfile):
                 stats["skipped_no_log"] += 1
                 continue
 
@@ -2334,7 +2349,8 @@ def _scan_main(args):
         print(f"扫描: {name}")
 
         logs = assets.read_logs(content_path)
-        if not logs:
+        _has_log = bool(logs)
+        if not _has_log:
             print("❌ 跳过：目录里没有 .log 抓轨日志")
             # ★ 2026-10-14：版本标签即使在"没日志"这条早退支里也**照写** ——
             #   它是"这一行是什么版本"的**事实**，与有没有日志无关；早退支
@@ -2343,10 +2359,28 @@ def _scan_main(args):
                          reason="目录里没有 .log 抓轨日志", content_path=content_path,
                          track_type=assets.cue_track_type(content_path))
             stats["no_log"] += 1
-            continue
+            # ★★★ 2026-10-20：**无 log 不再等于"不制种"**。
+            #   `NO_LOG_FILE` 这个 status 是**给乌托邦看的拒绝结论**（不能改），
+            #   但它**不是**"这条不该制种"的理由 —— 蟹黄堡允许无 log。
+            #   ⇒ 只有"规则不是 ALLOW"时才早退（那批永远发不出去，制种纯属浪费）。
+            #   ★ 判据用 `transfer_rule`（皇后的转载规则，`crawl`/`opencd_ingest` 写的），
+            #     **不是**本文件的任何猜测：空值 = 「不知道能不能转」⇒ 按闸门④ 拦，
+            #     也不制种（`db.py` 闸门④ 那段铁律：默认拒绝 + 显式授权）。
+            _rule = _known_rule.get(info_hash)
+            if (_rule or "").strip() != "ALLOW":
+                print(f"   ⏭  无 log 且 transfer_rule={_rule!r} 非 ALLOW"
+                      f" ⇒ 不制种（制出来也永远发不出去）")
+                continue
+            print("   ⏩ 无 log 但 transfer_rule='ALLOW' ⇒ **继续制种**"
+                  "（蟹黄堡允许无 log，2026-10-20 解耦）")
 
         # log_content/log_filename 仍存首个日志，兼容旧的显示/预览；多碟完整日志走 logs_json。
-        log_content, log_filename = logs[0]["content"], logs[0]["filename"]
+        # ★ 2026-10-20：无 log 路径下这里**没有** `logs[0]` ⇒ 必须显式给空值，
+        #   不许让 `IndexError` 代替早退（那会把"无 log"变成"扫描崩了"）。
+        if _has_log:
+            log_content, log_filename = logs[0]["content"], logs[0]["filename"]
+        else:
+            log_content, log_filename = "", ""
 
         formatted_title, fmt, track_type = parse_title(name, content_path)
         tracklist = assets.read_tracklist(content_path)
@@ -2421,7 +2455,12 @@ def _scan_main(args):
         #   ⇒ 用 `.get(…, 默认)`：**"不写这一列"必须只能印成"(保留库内原值)"，不许崩**。
         print(f"✔ 主标题: {mt_col.get('formatted_title', '(保留库内原值)')}   ← 来源: {mt_src}")
         print(f"✔ 副标题: {small_descr or '(空)'}   ← 来源: {_src}")
-        print(f"📄 日志: {len(logs)} 个 [" + ", ".join(x['label'] for x in logs) + "]")
+        if _has_log:
+            print(f"📄 日志: {len(logs)} 个 [" + ", ".join(x['label'] for x in logs) + "]")
+        else:
+            # ★ 2026-10-20：无 log 也走到这里了 ⇒ 必须**说出来**。不许让"没有日志"
+            #   与"有 1 个空日志"印成同一行（`ERR-META-14`：兜底值不许冒充真结果）。
+            print("📄 日志: 0 个（★ 本条无抓轨日志，但 `transfer_rule='ALLOW'` ⇒ 照常制种）")
         print(f"🎵 曲目: {len(tracklist.splitlines())} 行")
 
         # 封面：库里已有 URL 就直接复用（重做场景），绝不重复上传。
@@ -2474,6 +2513,45 @@ def _scan_main(args):
                          reason=str(e), content_path=content_path,
                          track_type=track_type)
             stats["failed"] += 1
+            continue
+
+        # ★★★ 2026-10-20：**无 log 制完种也不许把 status 写成 SUCCESS**。
+        #
+        #   为什么（这是 D6 落地时**实测**发现的坑，不是推理）：
+        #   `PENDING_PUBLISH_WHERE`（**乌托邦**的发布队列）的首条件就是
+        #   `status = 'SUCCESS'` ⇒ 一旦这里写 SUCCESS，那 223 条无 log 的行
+        #   会**立刻新进乌托邦队列**（实测 194 条会进）。而乌托邦**要求 log**
+        #   ⇒ 它们会被乌托邦预检拒、状态来回翻 ⇒ **乌托邦那一半被污染**，
+        #   而用户明确要求「乌托邦可发 = 一个字不改」。
+        #   ⇒ 判据：制种归制种（`torrent_file` 要落库），**status 仍归 NO_LOG_FILE**
+        #     （那是给乌托邦看的拒绝结论）。蟹黄堡不看 `status`，
+        #     只看 `transfer_rule='ALLOW'` + 蟹黄堡没发过 ⇒ 照样能发。
+        #
+        #   ★ `PROTECTED_STATUSES` 里**没有** `NO_LOG_FILE` ⇒ 保护不住，只能在这里显式判。
+        #   ★ 后果（诚实标注）：这类行每轮 scan 都会**重新制一次种**。
+        #     `create_musopia_torrent` 是幂等的（同内容 ⇒ 同 info_hash ⇒ 同名文件覆盖），
+        #     代价是 CPU；换取的是"状态不被污染"。若将来嫌慢，
+        #     正确做法是**再加一个 status**（如 `TRIAGE_ONLY`），
+        #     而不是把它写回 `SUCCESS` —— 那会重新打开这个坑。
+        if not _has_log:
+            print("   ⏸  无 log ⇒ **不写 status=SUCCESS**（否则会污染乌托邦队列）")
+            db.save_task(
+                info_hash=info_hash,
+                torrent_name=name,
+                status="NO_LOG_FILE",
+                reason="目录里没有 .log 抓轨日志（已制种，供蟹黄堡直发）",
+                cover_url=cover_url,
+                torrent_file=torrent_file,
+                small_descr=small_descr,
+                tracklist=tracklist,
+                log_content=log_content,
+                log_filename=log_filename,
+                logs_json=json.dumps(logs, ensure_ascii=False),
+                content_path=content_path,
+                track_type=track_type,
+                **mt_col,
+            )
+            stats["ok"] += 1
             continue
 
         # ★★ 重扫**不许**推翻别的阶段下的结论（`db.PROTECTED_STATUSES`）。

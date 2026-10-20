@@ -1549,26 +1549,31 @@ def selftest_crabpt_isolation(verbose=True):
     return (not detail), detail
 
 
-# ---- ★★ 负向自检：转种队列的判据**确实是** `db.transferable_to` ----
+# ---- ★★ 负向自检：直发队列的判据**确实是** `db.pending_crabpt_direct` ----
 #
 # ★★★ 为什么需要它（`ERR-META-31` 的形状：状态文件的两种历史序列化后一样、
 #   携带不了那个区分）：
-#   用户 2026-09-27 拍板「需求是【转种】，目标站缺、源站有的才转过去」。
-#   而**忘记**这个筛选**不报错、也不抛异常** —— 表现只是"蟹黄堡照发"，
-#   而下面 `site_publish` 的判重**拦不住**（它问的是"蟹黄堡发过没有"，
-#   对"这条在**乌托邦**发过"一无所知）⇒ **静默多发**，多发不可撤销。
+#   用户 2026-10-20 拍板「蟹黄堡跟乌托邦没有逻辑关系：皇后里只要不是禁止转载，
+#   有无 log 都可以发」。而**忘记**这个筛选**不报错、也不抛异常** —— 表现只是
+#   "蟹黄堡照发"，而下面 `site_publish` 的判重**拦不住**（它问的是"蟹黄堡发过没有"，
+#   对"这条要不要过闸门④"一无所知）⇒ **静默多发**，多发不可撤销。
 #
 # ★ 判据取自**本文件自己的源码**（AST），不是手抄清单 —— 那必然漂移。
-#   具体断两件事：
-#     ① `run_crabpt` **必须**调 `db.transferable_to`（而不是 `get_pending_publish`）
+#   具体断三件事：
+#     ① `run_crabpt` **必须**调 `db.pending_crabpt_direct`（而不是发布队列）
 #     ② `run_crabpt` **不许**调 `db.get_pending_publish()` 当**选行**用
 #        ★ 注意判据要**精确到语法位置**，不能只 `if "get_pending_publish" in code`：
 #          那会误伤我特意写进 `run_crabpt` 的那段**子集断言**
 #          （它**故意**调一次 `db.get_pending_publish()` 来求差集）。
 #          ⇒ 只检查"它有没有出现在**赋值给 `tasks`/`hit`** 的位置"
 #          —— 那才是"拿它当选行的判据"。
+#     ③ `run_crabpt` **不许**把选行改回 `db.transferable_to(...)`：
+#        ★★ 2026-10-20 新增。那正是本次解耦**要拆掉**的东西 ——
+#          `transferable_to` 的 WHERE 以 `site_status='EXISTS'`（= 乌托邦）开头
+#          ⇒ 改回去就**退回连坐**（实测症状：日发量 0，而日志一切正常）。
+#          这条与 ① 成对：① 防"换了但没换"，③ 防"换回去了"。
 def selftest_crabpt_transfer_queue(verbose=True):
-    """断言 `run_crabpt` 的选行判据是**转种**（`db.transferable_to`）。"""
+    """断言 `run_crabpt` 的选行判据是**直发**（`db.pending_crabpt_direct`）。"""
     src = open(os.path.abspath(__file__), encoding="utf-8").read()
     tree = _ast.parse(src)
     fn = next((n for n in _ast.walk(tree)
@@ -1578,12 +1583,11 @@ def selftest_crabpt_transfer_queue(verbose=True):
     code = _code_only(fn)
     detail = []
 
-    # ① 必须调 transferable_to（"改了但没换队列"要能被抓到）
-    if "transferable_to" not in code:
-        detail.append("★★ run_crabpt 里**没有** `db.transferable_to` ⇒ "
-                      "用的是发布队列（`PENDING_PUBLISH_WHERE`），"
-                      "而它含 `site_status != 'EXISTS'` ⇒ 转种队列**恒为空**"
-                      "（实测 0 条）")
+    # ① 必须调 pending_crabpt_direct（"改了但没换队列"要能被抓到）
+    if "pending_crabpt_direct" not in code:
+        detail.append("★★ run_crabpt 里**没有** `db.pending_crabpt_direct` ⇒ "
+                      "选行判据不是直发口径（`db.CRABPT_DIRECT_WHERE`），"
+                      "蟹黄堡会被乌托邦的 log 闸门连坐（2026-10-20 实测日发量 0）")
 
     # ② 不许把 `get_pending_publish()` 的**返回值**当选行判据。
     #    ★ 判据是"有没有 `x = db.get_pending_publish()` 这种赋值"，
@@ -1599,37 +1603,46 @@ def selftest_crabpt_transfer_queue(verbose=True):
                 tgt = node.targets[0] if isinstance(node, _ast.Assign) else node.target
                 nm = getattr(tgt, "id", "?")
                 detail.append(f"★★ run_crabpt 里 `{nm} = db.get_pending_publish()` "
-                              f"⇒ 又拿**发布队列**当选行判据了（转种队列必须用 "
-                              f"`db.transferable_to`）")
+                              f"⇒ 又拿**发布队列**当选行判据了（直发队列必须用 "
+                              f"`db.pending_crabpt_direct`）")
 
     # ③ 队列来源必须显式带站点（`db.SITE_CRABPT`）—— 否则默认参数会静默
-    #    变成 `SITE_MUSOPIA`，而那会让筛选"查自己站发过没有" ⇒ 恒为空。
+    #    变成 `SITE_MUSOPIA`，而那会让筛选"查乌托邦发过没有" ⇒ 判据全错。
+    #    ★★ 2026-10-20：改用 `pending_crabpt_direct`；**同时**禁掉
+    #       `transferable_to` —— 那是解耦前的旧口径（WHERE 以 `site_status='EXISTS'`
+    #       开头 ⇒ 乌托邦没发的蟹黄堡永远发不了）。改回去 = **静默退回连坐**。
     ok_kw = False
     for node in _ast.walk(fn):
-        if isinstance(node, _ast.Call) and getattr(node.func, "attr", "") == "transferable_to":
-            if node.args:
-                a = node.args[0]
-                if getattr(a, "attr", "") == "SITE_CRABPT":
-                    ok_kw = True
+        if not isinstance(node, _ast.Call):
+            continue
+        _nm = getattr(node.func, "attr", "")
+        if _nm == "transferable_to":
+            detail.append("★★ run_crabpt 里又出现 `db.transferable_to(...)` 当选行 ⇒ "
+                          "那是**解耦前**的口径（`site_status='EXISTS'` = 乌托邦已上站）"
+                          "⇒ 蟹黄堡被乌托邦连坐（2026-10-20 实测日发量 0）。"
+                          "直发必须用 `db.pending_crabpt_direct(...)`。")
+        if _nm == "pending_crabpt_direct":
+            if node.args and getattr(node.args[0], "attr", "") == "SITE_CRABPT":
+                ok_kw = True
             for kw in node.keywords:
                 if getattr(kw.value, "attr", "") == "SITE_CRABPT":
                     ok_kw = True
-    if "transferable_to" in code and not ok_kw:
-        detail.append("★★ 调 `transferable_to` 时**没有**显式传 `db.SITE_CRABPT` "
-                      "⇒ 落到默认参数 `SITE_MUSOPIA`，筛选变成'乌托邦查乌托邦'，"
-                      "队列恒为空")
+    if "pending_crabpt_direct" in code and not ok_kw:
+        detail.append("★★ 调 `pending_crabpt_direct` 时**没有**显式传 `db.SITE_CRABPT` "
+                      "⇒ 落到默认参数，站点去重可能查错站")
 
     if verbose:
         mark = "✅" if not detail else "❌"
-        print(f"{mark} 转种队列自检：run_crabpt 用 db.transferable_to(SITE_CRABPT) 选行")
+        print(f"{mark} 蟹黄堡直发队列自检：run_crabpt 用 "
+              f"db.pending_crabpt_direct(SITE_CRABPT) 选行")
         for d in detail:
             print(f"    {d}")
     return (not detail), detail
 
 
 def selftest_crabpt_explain_same_source(verbose=True):
-    """★★★ 断言「**队列口径**（`db.transferable_to`）与**解释口径**
-    （`db.is_transferable_to`）」**同源** —— 两条路对同一行必须给同一个答案。
+    """★★★ 断言「**直发队列口径**（`db.pending_crabpt_direct`）与**解释口径**
+    （`db.is_direct_publishable_to`）」**同源** —— 两条路对同一行必须给同一个答案。
 
     ★★★ 为什么必须有（2026-09-28 实测事故，`ERR-META-32` 一族）：
       同一个命令里两句话互相矛盾：
@@ -1639,7 +1652,7 @@ def selftest_crabpt_explain_same_source(verbose=True):
           ✅ 它**在**转种队列里（源站有…）    ← **解释文案**（错）
 
       ★ 根因：`transferable_to()` 当时已改用 `TRANSFERABLE_WHERE`（含闸门④
-        `ALLOW`），而 `is_transferable_to()` **只判「源有 ∧ 目标没有」**
+        `ALLOW`），而解释函数**只判「源有 ∧ 目标没有」**
         —— 少了闸门④ 那一层 ⇒ **两个判据对同一行给出相反答案**。
       ★ 危害形状（`ERR-META-14`）：不是"多发一条"（数据风险），而是
         **工具告诉人"它在队列里"、实际不会发** ⇒ **误导人做决定**。
@@ -1656,27 +1669,31 @@ def selftest_crabpt_explain_same_source(verbose=True):
     """
     import tempfile
     detail = []
-    # fixture：四条，覆盖闸门④ 的三档 + 一条正常的 ALLOW
+    # fixture：**五条**，覆盖闸门④ 的三档 + 一条正常 ALLOW + 一条**乌托邦没发**的 ALLOW。
     #   hash 前 12 位都是 `aaaa…` / `dddd…` 便于人读
     #
     # ★★ `site_torrent_id` 必须**非空**（这里给站点 id 的字符串形态）——
-    #   因为 `CROSS_SITE_DEDUP_WHERE`（转种口径的前缀）里含
-    #   `site_torrent_id IS NOT NULL AND site_torrent_id != ''`：
-    #   它是"**乌托邦上有这条**"那个事实判据的一部分。
-    #   ★ 实测踩到过：第一版给空串 ⇒ **四条全部落不进队列**，
-    #     于是判据报"口径分叉（EXISTS ∧ ALLOW）" —— 而那是**我 fixture 的错**，
-    #     不是产的错。⇒ 判据设计上要能区分"分叉"与"根本没测到"：
-    #     下面除了比对两个口径，还**单独断言** ALLOW 那条**必须在队列里**
-    #     （`should_be=True`），否则 fixture 自己坏掉时它不会冒充"通过"。
-    H_ALLOW = "aaaa00000000" + "0" * 28     # EXISTS ∧ ALLOW ∧ crabpt 无 ⇒ **该转**
+    #   它曾经是 `CROSS_SITE_DEDUP_WHERE`（旧转种口径前缀）的一部分。
+    #   ★ 2026-10-20 起直发口径**不再看**这两列，但 fixture **故意保留非空值**：
+    #     这样若有人把口径偷偷改回 `transferable_to`（带 `site_status='EXISTS'` 前缀），
+    #     五条仍然全部测得进来 ⇒ 报的是"口径分叉"（真问题），
+    #     而不是"四条全部落不进队列"（fixture 自己坏掉、看起来像通过）。
+    #
+    # ★★★ 2026-10-20 新增第五条 `H_NOMUSO`（`ALLOW` ∧ **乌托邦没上站**）+ 正向断言：
+    #   这正是本次解耦的**正向判据** —— 旧口径下它**必须**不在队列里（连坐），
+    #   新口径下它**必须**在队列里。★ 只测"DENY 不入选"这类阴性判据的话，
+    #   把闸门改成"一条都不选"也全绿（`ERR-PUBLISH-27` 的形状）。
+    H_ALLOW = "aaaa00000000" + "0" * 28     # EXISTS ∧ ALLOW ∧ crabpt 无 ⇒ **该发**
     H_DENY = "dddd00000000" + "0" * 28      # EXISTS ∧ DENY  ⇒ **闸门④ 拦**
     H_EMPTY = "eeee00000000" + "0" * 28     # EXISTS ∧ 规则空 ⇒ **闸门④ 拦**
     H_CONF = "cccc00000000" + "0" * 28      # EXISTS ∧ NEED_CONFIRM ⇒ **闸门④ 拦**
+    H_NOMUSO = "bbbb00000000" + "0" * 28    # **乌托邦没有** ∧ ALLOW ⇒ **该发**（解耦正向判据）
     rows = [
         (H_ALLOW, "EXISTS", "10001", "ALLOW"),
         (H_DENY, "EXISTS", "10002", "DENY"),
         (H_EMPTY, "EXISTS", "10003", None),
         (H_CONF, "EXISTS", "10004", "NEED_CONFIRM"),
+        (H_NOMUSO, None, None, "ALLOW"),
     ]
     import sqlite3
     fd, path = tempfile.mkstemp(suffix=".db")
@@ -1685,7 +1702,7 @@ def selftest_crabpt_explain_same_source(verbose=True):
     try:
         con = sqlite3.connect(path)
         # ★★ fixture 的表必须与**生产表同形**（列**全**建出来，值留空）——
-        #   理由：`db.transferable_to()` 走 `SELECT {db.TASK_FIELDS}`，
+        #   理由：`db.pending_crabpt_direct()` 走 `SELECT {db.TASK_FIELDS}`，
         #   若 fixture 少一列，它会 `OperationalError` ⇒ 本条自检会以
         #   "**没能跑起来**"收尾（**不是通过** —— 见下面 except 支）。
         #   ★ 实测踩到两次：第一版只建了 3 列（`no such column: torrent_name`）；
@@ -1705,7 +1722,10 @@ def selftest_crabpt_explain_same_source(verbose=True):
             con.execute(
                 f"INSERT INTO tasks (info_hash, site_status, site_torrent_id,"
                 f" transfer_rule) VALUES (?,?,?,?)", (h, st, sid, rule))
-            # 源站（乌托邦）已上站 —— 让判据① 成立，把差别**只留**给闸门④
+            if h == H_NOMUSO:
+                # 乌托邦**没有**这条 —— 正是解耦要放开的那一类。
+                continue
+            # 源站（乌托邦）已上站 —— 旧口径下判据① 成立，把差别**只留**给闸门④
             # ★ 列名**显式列出**（不靠位置）—— fixture 的表列比这里写的多
             #   （`synced_at` 等），靠位置会在别人加列时静默错位。
             con.execute("INSERT INTO site_publish"
@@ -1717,31 +1737,31 @@ def selftest_crabpt_explain_same_source(verbose=True):
 
         config.DB_PATH = path
         # 队列口径（实际选行）
-        queued = {(t.get("info_hash") or "") for t in db.transferable_to(db.SITE_CRABPT)}
+        queued = {(t.get("info_hash") or "") for t in db.pending_crabpt_direct(db.SITE_CRABPT)}
         # 解释口径（给人看的 why）
         for h, label, should_be in [
-            (H_ALLOW, "EXISTS ∧ ALLOW", True),
-            (H_DENY, "EXISTS ∧ DENY", False),
-            (H_EMPTY, "EXISTS ∧ 规则空", False),
-            (H_CONF, "EXISTS ∧ NEED_CONFIRM", False),
+            (H_ALLOW, "乌托邦已上站 ∧ ALLOW", True),
+            (H_DENY, "乌托邦已上站 ∧ DENY", False),
+            (H_EMPTY, "乌托邦已上站 ∧ 规则空", False),
+            (H_CONF, "乌托邦已上站 ∧ NEED_CONFIRM", False),
+            (H_NOMUSO, "★ 乌托邦**没上站** ∧ ALLOW（解耦正向）", True),
         ]:
             in_q = h in queued
-            ok, why = db.is_transferable_to(h, db.SITE_CRABPT)
+            ok, why = db.is_direct_publishable_to(h, db.SITE_CRABPT)
             if in_q != ok:
                 detail.append(
                     f"✗ ★★ 口径分叉（{label}）：队列认为 in_queue={in_q}，"
-                    f"但 `is_transferable_to()` 说 ok={ok}（why={why!r}）\n"
+                    f"但 `is_direct_publishable_to()` 说 ok={ok}（why={why!r}）\n"
                     f"     ⇒ 这正是 `--only` 报文与实际筛选**互相矛盾**的形状"
                     f"（ERR-META-32）。两个判据必须同源。")
             if ok != should_be:
                 detail.append(
-                    f"✗ ★★ `is_transferable_to()` 对（{label}）答 ok={ok}，"
+                    f"✗ ★★ `is_direct_publishable_to()` 对（{label}）答 ok={ok}，"
                     f"应当为 {should_be}（why={why!r}）\n"
                     f"     ⇒ 闸门④ 的语义是'**只有 `ALLOW` 放行**'："
                     f"`DENY` / 空 / `NEED_CONFIRM` **一律拦**。")
             # ★ 报文必须**说清是哪一档**（ERR-SITE-06：多种原因不许压成一句）
-            if not ok and ("闸门④" not in why and "源站" not in why
-                           and "目标站" not in why):
+            if not ok and ("闸门④" not in why and "目标站" not in why):
                 detail.append(f"✗ 报文没点明卡在哪一条判据：{why!r}")
     except Exception as e:                                        # noqa: BLE001
         detail.append(f"✗ ★ 本条自检**没能跑起来**（不是通过）：{type(e).__name__}: {e}")
@@ -1754,8 +1774,121 @@ def selftest_crabpt_explain_same_source(verbose=True):
 
     if verbose:
         mark = "✅" if not detail else "❌"
-        print(f"{mark} 转种口径自检：队列（transferable_to）与解释"
-              f"（is_transferable_to）**对同一行说同一句话**")
+        print(f"{mark} 直发口径自检：队列（pending_crabpt_direct）与解释"
+              f"（is_direct_publishable_to）**对同一行说同一句话**")
+        for d in detail:
+            print(f"    {d}")
+    return (not detail), detail
+
+
+def selftest_no_log_keeps_status(verbose=True):
+    """★★★ 断言 `run.py` 的 scan 在"无 log 但制了种"这条路上**不写** `status='SUCCESS'`。
+
+    ★★★ 为什么必须有（2026-10-20 D6 落地时**实测**发现的坑）：
+      D6 让 `run.py` 无 log 也制种（蟹黄堡允许无 log）。而如果制完种仍走原来那条
+      `status="SUCCESS"` 的落库分支，**乌托邦队列立刻被污染**：
+
+        `PENDING_PUBLISH_WHERE` 的首条件就是 `status = 'SUCCESS'`
+        ⇒ 实测 223 条无 log ∧ ALLOW 的行里，**194 条会立刻新进乌托邦队列**（4 → 198）；
+        而乌托邦**要求 log** ⇒ 它们会被乌托邦预检拒、状态来回翻。
+
+      用户明确要求「**乌托邦可发 = 一个字不改**」⇒ 这个坑必须焊住。
+      ★ 危害形状（`ERR-META-14` 一族）：不是报错，是**另一半静默变了**；
+        日志上一切正常，只有乌托邦日发量悄悄被一堆废活淹没。
+
+    ★★ 判据为什么走 **AST 结构**而不是运行时：
+      这条要求的是"某个写入点**不存在**"。运行时抓不到"没发生的写"
+      （跑了也不抛异常，只是库里多了一堆 SUCCESS）。
+      ⇒ 用 AST 断言 `run.py` 里**存在**一段"`if not _has_log:` ⇒ `status='NO_LOG_FILE'` 落库"，
+        且该分支在 `status="SUCCESS"` 的落库**之前**（顺序也要钉住：
+        写早了等于没写，后面的 `SUCCESS` 还会把它盖掉）。
+      ★ 同时**反向**断言：那个无 log 分支里**不许**出现 `status="SUCCESS"`。
+    """
+    import pathlib as _pl2
+    detail = []
+    run_py = _pl2.Path(__file__).resolve().parent / "run.py"
+    if not run_py.exists():
+        return False, [f"✗ 找不到 run.py（{run_py}）⇒ 本条自检**没测**，不是通过"]
+    src = run_py.read_text(encoding="utf-8")
+    try:
+        tree = _ast.parse(src)
+    except Exception as e:                                        # noqa: BLE001
+        return False, [f"✗ run.py 解析失败 ⇒ 本条自检**没跑起来**（不是通过）：{e}"]
+
+    # ① 必须存在 `if not _has_log:` 分支，里面写 status="NO_LOG_FILE"
+    #
+    # ★★★ 判据为什么必须**精确到 `status=` 关键字**，而不是"分支里出现 `SUCCESS` 字样"：
+    #   第一版就是这么写的，**当场假阳** —— 我在那个分支里写了一段
+    #   「不许写 `status='SUCCESS'`（否则会污染乌托邦队列）」的**注释**，
+    #   而 `ast.get_source_segment` 把注释一起抓进来了 ⇒ 报红。
+    #   这正是 `ERR-META-30` 的形状：**提到了对的词、却问了个错的问题**。
+    #   ⇒ 改成只认 `save_task(..., status=<常量>)` 这种**真的写库**的调用。
+    _guard_ln = None
+    _bad_status_in_guard = []
+    _success_lns = []
+
+    def _status_consts(fn_node):
+        """返回该函数调用里 `status=` 的**字面量值**（只认 Constant，不认变量）。"""
+        out = []
+        for k in getattr(fn_node, "keywords", []):
+            if k.arg == "status" and isinstance(k.value, _ast.Constant):
+                out.append(k.value.value)
+        return out
+
+    for node in _ast.walk(tree):
+        if not isinstance(node, _ast.If):
+            continue
+        t = node.test
+        # 认 `if not _has_log:` 这一种写法（且**不认** `if _has_log:`）
+        is_not_has_log = (isinstance(t, _ast.UnaryOp)
+                          and isinstance(t.op, _ast.Not)
+                          and getattr(t.operand, "id", "") == "_has_log")
+        if not is_not_has_log:
+            continue
+        _found_no_log = False
+        for sub in _ast.walk(node):
+            _st = _status_consts(sub) if isinstance(sub, _ast.Call) else []
+            if "NO_LOG_FILE" in _st:
+                _found_no_log = True
+            for v in _st:
+                if v == "SUCCESS":
+                    _bad_status_in_guard.append(sub.lineno)
+        if not _found_no_log:
+            detail.append("✗ `if not _has_log:` 分支里**没有**写 `status='NO_LOG_FILE'` "
+                          "⇒ 无 log 的结论丢了")
+        else:
+            _guard_ln = node.lineno
+    if _bad_status_in_guard:
+        detail.append(
+            f"✗ ★★ `if not _has_log:` 分支里**真的写了** `status='SUCCESS'`"
+            f"（行 {_bad_status_in_guard}）—— 无 log 的路**绝不许**写它"
+            f"（会污染乌托邦队列，实测 194 条）")
+
+    if _guard_ln is None:
+        detail.append("✗ ★ 找不到 `if not _has_log: … status='NO_LOG_FILE'` 这段结构 ⇒ "
+                      "D6 的\"无 log 也制种但 status 不变\"没接线（或整段被删了）")
+
+    # ② 顺序判据：`status="SUCCESS"` 的落库必须**在**无 log 守卫**之后**
+    #   （若在前面，守卫写得再对也会被后来的 SUCCESS 覆盖 ⇒ 等于没写）
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Call) and "SUCCESS" in _status_consts(node):
+            _success_lns.append(node.lineno)
+    if _guard_ln is not None and _success_lns:
+        if not any(_ln > _guard_ln for _ln in _success_lns):
+            detail.append(f"✗ ★★ 无 log 守卫（行 {_guard_ln}）**之后**没有任何 "
+                          f"`status='SUCCESS'` 落库 ⇒ 结构可疑（守卫可能不会被命中）")
+        # ★ 无 log 的那次落库必须**自带 continue**，否则会掉进下面的 SUCCESS 分支
+        _guard_node = next((n for n in _ast.walk(tree)
+                            if isinstance(n, _ast.If) and n.lineno == _guard_ln), None)
+        if _guard_node is not None and not any(
+                isinstance(s, _ast.Continue) for s in _guard_node.body):
+            detail.append("✗ ★★ 无 log 的落库分支**没有 `continue`** ⇒ 会掉进下面那条 "
+                          "`status='SUCCESS'` 的写库 ⇒ 乌托邦队列被污染（实测 194 条）")
+
+    if verbose:
+        mark = "✅" if not detail else "❌"
+        print(f"{mark} 无 log 制种自检：无 log 的种制完种后 status **仍是** NO_LOG_FILE"
+              f"（不许写 SUCCESS ⇒ 不污染乌托邦队列）")
         for d in detail:
             print(f"    {d}")
     return (not detail), detail
@@ -2198,22 +2331,33 @@ def run_crabpt(args):
     #     多发**不可撤销**（蟹黄堡没有批量删种），而少发只是补一次。
     #   ⇒ 所以这条判据必须**是函数**、必须**有阴性对照**（见
     #     `selftest_crabpt_transfer_queue()`：把筛选去掉，自检**必须**报红）。
-    tasks = db.transferable_to(db.SITE_CRABPT)
+    # ★★★ 2026-10-20（用户拍板）：**蟹黄堡与乌托邦没有逻辑关系**。
+    #   语义 = 「皇后里只要不是禁止转载（`ALLOW`），有无 log 都可以发」。
+    #   选行改用 `db.pending_crabpt_direct()`（口径 = `db.CRABPT_DIRECT_WHERE`
+    #   + `site_publish(site='crabpt')` 去重），**不再**要求乌托邦先上站。
+    #
+    #   ★ 为什么必须换（实测，不是推理）：`site_status` 那一列记的是**乌托邦**，
+    #     而乌托邦被 log 闸门卡掉 65% ⇒ 蟹黄堡**被连坐**，日发量掉到 0，
+    #     而适配层（`crabpt_site.py` 必填项不含 log）**本来就允许无 log**。
+    #   ★ 旧函数 `db.transferable_to(db.SITE_CRABPT)` **保留不删**（仍是"真·转种"
+    #     那条路的选行函数，`transferable_to` 家族的自检仍覆盖它），
+    #     但**不再是本函数的判据** ⇒ 见 `selftest_crabpt_transfer_queue()` 的新判据。
+    tasks = db.pending_crabpt_direct(db.SITE_CRABPT)
     if not tasks:
-        print("💡 当前没有可转的种（源站有、蟹黄堡没有、**且过了闸门④ ALLOW**）——"
-              f"判据 = `db.TRANSFERABLE_WHERE` = `{db.CROSS_SITE_DEDUP_WHERE}` "
-              f"+ `transfer_rule = 'ALLOW'`，再加蟹黄堡无记录。")
+        print("💡 当前没有可发的种（**过闸门④ `ALLOW`** ∧ 蟹黄堡没有 ∧ 不是 FAILED）——"
+              f"判据 = `db.CRABPT_DIRECT_WHERE` = `{db.CRABPT_DIRECT_WHERE}` "
+              f"+ 蟹黄堡无记录。★ 不再要求乌托邦先上站（2026-10-20 解耦）。")
         return
 
-    # ---- ★ 可执行断言：转种队列**必须**是"已过闸门④"的子集 -----------------
+    # ---- ★ 可执行断言：直发队列**必须**是"已过闸门④"的子集 -----------------
     #
     # ★ 为什么需要它（这是**推理**，不是上面那条 SQL 自己保证的东西）：
     #   本节开头论证过「能上乌托邦 ⇒ 已过闸门④ `transfer_rule='ALLOW'`」。
     #   ★★★ 2026-09-28 **实测：那条推理不成立** —— `EXISTS` 的 28 行里
     #   有 1 行是 `DENY`（`site_torrent_id=15972`）⇒ 若转种路只按"已上站"筛，
     #   这一行会被搬到蟹黄堡（**不可逆**）。
-    #   ⇒ 修法**不在这里**，而在 `db.transferable_to()` 的口径：
-    #     它现在用 `db.TRANSFERABLE_WHERE`（= CROSS + `transfer_rule='ALLOW'`）。
+    #   ⇒ 修法**不在这里**，而在选行口径：`db.CRABPT_DIRECT_WHERE` 自带
+    #     `transfer_rule = 'ALLOW'`。
     #   ★★ 而本条断言**仍然用 `CROSS_SITE_DEDUP_WHERE`**（**不**跟着换成
     #     `TRANSFERABLE_WHERE`）—— 这是**故意的**，不是漏改：
     #       · 它问的问题是「**事实**（已上站）里有哪些**没过**闸门④」；
@@ -3415,7 +3559,15 @@ def main():
         #     删掉闸门，`upload_torrent` 照发、站点照收，日志一片绿 —— 而那条会像 21662
         #     一样**永久校验不到 100%**（只能人工去站点删种），**完全静默**。
         ok9, _ = selftest_version_gate()
-        # ★ 七条判据**都要**跑（`and` 而不是 `or`）—— 它们是**独立**的失效模式：
+        # ★★ 第 10 条（2026-10-20 加，蟹黄堡直发解耦）：**无 log 制种不许改 status**。
+        #   ★ 独立的失效模式：前九条都不查"**scan 制完种之后写回哪个 status**"。
+        #     实测（2026-10-20）：D6 让 `run.py` 无 log 也制种，若仍写
+        #     `status='SUCCESS'` ⇒ 223 条无 log 行里 **194 条立刻新进乌托邦队列**
+        #     （`PENDING_PUBLISH_WHERE` 首条件就是 `status='SUCCESS'`），
+        #     而乌托邦要求 log ⇒ 乌托邦那一半被**污染**、状态来回翻。
+        #     用户明确要求「乌托邦 = 一个字不改」⇒ 这条把那个坑焊住。
+        ok10, _ = selftest_no_log_keeps_status()
+        # ★ 十条判据**都要**跑（`and` 而不是 `or`）—— 它们是**独立**的失效模式：
         #   ① 碰了乌托邦的列（"发一条污染四个判据"）
         #   ② 队列取错（"静默多发、不可撤销"）
         #   ③ ★ 队列口径与**解释口径**分叉（"工具告诉你它在队列里、实际不发"
@@ -3429,7 +3581,9 @@ def main():
         #   ★ 用 `or` 的话，一条报红时另一条**根本没跑**，而"没跑"与"通过"
         #     在输出上应当长得不一样（`ERR-META-14`：兜底不许冒充真结果）。
         #   ★ 2026-10-11：修掉原先的 `ok7 and ok7` 笔误（应为 …and ok7），并接上 ok8。
-        ok = ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7 and ok8 and ok9
+        #   ★ 2026-10-20：接上 ok10（无 log 制种不许改 status）。
+        ok = (ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7
+              and ok8 and ok9 and ok10)
         # ★★ 必须 `sys.exit`，**不能 `return`** —— `main()` 是被
         #   `if __name__ == "__main__": main()` 调的，那个写法的返回值**会被丢掉**
         #   ⇒ 退出码恒为 0 ⇒ **自检报红也没人看得见**（阴性对照实测踩到这一条）。

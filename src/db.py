@@ -1523,6 +1523,87 @@ CRABPT_QUEUE_WHERE = (
     " AND (status IS NULL OR status != 'FAILED')"
 )
 
+# ── ★★★ 蟹黄堡**直发**口径（2026-10-20 用户拍板）──────────────────────────────
+#
+#   用户原话：「**蟹黄堡跟乌托邦没有逻辑关系**，完整语义是：皇后里只要**不是禁止转载**，
+#   **有无 log 都可以发**。」
+#
+#   ★★ 原口径错在哪（不是"少一条"，是**用错了列**）：
+#     `CRABPT_QUEUE_WHERE` 以 `site_status = 'EXISTS'` 开头 —— 而 `site_status` 是
+#     **乌托邦那一侧的旧镜像列**（`site_publish` 里 `site='musopia'` 那条）。
+#     ⇒ 它表达的是「**乌托邦已经发过**」，而蟹黄堡要问的是「**蟹黄堡自己发过没有**」。
+#     ⇒ 后果（2026-10-20 实测）：乌托邦被 log 闸门卡掉 65% ⇒ 蟹黄堡**被连坐**，
+#       日发量掉到 0，而适配层（`crabpt_site.py:788` 必填项不含 log）**本来就允许无 log**。
+#
+#   ★ 为什么**另立**常量、而不是改 `CRABPT_QUEUE_WHERE` 那一行：
+#     ① `run.py` ⑦e 把 `CRABPT_QUEUE_WHERE` 钉成"必须以 `TRANSFERABLE_WHERE` 逐字开头、
+#        尾巴只准谈 `status`" —— 改它**当场红**；
+#     ② `CRABPT_QUEUE_WHERE` 还被 `publish.py:2471/2628` 当"出队判据"的口径引用，
+#        且 `transferable_to()` / `count_transferable_to()` 仍是**乌托邦→蟹黄堡**那条
+#        旧路的选行函数（保留不动，将来若要做"真·转种"还用得上）。
+#     ⇒ 与 `QUEEN_PUBLISHED_WHERE` / `TRANSFERABLE_WHERE` 一样，按本仓库既有的
+#       "**分叉常量**"手法另立一份。
+#
+#   ★ 为什么**写全字面值**（不像别处那样引用前缀常量拼接）：
+#     本仓库有 4 处工具（`tools/fix_onsite_titles_and_subtitles.py` 等）靠
+#     `ast.literal_eval` 静态抽 `db.py` 的常量 —— 它们**不能** `import db`（会连
+#     `config` 一起拉、触发 import 期的 `require_env()`）。`literal_eval` 不认 `Name`
+#     节点 ⇒ 引用拼接会让它们在**运行时**才炸。本常量眼下**不在** ⑦e-3 的清单里，
+#     但仍写全，免得将来有人加进清单时踩雷。
+#
+#   ★ 保留 `status != 'FAILED'`（闸门⑤）—— 理由与 `CRABPT_QUEUE_WHERE` 那段**逐字相同**：
+#     SQL 三值逻辑下 `NULL != 'FAILED'` 求值为 `NULL` ⇒ 必须显式写
+#     `(status IS NULL OR status != 'FAILED')`，否则"还没标过 status"的行会被**静默排掉**。
+#
+#   ★★ 本常量**不管**"蟹黄堡发过没有" —— 那一层在 `pending_crabpt_direct()` 的
+#     `site_publish` 子查询里（按站去重）。两个口径**必须**分开写，理由见该函数。
+CRABPT_DIRECT_WHERE = (
+    "transfer_rule = 'ALLOW'"
+    " AND (status IS NULL OR status != 'FAILED')"
+)
+
+
+def is_direct_publishable_to(info_hash, site=SITE_CRABPT):
+    """★ **直发判据**：这条能不能**直接**发到 `site`（不经源站）。
+
+    ★★★ 本函数**必须**与 `pending_crabpt_direct()`（实际选行）**同口径** ——
+      两者对**同一行**给出相反答案是**实测发生过**的事故（2026-09-28，见
+      `is_transferable_to` 的 docstring）：工具说"在队列里"、实际永远不发。
+
+    ★ 与 `is_transferable_to()` 的**全部差别**只有一条：
+      那条要求「源站（乌托邦）已上站」（①②），本函数**不看源站**。
+      用户 2026-10-20 定的语义是两站**没有逻辑关系** ⇒ 源站有没有与本判据无关。
+
+    判据（全部成立才放行）：
+      ① 过闸门④：`transfer_rule == 'ALLOW'`（空 / `DENY` / `NEED_CONFIRM` 一律拦）；
+         ★ 空值的语义是「**不知道**能不能转」，**不是**「允许」（`db.py` 闸门④ 那段铁律）。
+      ② 过闸门⑤：`status != 'FAILED'`（发布被站点明确拒 ⇒ 出队，#23）；
+      ③ `site` 上**没有**这条（有记录但 `torrent_id` 空 ⇒ 记录坏了，单独报）。
+    """
+    if not info_hash:
+        return False, "info_hash 为空"
+    rule = transfer_rule_of(info_hash)
+    # ★ 归一化必须在**一处**（与 `is_transferable_to` 同纪律）：
+    #   库里这一列可能是 `NULL` / 空串 / 带空格。与 SQL 侧
+    #   `transfer_rule = 'ALLOW'` **等价**（NULL 与 'DENY' 都不等于 'ALLOW' ⇒ 都拦）。
+    if (rule or "").strip() != "ALLOW":
+        if rule == "DENY":
+            return False, ("transfer_rule='DENY' ⇒ 闸门④ 拦下（只有 'ALLOW' 放行）"
+                           "—— 上游明令**不许再分发**")
+        return False, (f"transfer_rule={rule!r} ⇒ 闸门④ 拦下（只有 'ALLOW' 放行）"
+                       f"{'（规则为空：没标过 ⇒ 按「不知道」拦）' if not (rule or '').strip() else ''}")
+    if (get_status(info_hash) or "").strip() == "FAILED":
+        return False, ("本地已把这条标 `status='FAILED'`（发布被站点明确拒）⇒ "
+                       "已从直发队列出队（#23）；如需重发先人工把它改回")
+    dst_status = site_status_of(info_hash, site)
+    if dst_status is not None:
+        if not site_torrent_id_of(info_hash, site):
+            return False, (f"目标站（{site}）**有记录但 torrent_id 为空** ⇒ "
+                           f"记录坏了，需人工核（状态 {dst_status!r}）")
+        return False, f"目标站（{site}）上已有（id={site_torrent_id_of(info_hash, site)}）"
+    return True, (f"过闸门④（`transfer_rule='ALLOW'`）、"
+                  f"目标站（{site}）没有 ⇒ 可直发")
+
 
 def is_transferable_to(info_hash, site=SITE_CRABPT):
     """★ **转种判据**：这条能不能从**别的**站转去 `site`。
@@ -1692,6 +1773,61 @@ def count_transferable_to(site=SITE_CRABPT):
     n = conn.execute(
         f"SELECT COUNT(*) FROM tasks "
         f" WHERE {CRABPT_QUEUE_WHERE} "
+        f"   AND info_hash NOT IN "
+        f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?)",
+        (str(site),),
+    ).fetchone()[0]
+    conn.close()
+    return n
+
+
+def pending_crabpt_direct(site=SITE_CRABPT):
+    """★ **蟹黄堡直发队列**：过闸门④（`ALLOW`）∧ 没被标 `FAILED` ∧ 目标站没有。
+
+    ★★★ 与 `transferable_to()` 的**唯一**差别：**不要求** `site_status='EXISTS'`。
+      理由（用户 2026-10-20 拍板）：「蟹黄堡跟乌托邦没有逻辑关系」——
+      `site_status` 那一列记的是**乌托邦**，拿它当蟹黄堡的门 = 让乌托邦的 log 闸门
+      连坐蟹黄堡（实测：乌托邦卡掉 65%，蟹黄堡日发量掉到 0）。见 `CRABPT_DIRECT_WHERE`。
+
+    ★★ 返回**完整 task 行**（`TASK_FIELDS`）—— 理由逐字同 `transferable_to()`：
+      调用方（`publish.py`）接着要用它渲染表单，只给 hash 会逼调用方再查一次，
+      而"再查一次"就会出现**两份 WHERE**（`ERR-META-03`）。
+
+    ★★ 排序：`updated_at` 升序（老的最先）—— 与 `get_published()` / `transferable_to()`
+      **同口径**。★ 这条排序与 `status != 'FAILED'` 的组合才是 #23 的要点：没有
+      `status` 这层，一条坏种子会**恒在队首**而被每周期重试。
+
+    ★★★ 去重**只走** `site_publish(site=?)`，**不许**用 `tasks.site_status`：
+      `site_status` 只记乌托邦（见上）。用错列 ⇒ 要么漏发（乌托邦没有就永远不发），
+      要么**静默多发**（蟹黄堡已发过的被当成没发过 ⇒ 重复上站，**不可撤销**）。
+
+    ★ 为什么 WHERE 引用常量而不是手写：手抄必然与常量漂移（`ERR-META-03`）。
+    """
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT {TASK_FIELDS} FROM tasks "
+        f" WHERE {CRABPT_DIRECT_WHERE} "
+        f"   AND info_hash NOT IN "
+        f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?) "
+        f" ORDER BY updated_at",
+        (str(site),),
+    )
+    rows = _rows_to_dicts(cur)
+    conn.close()
+    return rows
+
+
+def count_pending_crabpt_direct(site=SITE_CRABPT):
+    """★ 直发队列的**计数**。★★ 必须与 `pending_crabpt_direct()` 用**同一个**
+    `CRABPT_DIRECT_WHERE` 字符串 —— 理由逐字同 `count_transferable_to()` 那段：
+    一旦探针（计数）和实际筛选漂移，就会变成"探针说有活 → 一条都选不出来 →
+    探针还说有活"的**静默空转**，不报任何错。
+    """
+    conn = connect()
+    n = conn.execute(
+        f"SELECT COUNT(*) FROM tasks "
+        f" WHERE {CRABPT_DIRECT_WHERE} "
         f"   AND info_hash NOT IN "
         f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?)",
         (str(site),),
