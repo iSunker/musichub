@@ -244,8 +244,16 @@ def selftest():
     cols, src, why = _title_write_plan("12345", json.dumps({"title": 0}), PARSED)
     chk("⑥快照 title=0 不许当原文", cols, {})
 
-    # ── ⑦ ★ 结构性判据：两个 `save_task` 调用点都必须带 `**mt_col` ──
+    # ── ⑦ ★ 结构性判据：每一个 `save_task` 调用点都必须带 `**mt_col` ──
     #   （否则"算出来了却没注入"—— 就是返工前 B 用例那个 bug 的**另一种写法**）
+    #
+    # ★★★ 2026-10-20（D6）更正：判据原来硬编码 **2** 处，D6 加了第三条写支
+    #   （无 log → 制了种但 status 仍写 `NO_LOG_FILE`）后当场变红。
+    #   ⇒ 改成**动态下界**：凡是**带 `status=` 写结论**的 `save_task` 调用，
+    #     都必须注入 `**mt_col`；总下界仍是 2，多出来的写支**不豁免**。
+    #   ★ 为什么不用"等于 `status` 写支总数"这种更强的等式：那会让判据随着
+    #     "本次又加了一条写支"而**恒红**，最后必然被人改成"跳过这条"—— 那才是真丢保护。
+    #     下界 + 全量覆盖（每个 status 写支都带）已经封死了"算出来了却没注入"。
     #
     #   ★★★ 判据必须走 **AST**，**不许** `"**mt_col" in 源码文本` ——
     #     第一版就是这么写的，实测**报假红**：真的注入只有 2 处在调里，
@@ -266,11 +274,34 @@ def selftest():
                         hits.append(node.lineno)
         return hits
 
+    def _status_writes(fn_name):
+        """所有**带 `status=` 字面量写结论**的 `fn_name` 调用行号（= 每个写支）。
+
+        ★★★ 2026-10-20（D6）实测踩到：第一版用"任何 `status=` kwarg"当判据，
+          数出 5 处，把**三条 `mt_col` 还没算出来之前**的早退支也算成了
+          "漏注入"（行 2374 / 2521 / 2528）：
+            · 2374 无 log 早退（**制种前**，那时连 `formatted_title` 都还没算）
+            · 2521/2528 `create_musopia_torrent` 抛异常（**没制出种**）
+          ⇒ 判据从"恒红"变成必然被人关掉 —— `ERR-META-30` 的形状。
+        ★ 正确判据：**只有"本轮真的走到了写元数据那一步"的 save_task 才该带
+          `**mt_col`**。结构上能识别的特征是"这次调用同时写了 `torrent_file=`" ——
+          早退/失败支都不写它。⇒ 用 `torrent_file=` 当"已制种"的记号。
+        """
+        return [n.lineno for n in _ast.walk(_tree)
+                if (isinstance(n, _ast.Call)
+                    and getattr(n.func, "attr", None) == fn_name
+                    and any(k.arg == "status" for k in n.keywords)
+                    and any(k.arg == "torrent_file" for k in n.keywords))]
+
     _sites = _starred_kwargs("save_task")
-    if len(_sites) != 2:
+    _writes = _status_writes("save_task")
+    _missing_sites = [ln for ln in _writes if ln not in _sites]
+    if len(_sites) < 2 or _missing_sites:
         ok[0] = False
-        detail.append(f"✗ ⑦`**mt_col` 注入点应为 2 处（短路跳过支 + 普通写支），"
-                      f"实测 {len(_sites)} 处（AST 判据，行号 {_sites}）")
+        detail.append(f"✗ ⑦`**mt_col` 注入点应 ≥2 处且覆盖每个写支，"
+                      f"实测 {len(_sites)} 处（AST 判据，行号 {_sites}）；"
+                      f"带 status= 的 save_task 有 {len(_writes)} 处"
+                      f"（行号 {_writes}），**漏注入**的行号 {_missing_sites}")
 
     # ★★★ ⑦b **数据流**判据 —— 上面那条只查"`**mt_col` 这个符号出现了"，
     #   而符号出现 ≠ 值从 `_title_write_plan` 来。实测**两个变异漏网**：
@@ -327,23 +358,20 @@ def selftest():
         ok[0] = False
         detail.append("✗ ⑦`_title_write_plan()` 定义了但**没有任何调用点** ⇒ 三态没生效")
 
-    # ★★ ⑦c 判**两处 `save_task` 都在同一作用域**（防止"只改了短路支、忘了普通写支"）
-    #   上面只数"总数 = 2"，所以把两处都塞进**同一个** `save_task` 调用里也能骗过去
-    #   （`**mt_col, **mt_col` 会在运行时 TypeError，但那是运行期的事）。
+    # ★★ ⑦c 判**每个写支各自都被注入**（防止"只改了短路支、忘了普通写支"）
+    #   上面⑦只看"总数 ≥2 且每个 status 写支都出现在 _sites 里"，但把两处都塞进
+    #   **同一个** `save_task` 调用里也能骗过去（`**mt_col, **mt_col` 运行时才 TypeError），
+    #   而且"覆盖面"是靠行号相等判的 ⇒ 这里再用**邻近度**做一次独立核对。
+    #   ★ 2026-10-20（D6）：下界从"恰好 2"改成">= 2 且互不相同"，因为写支从 2 条变成 3 条。
     _scoped = {n.lineno for n in _ast.walk(_tree)
                if isinstance(n, _ast.Call) and getattr(n.func, "attr", None) == "save_task"}
     _lines = sorted(set(_sites))
-    if len(_lines) != 2 or not all(any(abs(ln - sl) <= 12 for ln in _lines) for sl in _scoped):
-        # ★ 只是**软判据**：两处必须在**不同**的 save_task 调用里。用行号邻近度近似，
-        #   因为 `_ast` 不给"调用归属"，而这对本文件（间距 < 12 行）足够。
-        _near = {}
-        for ln in _lines:
-            near = [sl for sl in _scoped if abs(ln - sl) <= 12]
-            _near[ln] = near
-        if len({tuple(v) for v in _near.values()}) < 2:
-            ok[0] = False
-            detail.append(f"✗ ⑦c 两处 `**mt_col` 疑似落在**同一个** `save_task` 调用里"
-                          f"（近似归属 {_near}）⇒ 另一个调用点漏了注入")
+    _near = {ln: [sl for sl in _scoped if abs(ln - sl) <= 12] for ln in _lines}
+    if len(_lines) < 2 or any(not v for v in _near.values()) \
+            or len({tuple(v) for v in _near.values()}) < 2:
+        ok[0] = False
+        detail.append(f"✗ ⑦c `**mt_col` 注入点疑似集中在**同一处** `save_task` 里"
+                      f"（近似归属 {_near}）⇒ 至少一个写支漏了注入")
 
     # ★★★ ⑦d 判 `mt_col` **不许被裸下标取键** —— `mt_col["…"]` 在"不写这一列"
     #   （= 空 dict）时抛 **KeyError** ⇒ **整个 scan 阶段崩掉**。

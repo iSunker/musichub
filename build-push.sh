@@ -104,6 +104,25 @@ else
   #   ★ `--platform linux/amd64` 对经典 builder 也有效（daemon 支持时）。
   echo "  （经典 docker build + push；如需 buildx 加 USE_BUILDX=1）"
   docker build --platform linux/amd64 "${TAGS[@]}" "$SRC"
+
+  # ★★★ 本机冒烟测试 —— **必须在 push 之前**（2026-10-20 用户定下的规则）：
+  #   「构建镜像后在本机 docker desktop 启动运行测试一下为 bug 然后再 push，然后再部署」
+  #   ★ 为什么位置**恰好**在这里（build 之后、push 之前）：
+  #     · 放 build 之前 ⇒ 测的是**上一个**镜像，等于没测；
+  #     · 放 push 之后 ⇒ 坏镜像已经上了 Docker Hub，NAS 若有人 `pull` 就中招；
+  #     · 而且 push 上去的 tag 是 `:<sha>`（不可变），推坏了只能再推一个新 sha，
+  #       "同名覆盖"在镜像站的 tag 缓存下**不可靠**（ERR-DOCKER-13）。
+  #   ⇒ 失败就**整脚本中止**（`set -e` + 非 0 退出），不推、不部署。
+  #   ★ `SKIP_SMOKE=1` 只能用于"确认过是本机 Docker Desktop 环境问题"的场合，
+  #     而且要**在终端里说出来**（脚本会打红字提醒）。
+  if [[ "${SKIP_SMOKE:-0}" == "1" ]]; then
+    echo "  ⚠️  SKIP_SMOKE=1 ⇒ **跳过了本机冒烟测试**（违反 2026-10-20 定下的规则）"
+  else
+    echo ""
+    echo "→ ②.5 本机镜像冒烟测试（push 之前的闸门）"
+    bash "$SRC/tools/image-smoke-test.sh" "${IMAGE_NAME}:${SHA}"
+  fi
+
   if [[ "${SKIP_PUSH:-0}" == "1" ]]; then
     echo "  （SKIP_PUSH=1：已构建，不推）"
   else
@@ -118,7 +137,11 @@ echo ""
 echo "✓ 构建完成：${IMAGE_NAME}"
 echo "  tags: latest${EXTRA_TAG:+ · $EXTRA_TAG} · ${SHA}"
 echo ""
-cat <<MSG
+# ★★ 用 `<<'MSG'`（**带引号**）而不是 `<<MSG`：正文里有反引号包的 `.Image` / `sha256:…`，
+#   不带引号的 heredoc 会做**命令替换** ⇒ 实测报 `sha256:…: command not found`、
+#   `.Image: command not found`，而且正文被**静默改写**成空（"两个 ID 不同"那句直接没了）。
+#   本段必须用到 `${IMAGE_NAME}` / `${SHA}` ⇒ 先在上面落成变量再引用（下面用 $MSG 展开）。
+MSG="$(cat <<'EOM'
 ────────────────────────────────────────────────────────────
 接下来在 **NAS 上**执行（本机 → NAS 走 SSH，见 README「部署与构建」）：
 
@@ -128,18 +151,28 @@ cat <<MSG
   #    它缓存 latest 这个**可变 tag**（实测滞后约 1 小时）⇒ pull latest 会静默
   #    拿到旧镜像（命令却回 Status: Image is up to date），而所有命令都报成功。
   #    不可变引用（:<sha> / @sha256:…）**绕过** 镜像站的 tag 缓存（ERR-DOCKER-13）。
-  sed -i 's#image: ${IMAGE_NAME}:.*#image: ${IMAGE_NAME}:${SHA}#' docker-compose.yml
+  sed -i 's#image: IMAGE_PLACEHOLDER:.*#image: IMAGE_PLACEHOLDER:SHA_PLACEHOLDER#' docker-compose.yml
   /usr/local/bin/docker compose pull
   /usr/local/bin/docker compose up -d --force-recreate --remove-orphans musopia
   /usr/local/bin/docker compose logs --tail=60 opencd2musopia
 
-  ★ 顺序纪律：\`pull\` 必须在**任何** \`--profile tools run\` **之前** ——
-    \`docker compose run\` **不会**自动 pull，会用本地旧镜像（症状同 ERR-DOCKER-01：
+  ★ 顺序纪律：`pull` 必须在**任何** `--profile tools run` **之前** ——
+    `docker compose run` **不会**自动 pull，会用本地旧镜像（症状同 ERR-DOCKER-01：
     "跑了但没生效"）。
   ★★ 验证跑的是新镜像（**别用"pull 成功 / up to date"推"NAS 上生效了"** —— 镜像站
      会把 latest 报成 up-to-date；见 ERR-DOCKER-13）：
       /usr/local/bin/docker inspect opencd2musopia --format '{{.Image}}'
-    必须等于本机刚 push 的 image id（本机：docker image inspect ${IMAGE_NAME}:${SHA} --format '{{.Id}}'）。
+  ★★ 判定"跑的是新镜像"的**正确判据**（2026-10-20 实测更正）：
+    比对 **digest**，不是 image ID。
+      NAS：  docker images --digests | grep SHA_PLACEHOLDER     ← 看 Digest 列
+      本机： docker image inspect IMAGE_PLACEHOLDER:SHA_PLACEHOLDER --format '{{json .RepoDigests}}'
+    两边 `sha256:…` 必须相同。
+    ★ 反例（本次实测踩到，差点误判成"部署没生效"）：NAS `.Image` = sha256:40754597…、
+      本机 = sha256:de4f6df1… —— **两个 ID 不同，但 RepoDigests 完全相同**。
+      原因：image ID 是 pull 时本地重算的，**同一份内容在不同 daemon 上 ID 可以不同**。
+      ⇒ 拿 `.Image` 比 → 永远不等 → 假报警；比 digest 才是真的"内容一致"。
   ★ 回滚：把 compose 里的 image 换回上一个 git-sha tag 再 up -d。
     sha tag 是这次改造带来的净收益（部署一律点名它）。
-MSG
+EOM
+)"
+printf '%s\n' "${MSG//IMAGE_PLACEHOLDER/$IMAGE_NAME}" | sed "s/SHA_PLACEHOLDER/$SHA/g"
