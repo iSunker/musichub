@@ -410,6 +410,10 @@ def verify_pieces(src_path, torrent_bytes, *, max_pieces=None):
 
 
 def verify_publish_area_complete(src_path, album_name, *, torrent_file=None):
+    # ★★ 2026-10-20 实测：`torrent_file` 这个口子**在任何真路径上都拿不到值** ——
+    #   `begin_handoff_for_task` 判完一级就 `return`，从不把 torrent 传下来
+    #   （见该函数「关键闸门」那段），所以二级逐片校验在生产里**从未跑过一次**。
+    #   此处保留形参只为兼容 selftest / 未来的真接线点；**它不会自动生效**。
     """★★★ 判据：`src_path`(HDD 源) 是否**完整**已复制到发种区 `<PUBLISH_CONTAINER_DIR>/<专辑>`。
 
     ★ 两级判据，**便宜的先走、贵的后走**（顺序不能反）：
@@ -504,6 +508,13 @@ def begin_handoff_for_task(src_path, album_name, info_hash, task=None,
         # ★ dry-run 不落盘 ⇒ 无可核对；如实说明，返回 True 以免演练里假拦（闸门才是有意义的演练对象）。
         return True, f"[dry-run] 将复制 {src_path} → {ssd_dir} 并入队（未核对）"
     # ★★ 关键闸门：数据没逐字节就位 ⇒ 不返回成功（调用方据此**拒绝回加**）。
+    # ★★★ 2026-10-20 诚实标注：这里**没给** `torrent_file` ⇒ `S6` 的二级逐片校验
+    #   在本函数的真路径上**不跑**，闸门实际只是"逐字节"。
+    #   为什么没顺手接上：`torrent_file` 只在**已发种成功**的分支里有；而被拒后落库的
+    #   `torrent_file`（如 `…2011-2011 FLAC 分轨.torrent` 实际是 `…Multi File.torrent`）
+    #   **指向的文件根本不存在** ⇒ 接上就会"读 .torrent 失败"，把一级的绿**如实判红**
+    #   ⇒ 已上站的种一条都回加不了。要接必须先保证该路径可靠，或改用
+    #   `/data/output_torrents/` 下的 DB `info_hash` 去索引 —— 见 BACKLOG §4e W4。
     ok_copy, why_copy = verify_publish_area_complete(src_path, album_name)
     if not ok_copy:
         return False, f"发种区数据未就位，拒绝回加: {why_copy}"
