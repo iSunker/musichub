@@ -1322,8 +1322,8 @@ def _crabpt_cover(task, *, dry_run=False):
     if have:
         return have, f"已有蟹黄堡专用封面（site_publish）⇒ 复用，不重传：{have}"
 
-    # ② 本地缓存里找原图。★ 本地图是用**乌托邦那个 URL** 做 key 缓存的
-    #   （封面当初就是为乌托邦抓的）⇒ 拿它当 key 去查，**只查本地、不联网**。
+    # ② 本地缓存里找原图。若本地无缓存，则联网下载到本地缓存（外站图不扣皇后配额，
+    #   下载后按 sha1(src)[:12] 缓存，供后续及 Lsky Pro 上传复用）。
     src = (task.get("cover_url") or "").strip()
     if not src:
         # ★ 本条级：这条种子**根本没有封面源** ⇒ 跳过本条（不是设施坏）。
@@ -1331,12 +1331,14 @@ def _crabpt_cover(task, *, dry_run=False):
     try:
         import cover_fetch
         local = cover_fetch._cached_file(src)
+        if not local:
+            local = cover_fetch.download(src)
     except Exception as e:                                  # noqa: BLE001
-        return "", f"★ 查本地封面缓存出错: {type(e).__name__}: {e}"
+        return "", f"★ 查本地或下载封面缓存出错: {type(e).__name__}: {e}"
     if not local:
-        # ★ 本条级：本地没有这张图（且不联网重下）⇒ 跳过本条。
+        # ★ 本条级：本地没有且联网下载失败 ⇒ 跳过本条。
         raise CoverItemError(
-            f"本地封面缓存里没有这张图（key={src[:60]}…）⇒ 没有可上传的源")
+            f"本地封面缓存缺失且联网下载失败（key={src[:60]}…）⇒ 没有可上传的源")
     if dry_run:
         # ★ dry-run **不真上传**（那是外部副作用而且是不可撤销的写）。
         #   但也**不能说"封面就绪"** —— 那是个假判据。如实报"会传这一张"。
