@@ -1919,6 +1919,39 @@ def selftest():
     finally:
         _sh.rmtree(_tmpE8, ignore_errors=True)
 
+    # ── ⑨j 选种硬门槛自检（ERR-PUBLISH-25）：未下载完的种子坚决拒绝选入 ──
+    from types import SimpleNamespace as _SN
+    _t_ok = _SN(progress=1.0, amount_left=0, state="uploading",
+                content_path="/volume1/music/Album", save_path="/volume1/music")
+    _t_prog = _SN(progress=0.999, amount_left=0, state="uploading",
+                  content_path="/volume1/music/Album", save_path="/volume1/music")
+    _t_left = _SN(progress=1.0, amount_left=1024, state="uploading",
+                  content_path="/volume1/music/Album", save_path="/volume1/music")
+    _t_dl = _SN(progress=1.0, amount_left=0, state="downloading",
+                content_path="/volume1/music/Album", save_path="/volume1/music")
+    _t_inc = _SN(progress=1.0, amount_left=0, state="uploading",
+                 content_path="/volume1/incomplete/Album", save_path="/volume1/incomplete")
+
+    _ok_res, _ = _torrent_is_download_completed(_t_ok)
+    chk("⑨j 阴性对照：完工种子放行", _ok_res, True)
+    _prog_res, _ = _torrent_is_download_completed(_t_prog)
+    chk("⑨j 进度未达100%拦截", _prog_res, False)
+    _left_res, _ = _torrent_is_download_completed(_t_left)
+    chk("⑨j 剩余字节>0拦截", _left_res, False)
+    _dl_res, _ = _torrent_is_download_completed(_t_dl)
+    chk("⑨j 下载状态拦截", _dl_res, False)
+    _inc_res, _ = _torrent_is_download_completed(_t_inc)
+    chk("⑨j 临时目录拦截", _inc_res, False)
+
+    # 结构性判据：main() 必须调用 _torrent_is_download_completed
+    _calls_gate = [n.lineno for n in _ast.walk(_tree)
+                   if isinstance(n, _ast.Call) and getattr(n.func, "id", "") == "_torrent_is_download_completed"]
+    if len(_calls_gate) < 1:
+        ok[0] = False
+        detail.append("✗ ⑨j main() 中没有调用 _torrent_is_download_completed ⇒ 选种门槛未接线")
+    else:
+        detail.append(f"ℹ ⑨j 结构：选种门槛已接线（调用点行号 {_calls_gate}）✅")
+
     return ok[0], detail
 
 
@@ -2145,6 +2178,43 @@ def _torrent_is_opencd(torrent, tracker_host):
     return bool(m) and m.group(1).lower() == (tracker_host or "").lower()
 
 
+# 做种/已完成状态族（与 handoff / site_readd 一致）
+_SEEDING_OR_COMPLETED_STATES = {
+    "stalledUP", "uploading", "forcedUP", "queuedUP", "checkingUP", "pausedUP", "stoppedUP"
+}
+
+
+def _torrent_is_download_completed(torrent):
+    """★ 判一个 qB torrent 是否已完全下载完成（选种硬门槛，ERR-PUBLISH-25）。
+
+    ★ 任何未下载完、正在下载、或仍在临时目录中的种子，一律拒绝选入候选池。
+    ★ 为什么在最上游卡：如果在选种阶段放行未完成下载的种子，哪怕下游有拦截，
+      也会白白消耗资源、污染状态账本，更可能因缓存而泄漏到发布端（如 22448 / 225778）。
+    """
+    # 1. 进度检查：必须 100%
+    prog = getattr(torrent, "progress", None)
+    if prog is not None and prog < 1.0:
+        return False, f"progress={prog:.1%} < 100%"
+
+    # 2. 剩余字节：必须为 0
+    left = getattr(torrent, "amount_left", None)
+    if left is not None and left > 0:
+        return False, f"amount_left={left} > 0"
+
+    # 3. 状态检查：排除任何下载态与未就绪态
+    state = str(getattr(torrent, "state", "") or "")
+    if state and state not in _SEEDING_OR_COMPLETED_STATES:
+        return False, f"state={state} (非做种/未完成状态)"
+
+    # 4. 路径检查：不能在 incomplete 临时目录中
+    cp = str(getattr(torrent, "content_path", "") or "")
+    sp = str(getattr(torrent, "save_path", "") or "")
+    if "/incomplete/" in cp.replace("\\", "/") or "/incomplete/" in sp.replace("\\", "/"):
+        return False, f"content_path 在临时目录: {cp}"
+
+    return True, ""
+
+
 class _NoopLockHandle:
     """无 `fcntl` 平台（本机 Windows）的**空操作锁句柄**。
 
@@ -2291,6 +2361,19 @@ def _scan_main(args):
         print(f"⚠️  ⚠️  皇后种为 0 但实例有 {len(_all)} 个种 —— 识别口径可能已失效"
               f"（tracker=[{_tracker_host}] 一个都没匹配上）\n")
 
+    # ★ 选种硬门槛（ERR-PUBLISH-25）：排除所有未完全下载完成的种子
+    _ready = []
+    _incomplete_rejected = 0
+    for t in torrents:
+        _ok, _reason = _torrent_is_download_completed(t)
+        if _ok:
+            _ready.append(t)
+        else:
+            _incomplete_rejected += 1
+    if _incomplete_rejected > 0:
+        print(f"🛡️ 选种门槛：已过滤 {_incomplete_rejected} 个尚未完全下载完成的种子（ERR-PUBLISH-25）\n")
+    torrents = _ready
+
     if args.limit:
         torrents = torrents[:args.limit]
 
@@ -2329,6 +2412,13 @@ def _scan_main(args):
         info_hash = torrent.hash
         name = torrent.name
         content_path = torrent.content_path
+
+        # ★ 选种硬门槛（ERR-PUBLISH-25）：排除任何未下载完成的种子
+        _comp_ok, _comp_why = _torrent_is_download_completed(torrent)
+        if not _comp_ok:
+            print(f"🛑 选种门槛拦截：{name} 未完全下载（{_comp_why}）⇒ 跳过处理")
+            stats["skipped"] += 1
+            continue
 
         if not args.recheck and info_hash in known:
             (status, tfile, site_status, known_cover,

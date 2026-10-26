@@ -218,6 +218,19 @@ def build_stages():
             "interval": env_int("CRABPT_INTERVAL", 1800),
         })
 
+    # 猫站（PTerClub）：第三发布站点
+    if env_bool("ENABLE_PUBLISH_PTER", False):
+        cmd = (["python", "publish.py", "--site", "pter"]
+               + apply_flag("--yes", "--auto"))
+        n = env_int("PTER_MAX_PER_CYCLE", 1)
+        if n:
+            cmd += ["--limit", str(n)]
+        stages.append({
+            "name": "publish_pter",
+            "cmd": cmd,
+            "interval": env_int("PTER_INTERVAL", 1800),
+        })
+
     # 3) 回填 site_torrent_id。编辑的前置条件，频率可以很低。
     if env_bool("ENABLE_SYNC", True):
         stages.append({
@@ -652,6 +665,7 @@ ENV_SNAPSHOT_KEYS = (
     #      也刻意不落盘的既有做法）。
     # ══════════════════════════════════════════════════════════════════════
     "ENABLE_PUBLISH_CRABPT", "CRABPT_INTERVAL", "CRABPT_MAX_PER_CYCLE",
+    "ENABLE_PUBLISH_PTER", "PTER_INTERVAL", "PTER_MAX_PER_CYCLE",
 )
 
 
@@ -1440,6 +1454,7 @@ def _seed_patrol_build_clients():
     import qb_client
     from musopia import MusopiaClient
     from crabpt_site import CrabptClient
+    from pter_site import PterClient
     cfg3020 = types.SimpleNamespace(
         QB_HOST=HANDOFF_HOST_3020,
         QB_USER=getattr(config, "QB_USER", "admin"),
@@ -1449,9 +1464,10 @@ def _seed_patrol_build_clients():
     )
     qb_3020 = qb_client.build(cfg3020)
     qb_3040 = qb_client.build(config)
-    sites = {db.SITE_MUSOPIA: MusopiaClient(), db.SITE_CRABPT: CrabptClient()}
+    sites = {db.SITE_MUSOPIA: MusopiaClient(), db.SITE_CRABPT: CrabptClient(), db.SITE_PTER: PterClient()}
     cats = {db.SITE_MUSOPIA: getattr(config, "PUBLISH_CATEGORY", None),
-            db.SITE_CRABPT: getattr(config, "CRABPT_PUBLISH_CATEGORY", None)}
+            db.SITE_CRABPT: getattr(config, "CRABPT_PUBLISH_CATEGORY", None),
+            db.SITE_PTER: getattr(config, "PTER_PUBLISH_CATEGORY", None)}
     return qb_3020, qb_3040, sites, cats
 
 
@@ -1856,7 +1872,7 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
             #   ★ 窗口外**不碰 `last_run`**（见 `in_publish_window` 上方注释③）⇒
             #     窗口一开立刻补发，而不是干等一个完整周期。
             #   ★ 只影响 publish / publish_crabpt；scan/crawl/edit/... 一概不受影响。
-            if name in ("publish", "publish_crabpt") and not in_publish_window(now):
+            if name in ("publish", "publish_crabpt", "publish_pter") and not in_publish_window(now):
                 st["last_skip_at"] = datetime.now().isoformat(timespec="seconds")
                 st["skip_reason"] = f"窗口外：PUBLISH_WINDOW={os.getenv('PUBLISH_WINDOW')}"
                 skipped = True

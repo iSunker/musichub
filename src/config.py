@@ -208,6 +208,20 @@ CRABPT_MUSIC_CATEGORY = os.getenv("CRABPT_MUSIC_CATEGORY", "408")
 #   也便于按站统计（本项目已有 PUBLISH_CATEGORY=Musopia）。
 CRABPT_PUBLISH_CATEGORY = os.getenv("CRABPT_PUBLISH_CATEGORY", "CrabPT")
 
+# ==================== 猫站（PTerClub，第三发布目标）====================
+# ★★ 为什么用 `os.getenv` 而不是 `require_env`：
+#   老链路不需要这个键，不能让乌托邦/蟹黄堡因缺键而起不来。
+#   真要用它时（`publish.py --site pter`）由 `PterClient` 检查并给出明确报错。
+PTER_URL = os.getenv("PTER_URL", "https://pterclub.net")
+PTER_COOKIE = os.getenv("PTER_COOKIE", "")
+# ★ 音乐分类 id（实测 type=406，见 PTNexus pterclub.yaml）
+PTER_MUSIC_CATEGORY = os.getenv("PTER_MUSIC_CATEGORY", "406")
+# ★ 猫站的 qB 分类
+PTER_PUBLISH_CATEGORY = os.getenv("PTER_PUBLISH_CATEGORY", "PTer")
+# ★ 猫站图床配置（标准 Chevereto API，留空则自动退回通用公网图床/已缓存封面）
+PTER_IMG_URL = os.getenv("PTER_IMG_URL", "https://img.pterclub.net/api/1/upload")
+PTER_IMG_API_KEY = os.getenv("PTER_IMG_API_KEY", "")
+
 # ---- ★ 延迟回加 qB（2026-10-03 加）---------------------------------------
 #
 # ★ 干什么：种子**发布成功后**，**不立即**加进 qB 做种，而是等 N 分钟再加。
@@ -346,7 +360,8 @@ HANDOFF_OWN_CATEGORIES = [
     c.strip() for c in os.getenv(
         "HANDOFF_OWN_CATEGORIES",
         f"{os.getenv('PUBLISH_CATEGORY', 'Musopia')},"
-        f"{os.getenv('CRABPT_PUBLISH_CATEGORY', 'CrabPT')}",
+        f"{os.getenv('CRABPT_PUBLISH_CATEGORY', 'CrabPT')},"
+        f"{os.getenv('PTER_PUBLISH_CATEGORY', 'PTer')}",
     ).split(",") if c.strip()
 ]
 

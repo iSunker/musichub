@@ -254,45 +254,46 @@ def _picgo_extract_url(data):
     return str(data.get("url") or "")
 
 
-def upload_to_picgo(image_path, retries=2):
+def upload_to_chevereto(image_path, api_url=None, api_key=None, retries=2):
     """
-    上传图片到 PicGo，返回 URL 或 ""。
-
-    重复上传时图床会报 400 Duplicated upload。此时尽力从响应里回收已有
-    图片的 URL（Chevereto 部分版本会返回 result.url），回收不到才返回空。
-    绝不能把"上传失败"当成"没有封面"——历史上 run.py 重做任务时正是
-    这样把库里已有的 cover_url 覆盖成空，连锁导致站点页面封面被抹掉。
+    通用 Chevereto API v1 规范上传函数，返回 URL 或 ""。
+    PicGo (www.picgo.net/api/1/upload) 与猫站图床 (img.pterclub.net/api/1/upload) 均属此类。
     """
     if not image_path or not os.path.exists(image_path):
         return ""
 
-    headers = {"X-API-Key": config.PICGO_API_KEY}
+    url = api_url or config.PICGO_UPLOAD_URL
+    key = api_key or config.PICGO_API_KEY
+    if not key:
+        return ""
+
+    headers = {"X-API-Key": key}
     last_err = ""
 
     for attempt in range(retries + 1):
         try:
             with open(image_path, "rb") as f:
                 res = requests.post(
-                    config.PICGO_UPLOAD_URL,
+                    url,
                     headers=headers,
                     files={"source": f},
                     timeout=40,
                 )
             if res.status_code == 200:
-                url = _picgo_extract_url(res.json())
-                if url:
-                    return url
+                out_url = _picgo_extract_url(res.json())
+                if out_url:
+                    return out_url
                 last_err = f"响应里没有 url 字段: {res.text[:150]}"
             elif res.status_code == 400 and "duplicat" in res.text.lower():
                 # 重复上传：图床已存过这张图。先尝试从错误响应里回收 URL。
                 try:
-                    url = _picgo_extract_url(res.json())
+                    out_url = _picgo_extract_url(res.json())
                 except ValueError:
-                    url = ""
-                if url:
+                    out_url = ""
+                if out_url:
                     print(f"    [图床] {os.path.basename(image_path)} 已存在，"
-                          f"复用已有 URL: {url}")
-                    return url
+                          f"复用已有 URL: {out_url}")
+                    return out_url
                 last_err = ("重复上传但响应里没有可回收的 URL "
                             f"(HTTP 400: {res.text[:150]})")
             else:
@@ -305,6 +306,36 @@ def upload_to_picgo(image_path, retries=2):
 
     print(f"    [图床失败] {os.path.basename(image_path)} -> {last_err}")
     return ""
+
+
+def upload_to_picgo(image_path, retries=2):
+    """
+    上传图片到 PicGo，返回 URL 或 ""。
+    """
+    return upload_to_chevereto(
+        image_path,
+        api_url=config.PICGO_UPLOAD_URL,
+        api_key=config.PICGO_API_KEY,
+        retries=retries,
+    )
+
+
+def upload_to_pter_img(image_path, retries=2):
+    """
+    上传图片到猫站图床，返回 URL 或 ""。
+    ★ 若未配置 PTER_IMG_API_KEY，自动退回通用公网图床 (PicGo)。
+    """
+    if config.PTER_IMG_API_KEY:
+        url = upload_to_chevereto(
+            image_path,
+            api_url=config.PTER_IMG_URL,
+            api_key=config.PTER_IMG_API_KEY,
+            retries=retries,
+        )
+        if url:
+            return url
+    # 兜底退回通用图床
+    return upload_to_picgo(image_path, retries=retries)
 
 
 def _lsky_extract_url(data):

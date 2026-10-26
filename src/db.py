@@ -230,6 +230,7 @@ SITE_PUBLISH_TABLE = "site_publish"
 #   （`ERR-META-03`：两处各写一份必然漂移，而这里的漂移会让"查不到"长得像"没发过"）。
 SITE_MUSOPIA = "musopia"
 SITE_CRABPT = "crabpt"
+SITE_PTER = "pter"
 
 SITE_PUBLISH_COLUMNS = [
     ("info_hash", "TEXT NOT NULL"),
@@ -1562,6 +1563,19 @@ CRABPT_DIRECT_WHERE = (
     " AND (status IS NULL OR status != 'FAILED')"
 )
 
+# ==================== 猫站直发队列（PTER_DIRECT_WHERE）====================
+# 判据：
+# ① 过闸门④：transfer_rule == 'ALLOW'（禁止转载 / NEED_CONFIRM 拦）
+# ② 过闸门⑤：(status IS NULL OR status != 'FAILED')
+# ③ ★★★ 猫站规则铁律：Log 与频谱图两者至少包含一项，优先推荐 Log！
+#    因为本项目不生成频谱图，只有带 Log 的种子才符合猫站发种规范，
+#    因此无 Log 的种子（status == 'NO_LOG_FILE'）严禁进入猫站队列！
+#    必须 status == 'SUCCESS'（在本项目中 SUCCESS 代表制种完备且含有效日志）！
+PTER_DIRECT_WHERE = (
+    "transfer_rule = 'ALLOW'"
+    " AND status = 'SUCCESS'"
+)
+
 
 def is_direct_publishable_to(info_hash, site=SITE_CRABPT):
     """★ **直发判据**：这条能不能**直接**发到 `site`（不经源站）。
@@ -1592,9 +1606,12 @@ def is_direct_publishable_to(info_hash, site=SITE_CRABPT):
                            "—— 上游明令**不许再分发**")
         return False, (f"transfer_rule={rule!r} ⇒ 闸门④ 拦下（只有 'ALLOW' 放行）"
                        f"{'（规则为空：没标过 ⇒ 按「不知道」拦）' if not (rule or '').strip() else ''}")
-    if (get_status(info_hash) or "").strip() == "FAILED":
+    cur_status = (get_status(info_hash) or "").strip()
+    if cur_status == "FAILED":
         return False, ("本地已把这条标 `status='FAILED'`（发布被站点明确拒）⇒ "
                        "已从直发队列出队（#23）；如需重发先人工把它改回")
+    if site == SITE_PTER and cur_status != "SUCCESS":
+        return False, (f"猫站要求必须带 Log（当前 status={cur_status!r}，非 SUCCESS）⇒ 拦截")
     dst_status = site_status_of(info_hash, site)
     if dst_status is not None:
         if not site_torrent_id_of(info_hash, site):
@@ -1828,6 +1845,40 @@ def count_pending_crabpt_direct(site=SITE_CRABPT):
     n = conn.execute(
         f"SELECT COUNT(*) FROM tasks "
         f" WHERE {CRABPT_DIRECT_WHERE} "
+        f"   AND info_hash NOT IN "
+        f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?)",
+        (str(site),),
+    ).fetchone()[0]
+    conn.close()
+    return n
+
+
+def pending_pter_direct(site=SITE_PTER):
+    """★ 猫站直发队列：过闸门④（`ALLOW`）∧ status='SUCCESS'（必须含Log）∧ 目标站没有。
+
+    ★★ 排序：`updated_at` 升序（老的最先），与 crabpt/musopia 同口径。
+    """
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT {TASK_FIELDS} FROM tasks "
+        f" WHERE {PTER_DIRECT_WHERE} "
+        f"   AND info_hash NOT IN "
+        f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?) "
+        f" ORDER BY updated_at",
+        (str(site),),
+    )
+    rows = _rows_to_dicts(cur)
+    conn.close()
+    return rows
+
+
+def count_pending_pter_direct(site=SITE_PTER):
+    """★ 猫站直发队列计数。必须与 `pending_pter_direct()` 用同一个 PTER_DIRECT_WHERE。"""
+    conn = connect()
+    n = conn.execute(
+        f"SELECT COUNT(*) FROM tasks "
+        f" WHERE {PTER_DIRECT_WHERE} "
         f"   AND info_hash NOT IN "
         f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?)",
         (str(site),),

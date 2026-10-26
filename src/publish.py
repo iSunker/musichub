@@ -75,6 +75,7 @@ import time
 
 import config
 import crabpt_site
+import pter_site
 import db
 import descr
 import readd_queue
@@ -156,10 +157,11 @@ def parse_args():
     #     它是生产上跑了几个月的站点（254 条在做种），改默认 = 改变既有行为；
     #     而"新增一个站"不该顺手改动老站的行为（本项目的 `ERR-ENV-02` 同理：
     #     缺键时的默认值必须**中性**）。
-    ap.add_argument("--site", choices=("musopia", "crabpt"), default="musopia",
+    ap.add_argument("--site", choices=("musopia", "crabpt", "pter"), default="musopia",
                     help="发布到哪个站（默认 musopia = 保持既有行为）。★ "
                          "`crabpt` = 蟹黄堡，走 crabpt_site.py 的字段层与客户端；"
-                         "★ 两站共用 --only/--limit/闸门/dry-run/两把钥匙，"
+                         "`pter` = 猫站，走 pter_site.py 的字段层与客户端；"
+                         "★ 各站共用 --only/--limit/闸门/dry-run/两把钥匙，"
                          "只有**字段与提交地址**不同。")
     # ★ 负向自检（不碰站点、不碰库）。见 `selftest_crabpt_isolation`。
     ap.add_argument("--selftest", action="store_true",
@@ -848,6 +850,81 @@ def readd_to_qb_crabpt(qb, client, info_hash, torrent_id):
         print(f"    ❌ 回加 qB 出错: {e}")
 
 
+def readd_to_qb_pter(qb, client, info_hash, torrent_id):
+    """把猫站（PTerClub）上的新种子下载回来加进 qB 做种。分类用 PTER_PUBLISH_CATEGORY。"""
+    if qb is None:
+        print("    ⚠️  回加跳过：本次没有可用的 qB 连接")
+        return
+    try:
+        content = client.download_torrent(torrent_id)
+        if not content:
+            print("    ❌ 从猫站下载种子文件失败，跳过回加")
+            return
+
+        _handoff_on = str(getattr(config, "ENABLE_HANDOFF", "false")).strip().lower() in (
+            "1", "true", "yes", "y", "on")
+        _h_src = ""
+        _h_album = ""
+        if _handoff_on:
+            orig = qb.torrents_info(torrent_hashes=info_hash)
+            if not orig:
+                print(f"    ⚠️  回加跳过：3040 上找不到原种 {info_hash[:12]}…（无法确定专辑名）")
+                return
+            album = orig[0].name
+            _h_album = album
+            import handoff
+            _src_path, _err = handoff.find_source_in_hdd(album)
+            if not _src_path:
+                print(f"    ⚠️  交棒跳过：HDD 找不到专辑 {album!r}（{_err}）")
+                return
+            _h_src = _src_path
+            ok, dst, err = handoff.copy_to_publish_area(_src_path, album)
+            if not ok:
+                print(f"    ❌ 复制到发种区失败（{album}）: {err}")
+                return
+            save_path = config.PUBLISH_SAVE_ROOT
+        else:
+            orig = qb.torrents_info(torrent_hashes=info_hash)
+            if not orig:
+                print(f"    ⚠️  回加跳过：qB 里找不到原种 {info_hash[:12]}…（无法确定保存路径）")
+                return
+            save_path = orig[0].save_path
+
+        if config.SEED_DELAY_MIN > 0:
+            readd_queue.enqueue(
+                content, save_path, config.PTER_PUBLISH_CATEGORY,
+                config.SEED_DELAY_MIN, note=f"猫站 {info_hash[:12]}…",
+                src_path=_h_src, album=_h_album,
+            )
+            return
+
+        qb.torrents_add(
+            torrent_files=content,
+            save_path=save_path,
+            is_paused=False,
+            category=config.PTER_PUBLISH_CATEGORY,
+        )
+        print(f"    ✅ 已提交回加至 qB（做种路径: {save_path}，分类: {config.PTER_PUBLISH_CATEGORY}）")
+        try:
+            new_hash = torf.Torrent.read_stream(io.BytesIO(content)).infohash
+            got = qb.torrents_info(torrent_hashes=new_hash)
+            if not got:
+                print(f"    ⚠️  回加复核：此刻 qB 里查不到 {new_hash[:12]}…（异步入库中）")
+            else:
+                t = got[0]
+                _dl_states = {"stalledDL", "downloading", "metaDL", "stoppedDL",
+                              "pausedDL", "allocating", "checkingDL", "forcedDL",
+                              "queuedDL", "missingFiles", "error", "unknown"}
+                prog = float(getattr(t, "progress", 0) or 0)
+                ok = (t.state not in _dl_states) and prog >= 1.0
+                mark = "✅" if ok else "★★"
+                print(f"    {mark} 回加复核：state={t.state} progress={prog:.3f} content_path={t.content_path!r}")
+        except Exception as e:
+            print(f"    ⚠️  回加复核失败（不影响发布本身）: {type(e).__name__}: {e}")
+    except Exception as e:
+        print(f"    ❌ 回加 qB 出错: {e}")
+
+
 def merge_mapped(task):
     """
     把 `task["mapped_json"]` 解回**顶层键**。
@@ -1042,6 +1119,10 @@ def _version_consistency_gate(task):
     content_path = (task or {}).get("content_path") or ""
     torrent_file = (task or {}).get("torrent_file") or ""
 
+    # ⓪ 临时目录拦截（ERR-PUBLISH-25）
+    if "/incomplete/" in content_path.replace("\\", "/").lower():
+        return False, f"内容路径在临时目录: {content_path}"
+
     # ① 版本标签：DB vs 盘上实况
     db_tt = (task.get("track_type") or "").strip()
     if content_path and os.path.isdir(content_path):
@@ -1068,6 +1149,41 @@ def _version_consistency_gate(task):
     if t_files is None:
         print(f"    ℹ️  版本闸门：本地种子文件集读不出（{why}）⇒ 跳过比对、不拦")
         return True, ""
+
+    # ②a 检查种子内是否包含下载未完成的临时文件（.!qb, .part, .!ut, .!bt, .aria2）
+    _INCOMPLETE_EXTS = (".!qb", ".part", ".!ut", ".!bt", ".aria2")
+    for f in t_files:
+        _lower = f.lower()
+        for ext in _INCOMPLETE_EXTS:
+            if _lower.endswith(ext):
+                return False, f"种子文件集包含下载未完成临时文件: {f}"
+
+    # ②b 检查 pieces 中全 0 脏块比例（ERR-PUBLISH-25）
+    # 当 qB 预分配文件但未下载完成时打包制种，会有大量全 0 的 piece 块。
+    try:
+        if t_bytes:
+            import io as _io_gate
+            import torf as _torf_gate
+            _tg = _torf_gate.Torrent.read_stream(_io_gate.BytesIO(t_bytes))
+            _info = _tg.metainfo.get("info") or {}
+            _psize = _info.get("piece length")
+            _pieces = _info.get("pieces")
+            if _psize and _pieces and isinstance(_pieces, bytes):
+                import hashlib as _hl
+                _zero_hash = _hl.sha1(b"\x00" * _psize).digest()
+                _total_p = len(_pieces) // 20
+                if _total_p > 0:
+                    _zero_cnt = sum(
+                        1 for i in range(_total_p)
+                        if _pieces[i * 20 : (i + 1) * 20] == _zero_hash
+                    )
+                    _ratio = _zero_cnt / _total_p
+                    if _ratio > 0.10:
+                        return False, (f"种子包含大量全0空块: {_zero_cnt}/{_total_p} "
+                                       f"({_ratio:.1%} > 10%)，疑似未完成预分配文件打包（ERR-PUBLISH-25）")
+    except Exception as e:
+        print(f"    ℹ️  版本闸门：解析种子 pieces 失败（{e}）⇒ 跳过空块比对")
+
     l_files = _sv.files_of_dir(content_path)
     verdict, note = _sv.compare_file_sets(l_files, t_files)
     if verdict == _sv.MISMATCH:
@@ -1359,6 +1475,38 @@ def _crabpt_cover(task, *, dry_run=False):
     return url, f"新传到 Lsky：{local} ⇒ {url}"
 
 
+def _pter_cover(task, *, dry_run=False):
+    """确保这条种子在猫站上有一份封面 URL。返回 `(url, 说明)`。"""
+    h = task["info_hash"]
+    site = db.SITE_PTER
+
+    have = db.site_cover_url_of(h, site)
+    if have:
+        return have, f"已有猫站专用封面（site_publish）⇒ 复用，不重传：{have}"
+
+    src = (task.get("cover_url") or "").strip()
+    if not src:
+        raise CoverItemError("库里连 cover_url 都没有 ⇒ 无源可传")
+    try:
+        import cover_fetch
+        local = cover_fetch._cached_file(src)
+        if not local:
+            local = cover_fetch.download(src)
+    except Exception as e:
+        return "", f"★ 查本地或下载封面缓存出错: {type(e).__name__}: {e}"
+    if not local:
+        raise CoverItemError(
+            f"本地封面缓存缺失且联网下载失败（key={src[:60]}…）⇒ 没有可上传的源")
+    if dry_run:
+        return src, f"dry-run：**不会**真上传。验证通过后会传这一张上去：{local}"
+
+    import assets
+    url = assets.upload_to_pter_img(local)
+    if not url:
+        raise CoverItemError(f"图床上传失败（本地图 {local}）")
+    return url, f"新传封面：{local} ⇒ {url}"
+
+
 def _crabpt_fields(task, anonymous):
     """第 3 个字段层（详见 `crabpt_site.py` 文件头与 `PLAN-crabpt.md` 附录 C）。
 
@@ -1545,6 +1693,34 @@ def selftest_crabpt_isolation(verbose=True):
     if verbose:
         mark = "✅" if not detail else "❌"
         print(f"{mark} 蟹黄堡隔离自检：run_crabpt 不碰 site_status/site_torrent_id、"
+              f"且确实写 site_publish")
+        for d in detail:
+            print(f"    {d}")
+    return (not detail), detail
+
+
+def selftest_pter_isolation(verbose=True):
+    """断言 `run_pter` 的**代码**里不出现乌托邦那两列。返回 `(是否通过, 明细)`。"""
+    src = open(os.path.abspath(__file__), encoding="utf-8").read()
+    tree = _ast.parse(src)
+    fn = next((n for n in _ast.walk(tree)
+               if isinstance(n, _ast.FunctionDef) and n.name == "run_pter"), None)
+    if fn is None:
+        return False, ["★ 找不到 run_pter —— 函数被改名了？本条自检失效"]
+    code = _code_only(fn)
+    bad = _column_offenders(fn, set(_CRABPT_FORBIDDEN))
+    detail = []
+    if bad:
+        detail.append(f"★★ run_pter 里读了/写了乌托邦的列：{bad} ⇒ "
+                      f"改用 `db.site_publish_set(...)` / `db.site_*_of(...)`")
+    if "set_site_id" in code:
+        detail.append("★★ run_pter 里调了 `db.set_site_id` —— 它会写乌托邦那两列")
+    if "site_publish_set" not in code:
+        detail.append("★★ run_pter 里**没有** `db.site_publish_set` ⇒ "
+                      "发布结果没落到 site_publish（新表会缺猫站的行）")
+    if verbose:
+        mark = "✅" if not detail else "❌"
+        print(f"{mark} 猫站隔离自检：run_pter 不碰 site_status/site_torrent_id、"
               f"且确实写 site_publish")
         for d in detail:
             print(f"    {d}")
@@ -2876,6 +3052,237 @@ def run_crabpt(args):
     return
 
 
+def run_pter(args):
+    """猫站（pterclub.net）发布路径。与乌托邦、蟹黄堡路径并列独立运行。"""
+    import pter_site
+
+    print("=" * 60)
+    print("🌐 站点 = 猫站（pterclub.net）★ 独立发布路径")
+    print("=" * 60)
+
+    if args.dry_run:
+        print("\n★ 显式 dry-run：不会向站点提交任何数据。")
+    elif not args.auto:
+        print("\n★★ 真发模式（没有 --dry-run，也没声明 --auto）：")
+        print("   请确认你确实要往**猫站**提交 —— 发布**不可逆**、无批量撤销。")
+
+    # 选行：使用猫站直发队列（transfer_rule='ALLOW' ∧ status='SUCCESS'(含Log) ∧ 猫站未发）
+    tasks = db.pending_pter_direct(db.SITE_PTER)
+    if not tasks:
+        print("💡 当前没有可发的种（过闸门④ `ALLOW` ∧ status='SUCCESS'(含Log) ∧ 猫站没有 ∧ 不是 FAILED）——"
+              f"判据 = `db.PTER_DIRECT_WHERE` = `{db.PTER_DIRECT_WHERE}` ")
+        return
+
+    if args.only:
+        want = tuple(s.strip().lower() for s in args.only.split(",") if s.strip())
+        if not want:
+            sys.exit("❌ --only 给了但解析出 0 个 hash")
+        hit = [t for t in tasks if any((t.get("info_hash") or "").lower().startswith(w) for w in want)]
+        in_queue = {(t.get("info_hash") or "").lower() for t in tasks}
+        absent = [w for w in want if not any(h.startswith(w) for h in in_queue)]
+        print()
+        print("=" * 60)
+        print(f"★ --only：点名 {len(want)} 个 ⇒ 命中队列 {len(hit)} 条")
+        print("=" * 60)
+        for t in hit:
+            print(f"   ✅ {(t.get('info_hash') or '')[:12]}  {t.get('formatted_title')}")
+        for w in absent:
+            print(f"   ❌ {w} 不在猫站待发布队列里（被闸门拦截或 hash 错误）")
+        if absent:
+            print("\n   ★ 逐条查为什么没进队列：")
+            for w in absent:
+                ok_q, why_q = db.is_direct_publishable_to(w, db.SITE_PTER)
+                print(f"      {w}: {'可发' if ok_q else why_q}")
+        if not hit:
+            sys.exit("❌ --only 与队列**零交集** ⇒ 拒绝执行")
+        tasks = hit
+
+    # 预检清单
+    print("\n" + "=" * 60)
+    print(f"📋 发现 {len(tasks)} 条猫站待发布任务，预检清单：")
+    print("=" * 60)
+
+    valid, blocked = [], []
+    for t in tasks:
+        reason = None
+        tfile = t.get("torrent_file")
+        if not tfile or not os.path.exists(tfile):
+            reason = f"种子文件缺失 ({tfile})"
+        elif not (t.get("cover_url") or "").strip():
+            reason = "缺少 cover_url"
+
+        ih = (t.get("info_hash") or "")[:12]
+        title = t.get("formatted_title") or t.get("torrent_name") or ""
+        if reason:
+            blocked.append((t, reason))
+            print(f"   ❌ {ih}  {title} ⇒ {reason}")
+        else:
+            valid.append(t)
+            print(f"   ✅ {ih}  {title}")
+
+    if blocked:
+        print(f"\n⚠️  预检拦下 {len(blocked)} 条，有效 {len(valid)} 条")
+    if not valid:
+        print("💡 没有通过预检的任务，本次退出。")
+        return
+
+    # 无人值守钥匙
+    if not args.dry_run and args.auto:
+        ok_key, why, _ = check_auto_key()
+        if not ok_key:
+            print(f"\n🛑 发布被拒绝（第二把钥匙校验失败）：{why}")
+            sys.exit(3)
+
+    client = pter_site.PterClient()
+    qb = None
+    form_info = None
+
+    if not args.dry_run:
+        if not client.have_cookie():
+            sys.exit("❌ PTER_COOKIE 是空的 ⇒ 拒绝提交。\n"
+                     "   请在 .env 中配置 PTER_COOKIE。")
+        try:
+            uid = client.check_login()
+            print(f"\n✅ 猫站 Cookie 有效（uid={uid or '未知'}）")
+        except SiteError as e:
+            sys.exit(f"❌ 猫站登录态失败: {e}")
+
+        try:
+            form_info = client.fetch_upload_form()
+            print("✅ 猫站发布页预检成功（表单就绪）")
+        except SiteError as e:
+            sys.exit(f"❌ 猫站发布页预检失败: {e}")
+
+        try:
+            import qb_client
+            qb = qb_client.build(quiet=True)
+            print("✅ qBittorrent 连接就绪")
+        except Exception as e:
+            print(f"⚠️  qB 连接失败（发布后无法立即回加做种，但仍可发布）: {e}")
+            qb = None
+
+    max_publish = args.limit if args.limit is not None else int(getattr(config, "PTER_MAX_PER_CYCLE", 1) or 1)
+    if max_publish <= 0:
+        max_publish = len(valid)
+
+    print(f"\n🚀 开始处理（计划成功上限 {max_publish} 条，候选池 {len(valid)} 条）...")
+
+    ok = 0
+    rejected = 0
+    skipped = 0
+    scanned = 0
+    dup_existing = 0
+    site_down = False
+
+    for t in valid:
+        scanned += 1
+        ih = t["info_hash"]
+        title = t.get("formatted_title") or t.get("torrent_name") or ""
+        print(f"\n[{scanned}/{len(valid)}] 处理: {ih[:12]}  {title}")
+
+        # 版本闸门
+        if config.VERSION_GATE_BEFORE_PUBLISH:
+            vg_ok, vg_reason = _version_consistency_gate(t)
+            if not vg_ok:
+                print(f"🛑 版本闸门拦截: {vg_reason}")
+                rejected += 1
+                if not args.dry_run:
+                    db.save_task(info_hash=ih, status="FAILED", reason=f"version_gate:{vg_reason}")
+                continue
+
+        # 封面
+        try:
+            cover, cover_why = _pter_cover(t, dry_run=args.dry_run)
+            print(f"   · 封面 ← {cover_why}")
+        except CoverItemError as ce:
+            print(f"   · 封面不可用（跳过本条）: {ce}")
+            skipped += 1
+            continue
+
+        if not cover:
+            print("🛑 猫站封面准备失败 ⇒ 停止本轮")
+            site_down = True
+            break
+
+        # 查重
+        if config.DEDUP_BEFORE_PUBLISH:
+            local_nm = _local_info_name(t)
+            try:
+                hit_tid = _dedup_lookup(client, search_name=t.get("formatted_title"),
+                                        local_name=local_nm, site_label="猫站")
+                if hit_tid:
+                    print(f"   ℹ️  猫站已存在同版本 (id={hit_tid}) ⇒ 关联并跳过发布")
+                    dup_existing += 1
+                    if not args.dry_run:
+                        db.site_publish_set(ih, db.SITE_PTER, hit_tid, status="EXISTS", cover_url=cover)
+                        db.save_task(info_hash=ih, status="PUBLISHED", reason=f"pter_dedup_hit:{hit_tid}")
+                        db.mark_synced(ih)
+                    continue
+            except SiteError as se:
+                print(f"   ❌ 猫站查重请求异常: {se}")
+                site_down = True
+                break
+
+            _sn = _same_name_precheck(client, search_name=t.get("formatted_title"),
+                                      local_name=local_nm, site_label="猫站")
+            if _sn:
+                _why = _sn.get("why") or "猫站已存在同名条目"
+                print(f"    🛑 同名闸门拦截（{_why}）⇒ 拒绝提交，标 FAILED 出队")
+                db.save_task(info_hash=ih, status="FAILED", reason=f"same_name_conflict: {_why}")
+                rejected += 1
+                continue
+
+        # 渲染表单
+        t_copy = dict(t)
+        t_copy["cover_url"] = cover
+        fields, audit = pter_site.build_fields(t_copy, anonymous=args.anonymous)
+        for line in audit:
+            print(f"      · {line}")
+
+        if args.dry_run:
+            print("   ℹ️  dry-run 模式：跳过实际提交")
+            ok += 1
+            if ok >= max_publish:
+                break
+            continue
+
+        # 提交发布
+        tfile = t.get("torrent_file")
+        try:
+            tid, msg = client.upload_torrent(tfile, fields, form_info=form_info)
+            if tid:
+                print(f"   🎉 发布成功！猫站 id={tid}")
+                ok += 1
+                db.site_publish_set(ih, db.SITE_PTER, tid, status="EXISTS", cover_url=cover)
+                db.save_task(info_hash=ih, status="PUBLISHED", reason=f"pter_published_id:{tid}")
+                db.mark_synced(ih)
+                if not args.no_readd:
+                    readd_to_qb_pter(qb, client, ih, tid)
+            elif "REJECT" in msg:
+                print(f"   ❌ 站点拒绝: {msg}")
+                rejected += 1
+                db.save_task(info_hash=ih, status="FAILED", reason=f"pter_reject:{msg}")
+            else:
+                print(f"   ⚠️  未知返回状态: {msg}")
+                site_down = True
+                break
+        except SiteError as se:
+            print(f"   ❌ 提交异常: {se}")
+            site_down = True
+            break
+
+        if ok >= max_publish:
+            print(f"\n★ 本轮已达发种上限 {ok} 条 ⇒ 结束本轮")
+            break
+
+    if site_down:
+        sys.exit(1)
+    if rejected and ok == 0:
+        print(f"↩️  以非 0 退出：{rejected} 条被拒、无一成功")
+        sys.exit(1)
+    return
+
+
 # ---- ★★ 自检（#13）：发布前查重的**结构性判据** + 判据的**运行时**验证 ----
 #
 # ★★★ 为什么需要它（#13 / #11 的核心，2026-10-11）：
@@ -3413,7 +3820,7 @@ def selftest_version_gate(verbose=True):
                     return n.lineno
         return None
 
-    for fname in ("main", "run_crabpt"):
+    for fname in ("main", "run_crabpt", "run_pter"):
         fn = _fn_node(fname)
         if fn is None:
             fails.append(f"★ 找不到 {fname} —— 函数被改名了？本条自检失效")
@@ -3504,6 +3911,43 @@ def selftest_version_gate(verbose=True):
                     fails.append("★★ 阴性对照：文件集不一致（目录多一个文件）竟放行")
                 else:
                     detail.append(f"⑤ 阴性对照：文件集不一致 ⇒ 拒发 ✅（{why3[:40]}…）")
+
+                # ⑥ 临时目录拦截
+                fake_inc = {"content_path": "/volume1/incomplete/album", "torrent_file": tp, "track_type": "分轨"}
+                ok_inc, why_inc = _version_consistency_gate(fake_inc)
+                if ok_inc:
+                    fails.append("★★ 阴性对照：内容目录含 /incomplete/ 竟放行")
+                else:
+                    detail.append(f"⑥ 阴性对照：/incomplete/ 临时目录 ⇒ 拒发 ✅（{why_inc}）")
+
+                # ⑦ 临时文件扩展名拦截
+                bad_dir = os.path.join(td, "bad_content")
+                os.makedirs(bad_dir)
+                open(os.path.join(bad_dir, "01.flac.!qB"), "wb").write(b"bad")
+                tp_bad = os.path.join(td, "bad.torrent")
+                tb_bad = _torf.Torrent(path=bad_dir, trackers=["http://x/announce"], private=True)
+                tb_bad.generate(); tb_bad.write(tp_bad)
+                fake_bad = {"content_path": bad_dir, "torrent_file": tp_bad, "track_type": "分轨"}
+                ok_bad, why_bad = _version_consistency_gate(fake_bad)
+                if ok_bad:
+                    fails.append("★★ 阴性对照：种子含 .!qB 临时文件竟放行")
+                else:
+                    detail.append(f"⑦ 阴性对照：种子含临时扩展名 ⇒ 拒发 ✅（{why_bad}）")
+
+                # ⑧ 全 0 脏块拦截
+                zero_dir = os.path.join(td, "zero_content")
+                os.makedirs(zero_dir)
+                open(os.path.join(zero_dir, "zero.flac"), "wb").write(b"\x00" * (1024 * 1024 * 2))
+                tp_zero = os.path.join(td, "zero.torrent")
+                tb_zero = _torf.Torrent(path=zero_dir, trackers=["http://x/announce"], private=True)
+                tb_zero.piece_size = 262144
+                tb_zero.generate(); tb_zero.write(tp_zero)
+                fake_zero = {"content_path": zero_dir, "torrent_file": tp_zero, "track_type": "分轨"}
+                ok_zero, why_zero = _version_consistency_gate(fake_zero)
+                if ok_zero:
+                    fails.append("★★ 阴性对照：全 0 脏块种子竟放行")
+                else:
+                    detail.append(f"⑧ 阴性对照：全 0 脏块种子 ⇒ 拒发 ✅（{why_zero}）")
     finally:
         config.VERSION_GATE_BEFORE_PUBLISH = _saved_flag
 
@@ -3584,8 +4028,10 @@ def main():
         #     在输出上应当长得不一样（`ERR-META-14`：兜底不许冒充真结果）。
         #   ★ 2026-10-11：修掉原先的 `ok7 and ok7` 笔误（应为 …and ok7），并接上 ok8。
         #   ★ 2026-10-20：接上 ok10（无 log 制种不许改 status）。
+        #   ★ 2026-10-26：接上 ok11（猫站隔离自检）。
+        ok11, _ = selftest_pter_isolation()
         ok = (ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7
-              and ok8 and ok9 and ok10)
+              and ok8 and ok9 and ok10 and ok11)
         # ★★ 必须 `sys.exit`，**不能 `return`** —— `main()` 是被
         #   `if __name__ == "__main__": main()` 调的，那个写法的返回值**会被丢掉**
         #   ⇒ 退出码恒为 0 ⇒ **自检报红也没人看得见**（阴性对照实测踩到这一条）。
@@ -3593,10 +4039,12 @@ def main():
         sys.exit(0 if ok else 1)
 
     # ★ 站点分流（2026-09-25）。★ 只有这一处 if —— 分流点越少，
-    #   "某条路漏了某个不变量"的机会越少。两条路各自**完整**：
+    #   "某条路漏了某个不变量"的机会越少。各条路各自**完整**：
     #   都自己查闸门、自己预检、自己落库、自己算退出码。
     if args.site == "crabpt":
         return run_crabpt(args)
+    if args.site == "pter":
+        return run_pter(args)
 
     config.print_runtime_info()
     db.init_db()

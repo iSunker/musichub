@@ -467,19 +467,22 @@ def extract_cover_url(descr_text):
 
 
 def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
-                logs=None, extra_note=None, opencd_descr="", site=None):
+                logs=None, extra_note=None, opencd_descr="", site=None,
+                source_link=""):
     """
     生成种子页面 BBCode 简介。
 
     ★★ 结构（2026-09-26 改，用户拍板「B 并存」）：
         ① 封面图          —— **我们的**（`cover_url`，图链）
+        ①b 资源来源引用   —— ★ 猫站要求（`source_link`，[quote]转自OpenCD...[/quote]）
         ② 皇后简介正文    —— 皇后 `divdescr` 原文（`opencd_descr`，**已剥图**）
         ③ 曲目列表        —— ★ **皇后原版**优先，退回我们的
-        ④ 抓轨日志（折叠）—— **保留**，多碟每碟一块（★ 蟹黄堡不要，见 `site`）
+        ④ 抓轨日志（折叠）—— **保留**，多碟每碟一块（★ 蟹黄堡不要，猫站用 [hide=Log]）
     末尾不追加任何程序署名兜底（旧版会写"由自动化发布程序生成。"）。
 
     ── `site` 参数（2026-09-27 加，用户拍板）─────────────────────────────
     ★★ **蟹黄堡不要 ④ 那个折叠日志块**。用户原话：「折叠代码也不需要」。
+    ★★ **猫站要求 ④ 使用 [hide=Log] 折叠**。规则：「Log 与频谱图两者至少包含一项，优先推荐 Log；使用 hide 代码完成引用」。
 
     ★ 为什么用参数而不是"直接删掉 ④"：乌托邦**一直有**这一块，删掉会改变
       已在站上的 254 条的页面形态 —— 那是**没人要求过的改动**。用户要的是
@@ -537,21 +540,11 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
     if cover_url and str(cover_url).strip():
         blocks.append(f"[center][img]{cover_url.strip()}[/img][/center]")
 
+    # ①b 资源来源声明（★ 猫站规则：比如自己抓轨、转载、WEB下载等，用 quote 给出信息）
+    if source_link and str(source_link).strip():
+        blocks.append(f"[quote]{source_link.strip()}[/quote]")
+
     # ② 皇后简介正文 —— 原文照贴，**不做任何 BBCode 转义/包装**。
-    #    ★ 为什么不包 [quote]：皇后正文本身常含标题/列表（实测有"一、基础档案"
-    #      这种带序号的段落），再套一层引用框反而像被引用的别人家的话。
-    #    ★ 为什么不截断：曲目/日志有截断上限是因为它们**可能极长**（日志实测
-    #      69 行、曲目几百行）；简介实测最长 5784 字符（323 行），站点能受得住，
-    #      且截断一段乐评会把话说到一半 ⇒ **不截**。
-    #    ★★ 只中和**一个**东西：`[/quote]`。
-    #       实测（58 条真实页面全查过）**没有一条**正文里含 BBCode 形态的方括号
-    #       （正则扫 `[quote]/[spoiler]/[code]/[img]/[b]/…` ⇒ 命中 0）⇒ 这不是
-    #       在修一个已知的坏数据，是**兜住未来**：若哪天有人贴了 `[/quote]`，
-    #       它会**提前闭合下面那个曲目块的引用框**，把后半页排版弄乱 ——
-    #       而这种破坏**不会报错**，只是"页面看起来怪怪的"。
-    #       与日志那处 `[/code]`/`[/spoiler]` 的兜底是**同一个理由、同一个手法**
-    #       （见下面日志循环里那两行 replace）。★ 只换方括号里的斜杠为全角，
-    #       文字本身一字不动 ⇒ 万一真命中，人还能看出原文是什么。
     if opencd_descr and str(opencd_descr).strip():
         body = (str(opencd_descr).strip()
                 .replace("[/quote]", "［/quote］"))
@@ -561,7 +554,7 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
         body = _truncate(tracklist, TRACKLIST_MAX_CHARS, "曲目列表过长已截断")
         blocks.append(f"[quote][b]曲目列表：[/b]\n{body}[/quote]")
 
-    # ④ 抓轨日志（**乌托邦保留；蟹黄堡整块去掉**，见 `site` 参数的 docstring）
+    # ④ 抓轨日志（乌托邦保留；蟹黄堡整块去掉；猫站使用 [hide=Log] 折叠）
     items = []
     if not _skip_logs:
         items = list(logs) if logs else []
@@ -576,9 +569,14 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
             continue
         label = item.get("label") or "LOG"
         body = _truncate(content, LOG_MAX_CHARS, "日志过长已截断")
-        # 兜底：日志里若真出现 [/code]/[/spoiler] 字面量会提前截断折叠块，替换成全角
-        body = body.replace("[/code]", "［/code］").replace("[/spoiler]", "［/spoiler］")
-        blocks.append(f"[spoiler={label}][code]{body}[/code][/spoiler]")
+        # 兜底：日志里若真出现 [/code]/[/spoiler]/[/hide] 字面量会提前截断折叠块，替换成全角
+        body = (body.replace("[/code]", "［/code］")
+                    .replace("[/spoiler]", "［/spoiler］")
+                    .replace("[/hide]", "［/hide］"))
+        if site == "pter":
+            blocks.append(f"[hide=Log]\n{body}\n[/hide]")
+        else:
+            blocks.append(f"[spoiler={label}][code]{body}[/code][/spoiler]")
 
     # 不再追加任何程序署名/元数据复读（旧版会写"由自动化发布程序生成。"
     # 和"专辑名称/副标题/原始名称"），页面顶部表格已展示这些信息。
@@ -1055,6 +1053,16 @@ def _check():
     chk("⑨g 蟹黄堡：多碟 `logs=[...]` 那条路也关掉了",
         "[spoiler=" not in _multi and "EAC log" not in _multi,
         f"实得 {_multi!r}")
+
+    # ══════════════════════════════════════════════════════════════════
+    # ⑨h / ⑨i 猫站（PTerClub）：必须用 [hide=Log] 且支持 source_link
+    # ══════════════════════════════════════════════════════════════════
+    _pter = build_descr(cover_url=_COVER, tracklist=_TL, log_content=_LOG,
+                        site="pter", source_link="转自OpenCD: https://open.cd/details.php?id=12345")
+    chk("⑨h 猫站：日志使用 [hide=Log] 折叠（不用 [spoiler/code]）",
+        "[hide=Log]" in _pter and "[/hide]" in _pter and "[spoiler=" not in _pter and "[code]" not in _pter)
+    chk("⑨i 猫站：来源声明包含在 [quote] 中",
+        "[quote]转自OpenCD: https://open.cd/details.php?id=12345[/quote]" in _pter)
 
     return ok, fails
 

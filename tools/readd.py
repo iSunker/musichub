@@ -1486,12 +1486,15 @@ def site_client(site):
     if site == "crabpt":
         import crabpt_site
         return crabpt_site.CrabptClient(), config.CRABPT_PUBLISH_CATEGORY
+    if site == "pter":
+        import pter_site
+        return pter_site.PterClient(), config.PTER_PUBLISH_CATEGORY
     raise SystemExit(f"未知站点: {site}")
 
 
 def _main_site(argv=None):
     ap = argparse.ArgumentParser(description="补加「已上站但没做种」的种子")
-    ap.add_argument("--site", choices=["musopia", "crabpt"], default=None,
+    ap.add_argument("--site", choices=["musopia", "crabpt", "pter"], default=None,
                     help="只处理某站（默认两站都扫）")
     ap.add_argument("--tids", nargs="*", default=[],
                     help="只处理这几个站点 torrent_id")

@@ -276,6 +276,7 @@ fi
 #        下一段的判据会报"漏了这个开关"（见下方 ⑤ 之后的清单核对）。
 D_ENV=(
   -e ENABLE_SCAN=false -e ENABLE_PUBLISH=false -e ENABLE_PUBLISH_CRABPT=false
+  -e ENABLE_PUBLISH_PTER=false
   -e ENABLE_SYNC=false -e ENABLE_COVERS=false -e ENABLE_EDIT=false
   -e ENABLE_VTID=false -e ENABLE_RSS_TID=false -e ENABLE_CRAWL=false
   -e ENABLE_FREE_WINDOW=false
