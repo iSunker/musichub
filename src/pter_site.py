@@ -461,7 +461,7 @@ class PterClient:
 
         action = (form_info.get("action") if form_info else None) or "/takeupload.php"
         try:
-            r = self.post(action, data=data, files=files, allow_redirects=True)
+            r = self.post(action, data=data, files=files, allow_redirects=False)
         finally:
             try:
                 files[field_name][1].close()
@@ -475,6 +475,21 @@ class PterClient:
         if r.status_code >= 500:
             raise SiteError(f"猫站服务端故障 (HTTP {r.status_code})")
 
+        # NexusPHP 正常发布成功后返回 302 重定向：Location: details.php?id=XXXX&uploaded=1
+        if r.status_code in (301, 302, 303):
+            loc = r.headers.get("Location") or ""
+            if "login.php" in loc.lower():
+                raise SiteError("猫站发布后被重定向至登录页，Cookie 可能已失效")
+            m = re.search(r"[?&]id=(\d+)", loc)
+            if m:
+                tid = m.group(1)
+                return tid, f"SUCCESS: 种子发布成功 (id={tid})"
+            return None, f"UNKNOWN: 重定向 Location 未解析出种子 ID: {loc}"
+
+        # 若返回 200，先检查是否掉登录
+        if "takelogin.php" in (r.text or "") or "login.php" in (r.url or ""):
+            raise SiteError("猫站发布返回登录页，Cookie 可能已失效")
+
         err = _extract_error(r.text or "")
         if err:
             lower_err = err.lower()
@@ -482,15 +497,20 @@ class PterClient:
                 return None, f"REJECT: 种子已存在: {err}"
             return None, f"REJECT: 站点拒绝: {err}"
 
-        # 从最终 URL 或页面内容中提取 tid
+        # 尝试从最终 URL 或页面内容中提取 tid
         tid = None
         m = re.search(r"[?&]id=(\d+)", r.url or "")
         if m:
             tid = m.group(1)
         if not tid:
-            m = re.search(r"details\.php\?id=(\d+)", r.text or "")
+            # 严格匹配 details.php?id=XXXX&uploaded=1 或详情链接，避免误匹配页面静态广告 ID (如 2257)
+            m = re.search(r"details\.php\?id=(\d+)&uploaded=1", r.text or "")
             if m:
                 tid = m.group(1)
+            else:
+                m = re.search(r'href=["\']details\.php\?id=(\d+)["\']', r.text or "")
+                if m:
+                    tid = m.group(1)
 
         if tid:
             return tid, f"SUCCESS: 种子发布成功 (id={tid})"

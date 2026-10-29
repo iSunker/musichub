@@ -2115,6 +2115,16 @@ def create_musopia_torrent(content_path, save_path):
     announce = f"{config.MUSOPIA_URL}/announce.php?passkey={config.MUSOPIA_PASSKEY}"
     t = Torrent(path=content_path, trackers=[announce], private=True)
     t.generate()
+    # ★★★ 制种后必须立即闭环物理反验（ERR-PUBLISH-25）：
+    # 彻底杜绝盘上数据在哈希期间变化或未完成下载导致的坏种落盘！
+    try:
+        if not t.verify(content_path):
+            raise IncompleteDownloadError(f"制种后分块物理校验未通过（{content_path}）")
+    except IncompleteDownloadError:
+        raise
+    except Exception as _e_v:
+        raise IncompleteDownloadError(f"制种后分块物理校验失败（疑似下载中数据变动）: {_e_v}") from _e_v
+
     if os.path.exists(save_path):
         os.remove(save_path)
     t.write(save_path)
@@ -2211,6 +2221,12 @@ def _torrent_is_download_completed(torrent):
     sp = str(getattr(torrent, "save_path", "") or "")
     if "/incomplete/" in cp.replace("\\", "/") or "/incomplete/" in sp.replace("\\", "/"):
         return False, f"content_path 在临时目录: {cp}"
+
+    # 5. 实体检查：若本地路径存在，检查是否残留下载未完成临时文件
+    if cp and os.path.exists(cp):
+        hits = find_incomplete_download_markers(cp)
+        if hits:
+            return False, f"目录含临时下载标记文件: {hits[0]}"
 
     return True, ""
 

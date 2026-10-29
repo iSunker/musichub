@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "offline": {
-    "generated_at": "2026-10-29T10:18:47Z",
+    "generated_at": "2026-10-29T11:42:25Z",
     "generator": "tools/gen_counts.py",
     "selftests": {
       "descr.py --selftest": {
@@ -262,14 +262,14 @@
       "src/observe_custom_fields.py": 99,
       "src/opencd.py": 3416,
       "src/opencd_sanitize.py": 401,
-      "src/pter_site.py": 563,
-      "src/publish.py": 4546,
+      "src/pter_site.py": 583,
+      "src/publish.py": 4576,
       "src/qb_client.py": 338,
       "src/qb_probe.py": 424,
       "src/readd_queue.py": 216,
       "src/readiness_probe.py": 279,
       "src/rss_backfill_tid.py": 542,
-      "src/run.py": 2829,
+      "src/run.py": 2845,
       "src/site_readd.py": 370,
       "src/site_seed_patrol.py": 462,
       "src/site_verify.py": 349,
@@ -486,27 +486,27 @@
     }
   },
   "online": {
-    "generated_at": "2026-10-29T10:19:01Z",
+    "generated_at": "2026-10-29T11:42:39Z",
     "reachable": true,
     "source_host": "\\\\iSunker-DS423\\docker_ssd\\opencd2others\\data",
     "heartbeat": {
       "alive": false,
-      "content_epoch": 1793268115,
-      "age_s": 1022.3638188838959
+      "content_epoch": 1793273017,
+      "age_s": 1137.5859751701355
     },
     "stages": {
       "scan": {
-        "last_run": 1793265573.3482144,
-        "age_s": 3564.9675052165985,
+        "last_run": 1793272631.8343666,
+        "age_s": 1522.9209542274475,
         "interval_s": 1800,
-        "overdue": true,
+        "overdue": false,
         "disabled": false,
-        "last_ok": false,
+        "last_ok": true,
         "no_progress": null
       },
       "publish": {
         "last_run": 1793238921.8777518,
-        "age_s": 30216.437967777252,
+        "age_s": 35232.87756896019,
         "interval_s": 1800,
         "overdue": true,
         "disabled": false,
@@ -515,7 +515,7 @@
       },
       "sync": {
         "last_run": 1793202578.6325316,
-        "age_s": 66559.68318796158,
+        "age_s": 71576.12278914452,
         "interval_s": 86400,
         "overdue": false,
         "disabled": false,
@@ -524,7 +524,7 @@
       },
       "covers": {
         "last_run": 1793265574.4204235,
-        "age_s": 3563.8952960968018,
+        "age_s": 8580.33489727974,
         "interval_s": 21600,
         "overdue": false,
         "disabled": false,
@@ -532,8 +532,8 @@
         "no_progress": null
       },
       "edit": {
-        "last_run": 1793268115.9502046,
-        "age_s": 1022.3655149936676,
+        "last_run": 1793273017.1671958,
+        "age_s": 1137.5881249904633,
         "interval_s": 21600,
         "overdue": false,
         "disabled": false,
@@ -542,7 +542,7 @@
       },
       "crawl": {
         "last_run": 1793267736.780063,
-        "age_s": 1401.5356566905975,
+        "age_s": 6417.975257873535,
         "interval_s": 1800,
         "overdue": null,
         "disabled": true,
@@ -551,7 +551,7 @@
       },
       "rss_tid": {
         "last_run": 1793261943.31131,
-        "age_s": 7195.0044095516205,
+        "age_s": 12211.444010734558,
         "interval_s": 86400,
         "overdue": null,
         "disabled": true,
@@ -560,12 +560,12 @@
       }
     },
     "db": {
-      "total": 3285,
+      "total": 3295,
       "exists": 249,
       "stale": 56,
-      "no_log_file": 1834,
+      "no_log_file": 1944,
       "success": 949,
-      "max_updated_at": "2026-10-29 09:55:36"
+      "max_updated_at": "2026-10-29 11:17:10"
     },
     "skipped_reason": null
   }

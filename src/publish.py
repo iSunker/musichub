@@ -1212,6 +1212,19 @@ def _version_consistency_gate(task):
     if verdict == _sv.MISMATCH:
         return False, f"文件集不一致 ⇒ 拒发（{note}）"
     print(f"    ✔ 版本闸门：{note}")
+
+    # ②c 分块物理严格校验（ERR-PUBLISH-25）
+    # 彻底杜绝下载未完成时的早产种子（piece hash 残缺但文件集/大小匹配的种子）
+    if content_path and os.path.exists(content_path):
+        try:
+            import torf as _torf_gate
+            _t_gate = _torf_gate.Torrent.read(torrent_file)
+            if not _t_gate.verify(content_path):
+                return False, f"种子分块与磁盘真实数据校验未通过: {content_path}"
+        except Exception as _e_torf_v:
+            return False, f"种子分块与磁盘真实数据校验失败（疑似下载未完成时早产制种）: {_e_torf_v}"
+        print("    ✔ 版本闸门：分块物理校验 100% 匹配")
+
     return True, ""
 
 
@@ -3187,7 +3200,7 @@ def run_pter(args):
 
         try:
             import qb_client
-            qb = qb_client.build(quiet=True)
+            qb = qb_client.build()
             print("✅ qBittorrent 连接就绪")
         except Exception as e:
             print(f"⚠️  qB 连接失败（发布后无法立即回加做种，但仍可发布）: {e}")
@@ -3985,6 +3998,23 @@ def selftest_version_gate(verbose=True):
                     fails.append("★★ 阴性对照：全 0 脏块种子竟放行")
                 else:
                     detail.append(f"⑧ 阴性对照：全 0 脏块种子 ⇒ 拒发 ✅（{why_zero}）")
+
+                # ⑨ 分块哈希不匹配（早产种子/内容损坏）拦截
+                tamper_dir = os.path.join(td, "tamper_content")
+                os.makedirs(tamper_dir)
+                f_tamper = os.path.join(tamper_dir, "01.flac")
+                open(f_tamper, "wb").write(b"good" * 1024)
+                tp_tamper = os.path.join(td, "tamper.torrent")
+                tb_tamper = _torf.Torrent(path=tamper_dir, trackers=["http://x/announce"], private=True)
+                tb_tamper.generate(); tb_tamper.write(tp_tamper)
+                # 篡改数据（大小与文件名完全相同，模拟未下载完成时的早产制种）
+                open(f_tamper, "wb").write(b"evil" * 1024)
+                fake_tamper = {"content_path": tamper_dir, "torrent_file": tp_tamper, "track_type": "分轨"}
+                ok_tamper, why_tamper = _version_consistency_gate(fake_tamper)
+                if ok_tamper:
+                    fails.append("★★ 阴性对照：分块哈希不匹配的种子竟放行")
+                else:
+                    detail.append(f"⑨ 阴性对照：分块哈希不匹配 ⇒ 拒发 ✅（{why_tamper[:40]}…）")
     finally:
         config.VERSION_GATE_BEFORE_PUBLISH = _saved_flag
 
