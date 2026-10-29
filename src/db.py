@@ -679,6 +679,16 @@ def get_status(info_hash):
     return row[0] if row else None
 
 
+def get_content_path(info_hash):
+    """读一行的 `content_path`（只读）。行不存在或为空 ⇒ None。"""
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute("SELECT content_path FROM tasks WHERE info_hash = ?", (info_hash,))
+    row = cur.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+
 def get_pending_publish():
     """待发布：本地处理成功、站点上还没有、**且过了闸门②的反悔窗口**。"""
     conn = connect()

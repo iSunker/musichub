@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "offline": {
-    "generated_at": "2026-10-26T12:31:28Z",
+    "generated_at": "2026-10-29T10:18:47Z",
     "generator": "tools/gen_counts.py",
     "selftests": {
       "descr.py --selftest": {
@@ -251,7 +251,7 @@
       "src/crabpt_site.py": 1024,
       "src/crawl.py": 402,
       "src/daemon.py": 1988,
-      "src/db.py": 1887,
+      "src/db.py": 1897,
       "src/descr.py": 1105,
       "src/flip_status.py": 750,
       "src/free_window.py": 353,
@@ -263,7 +263,7 @@
       "src/opencd.py": 3416,
       "src/opencd_sanitize.py": 401,
       "src/pter_site.py": 563,
-      "src/publish.py": 4509,
+      "src/publish.py": 4546,
       "src/qb_client.py": 338,
       "src/qb_probe.py": 424,
       "src/readd_queue.py": 216,
@@ -321,7 +321,9 @@
       "tools/verify_cprime_run.py": 344,
       "tools/verify_hosted_edition.py": 193,
       "tools/verify_small_descr_onsite.py": 273,
-      "x/HANDOFF-20260926.md": 390
+      "x/HANDOFF-20260926.md": 390,
+      "憨憨与蟹黄宝音乐种子字段.md": 133,
+      "皇后-乌托邦字段对照表.md": 209
     },
     "errata": {
       "count": 154,
@@ -484,18 +486,18 @@
     }
   },
   "online": {
-    "generated_at": "2026-10-26T12:31:41Z",
+    "generated_at": "2026-10-29T10:19:01Z",
     "reachable": true,
     "source_host": "\\\\iSunker-DS423\\docker_ssd\\opencd2others\\data",
     "heartbeat": {
       "alive": false,
-      "content_epoch": 1793014332,
-      "age_s": 3564.8979625701904
+      "content_epoch": 1793268115,
+      "age_s": 1022.3638188838959
     },
     "stages": {
       "scan": {
-        "last_run": 1792999909.9616296,
-        "age_s": 17987.45548772812,
+        "last_run": 1793265573.3482144,
+        "age_s": 3564.9675052165985,
         "interval_s": 1800,
         "overdue": true,
         "disabled": false,
@@ -503,8 +505,8 @@
         "no_progress": null
       },
       "publish": {
-        "last_run": 1792976894.8871162,
-        "age_s": 41002.53000116348,
+        "last_run": 1793238921.8777518,
+        "age_s": 30216.437967777252,
         "interval_s": 1800,
         "overdue": true,
         "disabled": false,
@@ -512,8 +514,8 @@
         "no_progress": null
       },
       "sync": {
-        "last_run": 1792936599.645344,
-        "age_s": 81297.77177333832,
+        "last_run": 1793202578.6325316,
+        "age_s": 66559.68318796158,
         "interval_s": 86400,
         "overdue": false,
         "disabled": false,
@@ -521,8 +523,8 @@
         "no_progress": null
       },
       "covers": {
-        "last_run": 1793008742.170818,
-        "age_s": 9155.246299266815,
+        "last_run": 1793265574.4204235,
+        "age_s": 3563.8952960968018,
         "interval_s": 21600,
         "overdue": false,
         "disabled": false,
@@ -530,17 +532,17 @@
         "no_progress": null
       },
       "edit": {
-        "last_run": 1792996655.8851945,
-        "age_s": 21241.53192281723,
+        "last_run": 1793268115.9502046,
+        "age_s": 1022.3655149936676,
         "interval_s": 21600,
         "overdue": false,
         "disabled": false,
         "last_ok": true,
-        "no_progress": true
+        "no_progress": false
       },
       "crawl": {
-        "last_run": 1793012530.506752,
-        "age_s": 5366.910365343094,
+        "last_run": 1793267736.780063,
+        "age_s": 1401.5356566905975,
         "interval_s": 1800,
         "overdue": null,
         "disabled": true,
@@ -548,8 +550,8 @@
         "no_progress": null
       },
       "rss_tid": {
-        "last_run": 1793011537.3843877,
-        "age_s": 6360.032729625702,
+        "last_run": 1793261943.31131,
+        "age_s": 7195.0044095516205,
         "interval_s": 86400,
         "overdue": null,
         "disabled": true,
@@ -558,12 +560,12 @@
       }
     },
     "db": {
-      "total": 3274,
-      "exists": 219,
-      "stale": 55,
-      "no_log_file": 2040,
-      "success": 979,
-      "max_updated_at": "2026-10-26 12:25:58"
+      "total": 3285,
+      "exists": 249,
+      "stale": 56,
+      "no_log_file": 1834,
+      "success": 949,
+      "max_updated_at": "2026-10-29 09:55:36"
     },
     "skipped_reason": null
   }

@@ -390,16 +390,27 @@ def _resolve_opencd_content_path(info_hash, *, return_reason=False):
         )
         qb_src = qb_client.build(cfg)
         got = qb_src.torrents_info(torrent_hashes=info_hash)
-        if not got:
-            msg = f"opencd 实例({host}) 上找不到原种 {str(info_hash)[:12]}…"
-            print(f"    ⚠️  handoff：{msg} ⇒ 无法定位成品目录")
-            return _out("", msg)
-        cp = str(getattr(got[0], "content_path", "") or "")
-        if not cp:
+        if got:
+            cp = str(getattr(got[0], "content_path", "") or "")
+            if cp:
+                return _out(cp, "")
             msg = f"opencd 实例({host}) 上原种 content_path 为空"
             print(f"    ⚠️  handoff：{msg}")
             return _out("", msg)
-        return _out(cp, "")
+
+        # ★ 兜底（2026-10-29）：若 opencd 实例原种已被清理出客户端，但本地 tasks 库已记录 content_path 且物理存在
+        try:
+            import db
+            cp_db = db.get_content_path(info_hash)
+            if cp_db and os.path.exists(cp_db):
+                print(f"    ℹ️  {host} 无原种任务，但命中本地库 tasks.content_path 且物理存在: {cp_db}")
+                return _out(cp_db, "")
+        except Exception as _e_cp:
+            pass
+
+        msg = f"opencd 实例({host}) 上找不到原种 {str(info_hash)[:12]}…"
+        print(f"    ⚠️  handoff：{msg} ⇒ 无法定位成品目录")
+        return _out("", msg)
     except Exception as e:                                        # noqa: BLE001
         msg = f"连 opencd 实例({host}) 查 content_path 失败: {type(e).__name__}: {e}"
         print(f"    ⚠️  handoff：{msg}")
@@ -866,23 +877,35 @@ def readd_to_qb_pter(qb, client, info_hash, torrent_id):
         _h_src = ""
         _h_album = ""
         if _handoff_on:
-            orig = qb.torrents_info(torrent_hashes=info_hash)
-            if not orig:
-                print(f"    ⚠️  回加跳过：3040 上找不到原种 {info_hash[:12]}…（无法确定专辑名）")
-                return
-            album = orig[0].name
-            _h_album = album
-            import handoff
-            _src_path, _err = handoff.find_source_in_hdd(album)
-            if not _src_path:
-                print(f"    ⚠️  交棒跳过：HDD 找不到专辑 {album!r}（{_err}）")
-                return
-            _h_src = _src_path
-            ok, dst, err = handoff.copy_to_publish_area(_src_path, album)
-            if not ok:
-                print(f"    ❌ 复制到发种区失败（{album}）: {err}")
-                return
             save_path = config.PUBLISH_SAVE_ROOT
+            try:
+                import handoff
+                src, _src_why = _resolve_opencd_content_path(info_hash, return_reason=True)
+                album = os.path.basename(str(src).rstrip("/\\")) if src else ""
+                _h_src, _h_album = src, album
+                if src and album:
+                    _ok, _why = handoff.begin_handoff_for_task(
+                        src, album, info_hash, task=None,
+                        source_category=config.PTER_PUBLISH_CATEGORY,
+                        target_category=config.PTER_PUBLISH_CATEGORY,
+                        dry_run=(config.HANDOFF_DRY_RUN == "true"))
+                    print(f"    🔀 handoff 复制: {_why}")
+                    if not _ok:
+                        print(f"    ❌ handoff 未就位 ⇒ **跳过回加 3010**（避免变成下载）：{_why}")
+                        handoff.record_missing_data(info_hash, album, "pter", _why)
+                        return
+                else:
+                    print("    ⚠️  handoff：拿不到 opencd 原种 content_path，跳过复制")
+                    print("    ❌ 无法定位源成品 ⇒ **跳过回加 3010**（避免变成下载）")
+                    handoff.record_missing_data(info_hash, album, "pter",
+                                                _src_why or "拿不到 opencd content_path")
+                    return
+            except Exception as _e:
+                print(f"    ❌ handoff 复制/核对异常 ⇒ **跳过回加 3010**（避免变成下载）: "
+                      f"{type(_e).__name__}: {_e}")
+                handoff.record_missing_data(info_hash, album, "pter",
+                                            f"{type(_e).__name__}: {_e}")
+                return
         else:
             orig = qb.torrents_info(torrent_hashes=info_hash)
             if not orig:
@@ -1487,6 +1510,12 @@ def _pter_cover(task, *, dry_run=False):
     src = (task.get("cover_url") or "").strip()
     if not src:
         raise CoverItemError("库里连 cover_url 都没有 ⇒ 无源可传")
+
+    # ★ 猫站允许使用公共图床（如 PicGo）发布种子：
+    #   未配置 PTER_IMG_API_KEY 时，若已有有效公网图床链接，直接复用，避免重复上传与配额浪费
+    if not getattr(config, "PTER_IMG_API_KEY", "") and (src.startswith("http://") or src.startswith("https://")):
+        return src, f"复用已有公网图床封面（猫站支持公共图床）：{src}"
+
     try:
         import cover_fetch
         local = cover_fetch._cached_file(src)
@@ -1503,6 +1532,9 @@ def _pter_cover(task, *, dry_run=False):
     import assets
     url = assets.upload_to_pter_img(local)
     if not url:
+        # 若猫站图床上传失败，但已有公网图床链接，则回退复用已有链接
+        if src.startswith("http://") or src.startswith("https://"):
+            return src, f"猫站图床未配置或上传未成功，回退复用已有公网图床封面：{src}"
         raise CoverItemError(f"图床上传失败（本地图 {local}）")
     return url, f"新传封面：{local} ⇒ {url}"
 
@@ -2802,7 +2834,7 @@ def run_crabpt(args):
     #
     #   ★ 遍历的是**已过预检**的 `valid`（都有 cover_url / 种子文件 / descr 非空壳），
     #     所以"预检拦下的（如缺 cover_url 的队首）"**不会**占用名额 —— 它压根没进 valid。
-    ok = rejected = skipped = 0
+    ok = fail = rejected = skipped = 0
     scanned = 0                 # 本轮**试过**的候选数（含被跳过的坏封面）
     published_this_round = 0    # 本轮**成功发出**的条数（= 真正消耗 `--limit` 名额的）
     site_down = False
@@ -3128,7 +3160,7 @@ def run_pter(args):
 
     # 无人值守钥匙
     if not args.dry_run and args.auto:
-        ok_key, why, _ = check_auto_key()
+        ok_key, why, _ = guard_auto_key()
         if not ok_key:
             print(f"\n🛑 发布被拒绝（第二把钥匙校验失败）：{why}")
             sys.exit(3)
@@ -3167,9 +3199,7 @@ def run_pter(args):
 
     print(f"\n🚀 开始处理（计划成功上限 {max_publish} 条，候选池 {len(valid)} 条）...")
 
-    ok = 0
-    rejected = 0
-    skipped = 0
+    ok = fail = rejected = skipped = 0
     scanned = 0
     dup_existing = 0
     site_down = False
@@ -3185,6 +3215,7 @@ def run_pter(args):
             vg_ok, vg_reason = _version_consistency_gate(t)
             if not vg_ok:
                 print(f"🛑 版本闸门拦截: {vg_reason}")
+                fail += 1
                 rejected += 1
                 if not args.dry_run:
                     db.save_task(info_hash=ih, status="FAILED", reason=f"version_gate:{vg_reason}")
@@ -3226,9 +3257,11 @@ def run_pter(args):
             _sn = _same_name_precheck(client, search_name=t.get("formatted_title"),
                                       local_name=local_nm, site_label="猫站")
             if _sn:
-                _why = _sn.get("why") or "猫站已存在同名条目"
+                _why = (f"同名冲突：猫站上已有 info.name 逐字相同的条目 "
+                        f"{'、'.join(tid for tid, _ in _sn[:3])} ⇒ 提交会被静默吞掉。")
                 print(f"    🛑 同名闸门拦截（{_why}）⇒ 拒绝提交，标 FAILED 出队")
                 db.save_task(info_hash=ih, status="FAILED", reason=f"same_name_conflict: {_why}")
+                fail += 1
                 rejected += 1
                 continue
 
@@ -3260,6 +3293,7 @@ def run_pter(args):
                     readd_to_qb_pter(qb, client, ih, tid)
             elif "REJECT" in msg:
                 print(f"   ❌ 站点拒绝: {msg}")
+                fail += 1
                 rejected += 1
                 db.save_task(info_hash=ih, status="FAILED", reason=f"pter_reject:{msg}")
             else:
@@ -3276,6 +3310,9 @@ def run_pter(args):
             break
 
     if site_down:
+        sys.exit(1)
+    if fail:
+        print(f"↩️  以非 0 退出：有 {fail} 条失败，让 daemon 的退避生效")
         sys.exit(1)
     if rejected and ok == 0:
         print(f"↩️  以非 0 退出：{rejected} 条被拒、无一成功")
