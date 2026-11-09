@@ -32,7 +32,6 @@ import db
 import descr
 from musopia import LoginExpired, MusopiaClient, SiteError
 
-# ★ 名字规范化**复用** `site_verify.normalize_name`（唯一实现，`ERR-META-03`）：
 #   两处各写一份折空白/NFC 的逻辑，迟早会漂，而这里漂的后果是"版本不符"报错/漏报。
 try:
     from site_verify import normalize_name as _norm_name
@@ -60,14 +59,12 @@ def parse_args():
     ap.add_argument("--anonymous", action="store_true",
                     help="把种子改成匿名发布（默认不动这个开关，沿用站点现状）")
 
-    # ★ 这行 help 曾写成「可选 name,small_descr,descr」—— **过时且错**（2026-09-23 订正）。
     #
     # 实际实现：`select_fields()` 做的是
     #     {k: v for k, v in full_fields.items() if k in keep}
     # 而 `keep` 来自把 `--fields` 按逗号切开 —— **没有任何键名白名单校验**，
     # ⇒ 它是**任意键**的过滤器，键名就是 `descr.build_form_fields()` 那份 dict 的键。
     #
-    # ★ 承重的判据（实测定过，见 SESSION-NOTES 2026-09-23 晚）：
     #   给什么键就只提交什么键，其余沿用**页面上现值**
     #   （`musopia.edit_torrent()` docstring: "overrides 里给什么就改什么"）。
     #   ⇒ 所以 `name`（会换成皇后标题）、`small_descr`（会清空站点副标题）、
@@ -123,7 +120,7 @@ def describe(task):
 
 
 def selftest(verbose=True):
-    """#173 编辑身份护栏的自检：判据（含阴性对照）+ **接线**（`ERR-META-01`）。
+    """#173 编辑身份护栏的自检：判据（含阴性对照）+ **接线**。
 
     ★ 独立失效模式：护栏**写了但没接**（判据在 `site_verify` 里，`main()` 却不调它）
       ⇒ 仍是"假安全"。故分两半：
@@ -162,7 +159,7 @@ def selftest(verbose=True):
     main_fn = next((n for n in ast.walk(tree)
                     if isinstance(n, ast.FunctionDef) and n.name == "main"), None)
     if main_fn is None:
-        fails.append("❌ 找不到 main() ⇒ 判据没测到东西（ERR-META-14）")
+        fails.append("❌ 找不到 main() ⇒ 判据没测到东西")
     else:
         call_lines = {}
         for n in ast.walk(main_fn):
@@ -231,7 +228,6 @@ def main():
         return
 
     if args.torrent_id:
-        # ★★★ 2026-09-27：`require_allow=True` 对**点名指定**也要生效。
         #   理由：`--torrent_id` 不改"这条路会写站点"的性质。若为了"能手工改"而
         #   在这里放行，洞就还在（只是从批量路挪到了点名路）—— 而 `--torrent_id`
         #   正是最容易在不知情时敲到 DENY 行的那条路（人只看到一个 sid）。
@@ -239,7 +235,6 @@ def main():
         #     而不是在这里开一个静默的例外。
         tasks = db.get_published(torrent_id=args.torrent_id, require_allow=True)
         if not tasks:
-            # ★ 报错文案要把**两种**原因都写出来，并给**分辨判据**（ERR-SITE-06 的教训：
             #   列出多个原因却不给分辨法，读的人只能猜，而猜错要花好几轮去追）。
             #   这里能分辨：库里查得到、但被闸门④ 拦住 ⇒ 与"库里根本没有"不同。
             _raw = db.get_published(torrent_id=args.torrent_id)
@@ -256,7 +251,6 @@ def main():
                      f"   如果这条是历史发布，先跑: python sync_site.py --apply")
     else:
         # ★★★ `require_allow=True` —— 本路**会把内容写到站点上**，必须过闸门④。
-        #   见 `db.EDIT_RULE_GUARD` 上面的长注释（2026-09-27 实测的洞：15972）。
         #   ★ 探针 `db.count_stale()` 也必须带同一条闸门，否则会出现
         #     "探针说有活 → edit 选不出来 → 探针还说有活" 的高频空转。
         tasks = db.get_published(only_with_cover=args.only_cover,
@@ -330,7 +324,6 @@ def main():
         #     行指向**别人的**电影/音乐页）⇒ 若照改，会把本地音乐任务的元数据
         #     **写进别人的页**（不可逆）。判据 = 站侧 `.torrent` 的 `info.name`
         #     == 本地 `.torrent` 的 `info.name`（`site_verify.edit_target_ok`）。
-        #   ★ 拿不到站侧名 / 本地名为空 ⇒ 拒改（"不可知"不是"是我的"，`ERR-PUBLISH-14`）。
         #   ★ 放在**最前**（读表单/回收封面之前）：拒改是本地判据，不该先敲站点。
         #   ★ dry-run 也要拦：dry-run 打印的"将要改什么"若基于错页就是误导。
         _local_name = ""
@@ -399,7 +392,6 @@ def main():
             autodetect=not args.no_autodetect,
         )
 
-        # 编辑时不动 type（分类），站点上已经是 408，重复提交没意义还容易踩坑
         full.pop("type", None)
         overrides = select_fields(full, args.fields)
 
@@ -447,7 +439,6 @@ def main():
                             flag = "ℹ️ 本地无封面（backfill_covers 补齐后会自动重编辑）"
                         print(f"    🔎 校验: {flag} | 标题《{info['title'][:50]}》"
                               f" | 页面图片 {info['image_count']} 张")
-                        # ★★ 名字一致性断言（#33 / `ERR-PUBLISH-12`）。
                         #   为什么**必须**在这里断言：`edit_torrent` 只改**元数据**，
                         #   页面上那个 `h1`（= 站点渲染的种子名）反映的是**挂的种子**。
                         #   若 `h1` 与本地 `torrent_name` 对不上，说明这页**挂的是别的版本**

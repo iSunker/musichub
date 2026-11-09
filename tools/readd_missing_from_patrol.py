@@ -102,7 +102,8 @@ def main(argv=None):
         ok, raw = _retry(lambda: cli.download_torrent(tid), tries=3, delay=2)
         return raw if ok else None
 
-    outcomes = sr.readd_missing(missing, qb_target=qb3020, qb_state_client=qb3020,
+    # ★ 目标发种实例为 qb3040（即 config.QB_HOST = 3010）；原种路径由 qb3020（原种库）解析
+    outcomes = sr.readd_missing(missing, qb_target=qb3040, qb_state_client=qb3020,
                                 download_for=download_for,
                                 category_for=lambda s: cats.get(s),
                                 dry_run=not args.apply)

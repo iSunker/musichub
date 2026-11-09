@@ -40,7 +40,7 @@ join 键：为什么只能用 `info_hash`
 
 ★★ **`torrents.id` 绝不可用**：那是 vertex **自己的**自增主键
 （实测 `id=3054` 对 `details?id=194702`，差 19 万）。
-它看起来"像 id"，写进去**不会报错**，只会静默写错 —— 见 `ERR-META-06`。
+它看起来"像 id"，写进去**不会报错**，只会静默写错 —— 见 。
 tid 只能从 `torrents.link` 抠：`details.php?id=(\\d+)`。
 
 ═══════════════════════════════════════════════════════════════════════════
@@ -64,7 +64,7 @@ tid 只能从 `torrents.link` 抠：`details.php?id=(\\d+)`。
 4. ★★ **源读不到 ≠ 没有可回填的行** —— 必须**非零退出**。
    挂载没了 / 库改名 / 表或列没了，都会得到一个**空结果集**；
    若用 `except: return {}` 把它吞掉，就变成**一个绿着的、什么都没做的**每日任务
-   —— 正是 `ERR-META-01`（"检测方法失效比不检测更危险"）。
+   —— 正是 （"检测方法失效比不检测更危险"）。
    ★ 这是本模块与项目里其它阶段**最重要的一条差别**。
 
 5. **纯本地、零请求**（同 `opencd_ingest.py` 的纪律 1）：不 import `requests`、
@@ -76,7 +76,7 @@ tid 只能从 `torrents.link` 抠：`details.php?id=(\\d+)`。
 - **容器内**（每日自动）：vertex2 的库由 compose 以 `${VERTEX_DB_DIR}:/vertex:ro` 挂进来
   ⇒ 路径 `VERTEX_DB=/vertex/sql.db`。
 - **本机**（一次性回填 / 取证）：走 SMB 直读 `//iSunker-DS423/...`。
-  ★ 本机跑时必须**先停容器** —— 两个写者写同一个 SQLite 是 `ERR-DOCKER-03` 禁止的。
+  ★ 本机跑时必须**先停容器** —— 两个写者写同一个 SQLite 是  禁止的。
 
 用法:
     python sync_opencd_tid.py                    # 报告（默认，不写库）
@@ -93,7 +93,6 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 # ★ 自检要打 ✅/❌ 这类非 GBK 字符，而 Windows 控制台默认 GBK ⇒ 不加这行会在
-#   第一行输出就 UnicodeEncodeError（ERR-OS-01）。
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
@@ -137,10 +136,8 @@ VERTEX_DB_DEV = r"//iSunker-DS423/docker_ssd/vertex2/vertex/db/sql.db"
 MIN_QUEEN_ROWS = 100
 
 # ★★ 外部库**必须**有的列。少一列就 `SourceUnavailable`，**不猜、不吞**。
-#   `add_time`（2026-09-23 加入）是闸门② 的输入 —— 列没了会让**每一行**都
 #   填不出发布日期 ⇒ 而那会被闸门② 的"空 ⇒ 拦"全数挡下。
 #   ★ 这正是不许静默降级的理由：静默降级的表现是"队列莫名其妙空了"，
-#     而不是一条报错，运维**查不到根因**（`ERR-META-01`）。
 REQUIRED_COLS = {"hash", "link", "name", "tracker", "add_time"}
 
 # 只查这一列（本地侧）—— 本模块每日在容器里跑，不该像 tools/ 那份预览一样
@@ -153,7 +150,6 @@ LOCAL_SELECT = "SELECT info_hash, opencd_tid, opencd_added_at FROM tasks"
 #   进程环境 —— 本机 TZ=UTC、生产容器 TZ=Asia/Shanghai ⇒ **同一行会得出两个
 #   不同的小时数**，差 8 小时。而闸门② 是拿这个字符串与 `datetime('now')`
 #   （UTC）做**字符串比较** ⇒ 差 8 小时在 7 天门槛上表现为"偶尔差一天放行"，
-#   这种 bug **只在特定时刻复现**，是 `ERR-SQL-03` 的教科书形状。
 #   ⇒ 显式 `timezone(timedelta(hours=8))`，两边算出来必然一致。
 QUEEN_TZ = timezone(timedelta(hours=8))
 
@@ -193,7 +189,7 @@ def added_at_utc(add_time):
 
 def resolve_vertex_db():
     """
-    外部库路径。优先级（比照 deploy.sh 的 DST 规矩，`ERR-DEPLOY-01`）：
+    外部库路径。优先级（比照 deploy.sh 的 DST 规矩，）：
         环境变量 VERTEX_DB → 容器内默认 → 本机 UNC 兜底
     ★ 默认值是**默认值**，不是强制值。
     """
@@ -220,7 +216,7 @@ def open_readonly(path):
       ② 连上后**先检查文件存在且非空**，再查询。
       ③ 无条件 `PRAGMA query_only=1`（双保险）。
 
-    ★ 不 cp —— `ERR-SQL-01`（cp 会丢 WAL 里未 checkpoint 的数据）。
+    ★ 不 cp —— （cp 会丢 WAL 里未 checkpoint 的数据）。
     ★ UNC 的坑（`tools/doc-audit/audit.py`，原 `04_probes.py` 记过）：不能写 `file://iSunker-DS423/...`，
       那会把主机名当 URI 的 authority 而报 `invalid uri authority`。
       ⇒ 要用 `file://` + **前导斜杠的路径**（即多两个斜杠）。
@@ -349,7 +345,7 @@ def build(rows, idx):
       所以 `apply_tids` 的 WHERE 会拒绝覆盖非空值。若把它们混进 `todo`，
       **汇总里的"需回填"数就会虚高**（说到 5 条、实际只写 3 条），
       而且"幂等"这条判据永远不成立（它们会一直留在 `todo` 里）。
-      ⇒ 判据与实际写入必须**同口径**（`ERR-META-03` 一族）。
+      ⇒ 判据与实际写入必须**同口径**。
 
     ★★ 2026-09-23：**两列各自判"空"**（不是只看 `opencd_tid`）。
       · `opencd_tid` 空            ⇒ 进 `todo`（两列都填）
@@ -404,7 +400,7 @@ def apply_tids(todo, path=None):
           **把整个队列永久锁死**（一条都发不出去，且不报错）。
       ★ 写成"tid 空 ⇒ 两列都写"而不是"分别用 COALESCE 只填空列"，是为了让
         `rowcount` 的语义保持"这一行被本脚本动过" —— 汇总里的数字才与
-        实际写入同口径（`ERR-META-03`）。
+        实际写入同口径。
     """
     conn = db.connect() if path is None else sqlite3.connect(path, timeout=30)
     n = 0
@@ -472,7 +468,7 @@ def preview(todo, same, diff, miss, idx, conflicts, stats, vertex_path):
     if miss:
         print(f"\n  ★ 未命中 {len(miss)} 条（**不回填**）—— 它们在 vertex 库里没有对应 infohash。")
         print("     可能是：① 我们本地自己抓轨的；② vertex 的 RSS 条件把它们滤掉了。")
-        print("     ★ 绝不用标题去凑（实测 1/547，见 ERR-SITE-03）。")
+        print("     ★ 绝不用标题去凑（实测 1/547，见 ）。")
         for h in miss[:5]:
             print(f"       {h}")
         if len(miss) > 5:

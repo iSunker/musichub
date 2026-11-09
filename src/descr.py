@@ -1,8 +1,7 @@
-"""
-种子页面内容生成：副标题、BBCode 简介、以及分类下拉/标签的自动推断。
+"""种子发布与编辑页面内容渲染层。
 
-发布(takeupload.php)和编辑(takeedit.php)必须用同一份渲染逻辑，否则编辑一次
-页面内容就跟发布时不一样，很难排查。所以这里是唯一来源。
+负责副标题、BBCode 简介渲染（包含封面图、详情正文、曲目列表、抓轨日志折叠等），
+以及 NexusPHP 分类下拉选项（媒介、音频编码、製作組）与标签集合的格式化输出。
 """
 import json
 import re
@@ -22,7 +21,6 @@ TEAM = {"MUSOPIA": "6", "OTHER": "5", "HDS": "1", "CHD": "2",
 
 # input type=checkbox name="tags[4][]"
 #
-# ★★ 2026-09-21 订正 —— 这张表原先只有 23 项，**缺了 21 项**。
 #    真实证据：用户提供的 `opencdhtml/音乐乌托邦 __ 发布 - Powered by NexusPHP.html`
 #    （乌托邦 `takeupload.php` 的真实表单），逐行数出 `name="tags[4][]"` 的
 #    checkbox **正好 44 个**，值从 1 到 47。
@@ -41,7 +39,6 @@ TAGS = {
     "完成加速": "47", "种子加速": "44", "摇滚": "9", "爵士": "11", "电子": "12",
     "金属": "13", "古典": "15", "原声": "16", "发烧": "17", "民间": "23",
     "乡村": "24", "器乐": "34", "儿童": "35",
-    # —— ★★ 2026-09-21 补的 21 项（原先缺，全在真实 44 项表里）——
     #   风格/地区类：
     "天籁": "18", "新世纪": "19", "说唱": "20", "雷鬼": "21", "蓝调": "22",
     "朋克": "25", "民族": "26", "音乐剧": "27", "汽车": "28", "宗教": "29",
@@ -78,7 +75,6 @@ TAGS_LABELS = {
     "korean": "korean", "piano": "piano", "bollywood": "bollywood",
 }
 
-# ★★ 转发方向白名单 —— 「哪些标签**允许**被勾上」（2026-09-21 用户拍板）。
 #
 #    背景：本项目是**皇后 → 乌托邦**的单向适配。两个站**各自**都有一批标签，
 #    但**「皇后有」不等于「该在乌托邦勾上」**。下面按**来源**分三类：
@@ -267,7 +263,6 @@ def detect_tags(*sources):
 
 # ==================== 副标题 ====================
 #
-# ★★ 2026-09-21 用户拍板：**皇后 → 乌托邦 这条路的副标题用皇后的副标题**。
 #
 #   ★★★ 我在这里犯过一个错，记下来防复发：
 #     我曾断言「皇后详情页**没有**副标题字段」—— **那是错的**。
@@ -282,7 +277,6 @@ def detect_tags(*sources):
 #       （`info["small_descr"]` + `small_descr_present`，实测全部为 True）。
 #     ⇒ 我却在 `descr.build_form_fields()` 里用**主标题**当副标题，
 #       把解析层已经拿到的真值**扔掉了** —— 于是预览里主/副标题一模一样。
-#     ★ 教训（同 ERR-META-01 家族）：**"我没找到"不等于"不存在"**。
 #       证据不足时只能说"我在这些地方没找到"，**不能断言"没有"**；
 #       而本次更糟 —— 数据**本来就在手上**（解析层有），是我没去用它。
 #
@@ -298,12 +292,10 @@ def detect_tags(*sources):
 #       那条路的主标题是我们自己拼的，行为不变。
 #     · 皇后转载路（**有** `opencd_tid`）：`opencd_small_descr()` = **皇后副标题原文**。
 #
-#   ★★ 2026-09-26 订正（本条原先写的是 "`run.py`（qB 本地抓轨）继续用
 #      `build_small_descr()`"）—— 那句**把 run.py 当成了只走抓轨路**，是错的：
 #      `run.py` 的 scan 扫的是 qB 的 `opencd` 分类，里面**两种种子都有**
 #      （既有本地抓轨成果，也有已经转载自皇后、正在做种的）⇒ 它**必须分流**。
 #      ★ 把它当成"只走抓轨路"，正是 `scan` 每轮把皇后原文覆盖成「全 N 曲」的由来
-#        （`ERR-DATA-01` 的真根因；`ERR-META-04`：改了行为要同时改文档，
 #         否则这条注释会把人引回那个 bug）。⇒ 现在走 `scan_small_descr()`。
 
 def opencd_small_descr(parsed_subtitle=""):
@@ -356,7 +348,7 @@ def scan_small_descr(tracklist="", disc_count=None, fallback="", mapped_json=Non
     """★ `run.py`（scan）算副标题的入口 —— 与 `build_small_descr_for_task` **同口径**。
 
     ═══════════════════════════════════════════════════════════════════════
-    为什么需要第三个入口（2026-09-26 实测踩到，`ERR-DATA-01` 的真根因）
+    为什么需要第三个入口（2026-09-26 实测踩到， 的真根因）
     ═══════════════════════════════════════════════════════════════════════
     `scan` 每 30 分钟重扫 qB，**已发布的种子仍在 qB 里** ⇒ 它会把
     `small_descr` **重算并写回列**（`run.py` 的 `save_task(small_descr=…)`，
@@ -382,7 +374,7 @@ def scan_small_descr(tracklist="", disc_count=None, fallback="", mapped_json=Non
     在它这里读列 = 读到自己上一轮写的值（甚至读到已经被盖坏的「全 15 曲」），
     再写回去 ⇒ **固化错误**，而且是**假修**（改了代码、行为没变、不报错）。
 
-    ⇒ 判据：**同一个"副标题"，在三个调用点的取值来源不同**（`ERR-META-13`：
+    ⇒ 判据：**同一个"副标题"，在三个调用点的取值来源不同**（：
       引用一个数字之前先确认它**是**什么）：
         · `crabpt_site` / `update_metadata`：有完整 task ⇒ 读**列**（已生效值）
         · **`scan`：只有证据快照 ⇒ 读 `mapped_json.small_descr`**
@@ -399,7 +391,6 @@ def scan_small_descr(tracklist="", disc_count=None, fallback="", mapped_json=Non
             #   （与 `opencd_small_descr("")` 同一条纪律）。
             return opencd_small_descr(got.get("small_descr"))
         # ★ `mapped_json` 有值但**解析不出** `small_descr` ⇒ 落到「全 N 曲」。
-        #   刻意**不**在这里静默装作"拿到皇后原文了"（`ERR-META-14`：
         #   "来源为空"不能印成"映射成功"）。调用方会把这一情形打出来。
     return derive_small_descr(tracklist, disc_count=disc_count, fallback=fallback)
 
@@ -409,7 +400,7 @@ def parse_logs_json(raw_logs):
 
     ★ 抽出来的理由（2026-09-24）：这段逻辑原先**只写在 `build_form_fields()` 里**，
       而新增的 `crabpt_site.build_fields()` 也需要同一份
-      ⇒ 抄一遍就是两个口径（`ERR-META-03`），且**漂了不报错**。
+      ⇒ 抄一遍就是两个口径，且**漂了不报错**。
     """
     if not raw_logs:
         return None
@@ -466,6 +457,56 @@ def extract_cover_url(descr_text):
     return m.group(1) if m else ""
 
 
+def markdown_to_bbcode(text: str) -> str:
+    """将 Markdown 语法转换为 NexusPHP 兼容的 BBCode。
+
+    针对猫站（PTerClub）等纯 NexusPHP 站点：前端无法渲染 Markdown，未转义符号
+    会直接暴露出裸字符并导致审核退回。
+    支持语法：
+      - 代码块与行内代码：```code``` -> [code]code[/code]，`code` -> [code]code[/code]
+      - 图片与超链接：![alt](url) -> [img]url[/img]，[text](url) -> [url=url]text[/url]
+      - 标题：# ~ ###### -> [b]...[/b]
+      - 强调：**text** / __text__ -> [b]text[/b]，*text* -> [i]text[/i]
+      - 删除线：~~text~~ -> [s]text[/s]
+      - 引用块：> quote -> [quote]quote[/quote]
+    """
+    if not text:
+        return ""
+    s = str(text).replace("\r\n", "\n")
+
+    # 1. 代码块与行内代码
+    s = re.sub(r"\x60{3}(?:[a-zA-Z0-9_-]+)?\n([\s\S]*?)\x60{3}", r"[code]\1[/code]", s)
+    s = re.sub(r"\x60([^\x60\n]+)\x60", r"[code]\1[/code]", s)
+
+    # 2. 图片与超链接
+    s = re.sub(r"!\[(.*?)\]\((https?://\S+?)\)", r"[img]\2[/img]", s)
+    s = re.sub(r"\[(.*?)\]\((https?://\S+?)\)", r"[url=\2]\1[/url]", s)
+
+    # 3. 标题（行首 1-6 个 #）
+    s = re.sub(r"(?m)^#{1,6}\s+(.+?)\s*$", r"[b]\1[/b]", s)
+
+    # 4. 加粗与斜体
+    s = re.sub(r"\*\*(.+?)\*\*", r"[b]\1[/b]", s)
+    s = re.sub(r"__(.+?)__", r"[b]\1[/b]", s)
+    s = re.sub(r"(?<!\*)\*(?!\*)([^\*\n]+?)(?<!\*)\*(?!\*)", r"[i]\1[/i]", s)
+
+    # 5. 删除线
+    s = re.sub(r"~~(.+?)~~", r"[s]\1[/s]", s)
+
+    # 6. 引用块（按连续行聚合成单个 quote）
+    def _repl_quote(m):
+        lines = m.group(0).strip().split("\n")
+        cleaned = [re.sub(r"^>\s?", "", line) for line in lines if line.strip() != ">"]
+        content = "\n".join(cleaned).strip()
+        if not content:
+            return ""
+        return "[quote]" + content + "[/quote]"
+    s = re.sub(r"(?m)(?:^>[^\n]*$\n?)+", _repl_quote, s)
+    s = re.sub(r"\[quote\]\s*\[/quote\]\n*", "", s)
+
+    return s
+
+
 def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
                 logs=None, extra_note=None, opencd_descr="", site=None,
                 source_link=""):
@@ -490,14 +531,14 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
 
     ★ 为什么默认 `None`（= 保留日志）而不是 `"musopia"`：
       `None` 是"**调用方没声明哪个站**" ⇒ 按**既有行为**（保留）走。
-      这与 `ERR-ENV-02` 那条"缺键时的默认值必须中性"同一个理由 ——
+      这与  那条"缺键时的默认值必须中性"同一个理由 ——
       老调用点（`descr.py` 自己的 `build_form_fields`、自检）一个字不改，
       行为就不该变。★ 反过来若默认成"不保留"，所有老调用点会**静默**换行为。
 
     ★★ 判据（可执行，见本文件自检 ⑨）：同一个 `logs=` 输入下
         `site="crabpt"` 的产出里**不许**出现 `[spoiler=`/`[code]`，
         而 `site=None` 与 `site="musopia"` 必须**逐字节相同**且**含**折叠块。
-      ⇒ 三者要**分别**断言（`ERR-META-28`：说不出"什么输入会让它失败"的断言不算判据）。
+      ⇒ 三者要**分别**断言。
 
     专辑名称/副标题/原始名称不写进简介：站点页面顶部的表格已经展示了主标题、
     副标题和种子文件名，简介里再重复一遍纯属冗余。
@@ -507,7 +548,7 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
       封面+曲目+日志，皇后的正文（乐评/档案/厂牌信息）**从未上过站**。
     ★ 为什么是"并存"而不是"替换"：皇后的 `divdescr` 里**没有**我们的封面图和
       日志折叠块，直接替换会把这两样丢掉（页面反而更难用）⇒ 保留①④、插入②。
-    ★ 空值语义（`ERR-META-14`：来源为空不许印成"映射成功"）：
+    ★ 空值语义：
       `opencd_descr` 为空 ⇒ **整块不出现**，而不是渲染一个空段落。
       两 种 空 要分清：① 皇后那条本来就没写正文；② 我们没抓到页面
       （389 条无 `mapped_json` 的行）—— 渲染层**不需要**分清，两者都该"不显示"；
@@ -521,7 +562,7 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
       ⇒ 曲目列表**该用皇后原版**。而调用方传进来的 `tracklist` 已经是
         `merge_mapped()` 提升过的值（有快照就是皇后原版、没有就是列）
         ⇒ 本函数**不用再做一次分流**，用谁由 `merge_mapped` 决定
-        （`ERR-META-03`：同一判据别两处实现）。
+        。
       ★ 所以**没有**新开关：`tracklist` 参数的含义"曲目列表文本"不变，
         变的是**上游给它的值**（快照优先）。
 
@@ -536,22 +577,30 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
 
     blocks = []
 
+    # ★ 猫站规则（置顶）：转载声明必须绝对置顶（排在最前面，在封面图之上）
+    if site == "pter" and source_link and str(source_link).strip():
+        blocks.append(f"[quote]{source_link.strip()}[/quote]")
+
     # ① 封面图 —— **我们的**图链（皇后正文里的图已在解析层剥掉）
     if cover_url and str(cover_url).strip():
         blocks.append(f"[center][img]{cover_url.strip()}[/img][/center]")
 
-    # ①b 资源来源声明（★ 猫站规则：比如自己抓轨、转载、WEB下载等，用 quote 给出信息）
-    if source_link and str(source_link).strip():
+    # ①b 非猫站站点的资源来源声明（保留在封面下方，与既有老站页面一致）
+    if site != "pter" and source_link and str(source_link).strip():
         blocks.append(f"[quote]{source_link.strip()}[/quote]")
 
-    # ② 皇后简介正文 —— 原文照贴，**不做任何 BBCode 转义/包装**。
+    # ② 皇后简介正文 —— 原文贴入（猫站经 markdown_to_bbcode 清洗保真）
     if opencd_descr and str(opencd_descr).strip():
         body = (str(opencd_descr).strip()
                 .replace("[/quote]", "［/quote］"))
+        if site == "pter":
+            body = markdown_to_bbcode(body)
         blocks.append(body)
 
     if tracklist and str(tracklist).strip():
         body = _truncate(tracklist, TRACKLIST_MAX_CHARS, "曲目列表过长已截断")
+        if site == "pter":
+            body = markdown_to_bbcode(body)
         blocks.append(f"[quote][b]曲目列表：[/b]\n{body}[/quote]")
 
     # ④ 抓轨日志（乌托邦保留；蟹黄堡整块去掉；猫站使用 [hide=Log] 折叠）
@@ -574,7 +623,8 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
                     .replace("[/spoiler]", "［/spoiler］")
                     .replace("[/hide]", "［/hide］"))
         if site == "pter":
-            blocks.append(f"[hide=Log]\n{body}\n[/hide]")
+            hide_label = label if label and label.strip() != "LOG" else "Log"
+            blocks.append(f"[hide={hide_label}]\n{body}\n[/hide]")
         else:
             blocks.append(f"[spoiler={label}][code]{body}[/code][/spoiler]")
 
@@ -586,14 +636,14 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
     return "\n\n".join(blocks)
 
 
-def build_form_fields(task, *, anonymous=False, autodetect=True):
+def build_form_fields(task, *, anonymous=True, autodetect=True):
     """
     把一条 task（db 里的 dict）渲染成 takeedit.php / takeupload.php 的表单字段。
     返回普通 dict，调用方决定是拼 data= 还是 files= 提交。
 
-    anonymous 默认 False 且此时**不输出该字段**：编辑走的是"只覆盖指定字段"，
-    不提交就等于沿用站点现值。站上已有的种子都是非匿名的，默认填 1 会把 254 个
-    页面悄悄改成匿名发布——这种没人要求过的副作用必须避免。要匿名请显式传 True。
+    ★ 2026-10-31 纪律订正：全生态强制匿名发布（NexusPHP 标准表单字段 `uplver="yes"`）。
+    `anonymous` 默认为 True。若显式传 False（如 update_metadata 仅维护字段且沿用站点现状），
+    则不输出 `uplver` 字段。
     """
 
     title = task.get("formatted_title") or task.get("torrent_name") or ""
@@ -615,7 +665,6 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
     # 副标题渲染时重算：已发布的老记录当初存的是「歌手-专辑(年)|格式」这种和主标题
     # 重复的旧值，只有在这里重算才能在下一次编辑时刷新成「全 N 曲 / DCD」。
     # 数不出曲目（老分轨记录 tracklist 为空）就退回库里旧值，不硬造。
-    # ★★ 副标题的取值（2026-09-21 用户拍板：皇后转载路用**皇后的副标题**）：
     #    · 皇后转载路（有 `opencd_tid`）→ `opencd_small_descr(task["small_descr"])`
     #      = 解析层从皇后页面 `<div class="smalltitle">` 读到的**原文**。
     #      ★ `task["small_descr"]` 就是它，**别再拿主标题顶替**（我犯过这个错）。
@@ -630,7 +679,6 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
             disc_count=len(logs) if logs else None,
             fallback=task.get("small_descr") or "",
         )
-    # ★★ 上面这几行与 `build_small_descr_for_task()` **是同一份口径**（2026-09-24 抽出）。
     #    这里**刻意保留原写法**而不是直接调那个函数，因为两者有一个**真实差异**：
     #    本函数外面已经算过 `logs`（多碟日志，用于后面拼简介），复用它**省一次 json 解析**；
     #    而 `build_small_descr_for_task()` 面向"只想拿副标题"的调用方（如蟹黄堡适配层），
@@ -644,7 +692,6 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         log_content=task.get("log_content") or "",
         log_filename=task.get("log_filename") or "",
         logs=logs,
-        # ★★ 皇后简介正文（2026-09-26 加）：`merge_mapped()` 已把
         #    `mapped_json.descr` 提升成顶层 `task["descr"]`（见 `db.MAPPED_TOP_KEYS`）。
         #    ★ 这里读的是**提升后**的值而不是列 `opencd_descr` —— 两者理论上同值，
         #      但**快照是权威**（`db.py` 的注释：快照 = "抓页面时做的那个决定"，
@@ -660,12 +707,10 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         #   ★ 用**字面量**而不是 `db.SITE_MUSOPIA`：本模块**刻意不 import db**
         #     （它只要 stdlib，所以能脱离 .env 单独跑自检 —— 与 `opencd_rate.py`
         #      那条"零项目内依赖"是同一个纪律）。`db` 那个常量本身就等于
-        #     `"musopia"` 这个字面量，两者**由自检 ⑨ 钉住**（`ERR-META-30`：
         #     两处各写一份要么共用、要么被判据钉住）。
         site="musopia",
     )
 
-    # ★★ `custom_fields[4][N]` 的**真实序号**（2026-09-21 实测自乌托邦 `takeupload.php`
     #    真实表单 —— 用户提供的 `opencdhtml/音乐乌托邦 __ 发布 - Powered by NexusPHP.html`，
     #    逐行读出的 `<td class="rowhead">标签</td>` + `<input/textarea name=...>`）：
     #
@@ -682,7 +727,6 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
     #      ③ `[4][5]`（抓轨日志得分）我们**根本没发这个 key**
     #    ⇒ ★★ 而且 `[4][2]` / `[4][3]` 都是**必填**，我们恰恰把 `[4][3]` 发空
     #      ⇒ 很可能正是「HTTP 200 + 空 body」的成因（站点拒绝但回空 body，
-    #      见 `ERR-SITE-01` 与待办 #4）。
     #
     #    ★ 值来源：`artist` / `year` 由 `opencd_parse` 解析「藝術家名」/「發行年份」得来，
     #      实测样本给出 `'齐秦'` / `'1998年'`。
@@ -704,7 +748,6 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         #      有据可查的豁免，不是漏登记（见那张表的 `nfoaction` 行）。
         "nfoaction": "keep",
         # ★★ `color` / `font` / `size` —— **不在任何表单里，是残留**。
-        #    2026-09-22 实测：乌托邦 `takeupload.php` 的真实表单里 95 个 `name=` 属性
         #    一个都不叫这三个名字；`takeedit.php` 读回来的表单里也没有。
         #    `grep -rn` 全仓库，除了这里这一处赋值**没有任何地方读它们**；
         #    git 历史可追到最初的 `419b6db`，当时是一整块从别处抄来的字段表，
@@ -747,13 +790,11 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
     #     用户看到的「页面缺东西」是同一族的症状。
     #   ★ `rip_score`（日志得分）站点表单里是独立字段（`input name="rip_score"`），
     #     不是 `custom_fields[4][5]`；`[4][5]` 实测标签就是「抓轨日志得分」，
-    #     两者**待确认关系** ⇒ **先不发**，不猜（同 `ERR-META-01`：拿不到就不编）。
     log_for_field = (task.get("log_content") or "").strip()
     if log_for_field:
         fields["custom_fields[4][3]"] = log_for_field
 
     if autodetect:
-        # ★★ 2026-09-21 修 —— **顺序即优先级**，这是一条真 bug 的修法：
         #    原先是 `fields["medium_sel[4]"] = detect_medium(title, raw)`，
         #    **无条件覆盖**。于是 `opencd_map.map_medium()` 算得再对也没用：
         #    皇后页面写 `媒介：Web` ⇒ `map_medium` 正解是 `Other(12)`，
@@ -767,7 +808,6 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         #    ★ 注意 `"0"` 是**合法值**（= 请选择一项），所以判据是
         #      `is not None` 而不是真值判断 —— 否则 `"0"` 会被当成"没给"而退回猜。
         #
-        #    ★★★ 2026-09-28 再收一刀（**皇后路不许猜媒介**）：
         #
         #      上面那条规则只解决了"快照有值 vs 猜"的优先级，**没解决"快照根本没这一格"**。
         #      而 `detect_medium()` 的末句是**无条件** `return MEDIUM["CD"]`
@@ -782,7 +822,6 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         #          ① 解析层这次没抓到「媒介」那一格，或
         #          ② 那份快照是**早期**入库的（那时的 `map_all` 还没有这个键）。
         #        两种都是**"不知道"** ⇒ 拿"不知道"去猜一个具体的 CD 就是
-        #        `ERR-META-14` 的形状（空来源不许印成"有结论"）。
         #        ★ 而且这条**正好命中"网页下载"**：`Web`/`HI-RES` 恰恰是
         #          `detect_medium()` **认不出**（→ CD）而 `map_medium()` **认得**（→ Other）的那类。
         #
@@ -809,7 +848,6 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         else:
             fields["audiocodec_sel[4]"] = detect_audiocodec(title, raw)
 
-        # ★★ 制作组 `team_sel[4]` —— 2026-09-21 接上（**按名字**映射，不搬数字）。
         #    缺口本身：原先这一格**恒发 "0"**（请选择一项），即**从来没填过**。
         #    这不是"取不到"，是"没做" —— 皇后页面明确写着 `其他(Other)`，
         #    而乌托邦有 `Other = 5`，两边**对得上**。
@@ -822,12 +860,10 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         if declared_team:
             fields["team_sel[4]"] = declared_team
 
-        # ★★ 标签：必须真的发出去 —— 2026-09-21 修。
         #    缺口本身：`detect_tags()` 早已写好、`TAGS` 全表也在，
         #    但 `build_form_fields()` **从不调用它**，form 里连 `tags` 开头的 key
         #    都没有 ⇒ 它是**死代码**（实测：form keys 里零个 `tags*`）。
         #
-        #    ★★ 两个来源，**优先"页面已写明"的那个**（这条是 2026-09-21 实测踩出来的）：
         #      · `task["tags"]` —— 由 `opencd_map.map_all()` 从**皇后页面的
         #        「標籤列表」字段**映射而来。那是**站点自己写的事实**（实测样本给出
         #        `['6','10']`，即 港台 + 流行）。**这是 OpenCD 路径的正道。**
@@ -849,7 +885,6 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
         #    ★ 判据见 `tools/render_compare.py`：最终 form 里必须**有** `tags[4][]`。
         #    ★ 阴性对照：把这行删掉，该判据必须当场报 MISS。
         #
-        #    ★★ 2026-09-21 新增：**转发方向白名单**（`TAG_NEVER_FORWARD`）。
         #       「皇后有」≠「该在乌托邦勾上」：禁转/首发（语义相反）、
         #       Redacted/Orpheus/Jpopsuki（转发友站）、种子加速/完成加速（站内运营）
         #       都要**剔除**，理由逐条写在 `TAG_NEVER_FORWARD` 上。
@@ -868,7 +903,6 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
             fields["tags[4][]"] = kept
 
         # ★★ `OpenCD` 标签：**来源标记**，只要这条种子确实来自 OpenCD 就勾上。
-        #    （用户 2026-09-21 点名：「opencd 勾上」。）
         #    ★ 判据是**"来源是不是 OpenCD"**，不是"标题里有没有 OpenCD 字样"
         #      —— `opencd_map.map_all()` 产出的标题**不含** `OpenCD`
         #      （如 `齐秦 - 我拿什么爱你 1998 - FLAC 分轨`），
@@ -881,7 +915,7 @@ def build_form_fields(task, *, anonymous=False, autodetect=True):
                 fields["tags[4][]"] = list(cur) + [ocd]
 
     if anonymous:
-        fields["anonymous"] = "1"
+        fields["uplver"] = "yes"
 
     return fields
 
@@ -928,7 +962,6 @@ def _check():
     chk("数不出曲目 → 回退 fallback",
         derive_small_descr("", fallback="旧值") == "旧值")
 
-    # ★★ ④ 2026-09-26 加：`scan` 入口（`scan_small_descr`）—— 防**回归**。
     #    防的是这个**真的发生过**的事故：scan 每 30 分钟把皇后原文覆盖成「全 N 曲」。
     #    实测症状：`tools/recall_opencd_descr.py` 回写 56 条后，下一轮"待改 8"，
     #    且**每次数字都不同**（被扫到的退回、没扫到的保留原文）。
@@ -937,7 +970,6 @@ def _check():
     chk("皇后路 → 取 mapped_json 的原文",
         scan_small_descr("01. a\n02. b", disc_count=1, mapped_json=_mj,
                          is_opencd=True) == "專輯 | VP Records / VPCD 1793")
-    # ★★ 本节的**阴性对照**（`ERR-META-18`：自检要做阴性对照、并看退出码）：
     #    scan 绝不能退回归曲目数 —— 那正是被覆盖时的形态。
     chk("★ 阴性对照：**不等于**「全 2 曲」",
         scan_small_descr("01. a\n02. b", disc_count=1, mapped_json=_mj,
@@ -977,7 +1009,6 @@ def _check():
         filter_forward_tags(["1", "2", "30"])[0] == [])
 
     print("\n④ 简介简介块（`build_descr` 的②）—— ★ 皇后正文 + 我们四件套并存")
-    # ★★ 这一节钉住 2026-09-26 的改动。**负向对照是重点** ——
     #    这个改动的风险全在"悄悄多出/少了什么"，不是"报不报错"。
     _COVER = "https://img.example/cover.jpg"
     _TL = "1. a (01:00)\n2. b (02:00)"
@@ -1008,9 +1039,7 @@ def _check():
         "[/quote]" not in _inj.split("曲目列表")[0])
 
     # ══════════════════════════════════════════════════════════════════
-    # ⑨ `site` 参数：蟹黄堡**不要**日志折叠块（2026-09-27 用户拍板）
     #
-    #   ★★ 为什么三条要**分别**断言（`ERR-META-28`：说不出"什么输入会让它
     #      失败"的断言不算判据）：
     #        · 只断言"crabpt 没有 [spoiler]" ⇒ 一个"整个函数返回空串"的
     #          坏实现也能通过（它当然没有 folded block）⇒ 必须**同时**断言
@@ -1063,6 +1092,25 @@ def _check():
         "[hide=Log]" in _pter and "[/hide]" in _pter and "[spoiler=" not in _pter and "[code]" not in _pter)
     chk("⑨i 猫站：来源声明包含在 [quote] 中",
         "[quote]转自OpenCD: https://open.cd/details.php?id=12345[/quote]" in _pter)
+    chk("⑨j 猫站：来源声明必须置顶（首行优先于封面图）",
+        _pter.startswith("[quote]转自OpenCD: https://open.cd/details.php?id=12345[/quote]"))
+    _md_test = build_descr(opencd_descr="### 简介标题\n**歌手**：测试\n> 引用说明", site="pter")
+    chk("⑨k 猫站：Markdown 标题与加粗转为 BBCode",
+        "[b]简介标题[/b]" in _md_test and "[b]歌手[/b]" in _md_test and "###" not in _md_test)
+
+    # ══════════════════════════════════════════════════════════════════
+    # ⑩ 全生态强制匿名发布（NexusPHP 标准表单字段 uplver="yes"）
+    # ══════════════════════════════════════════════════════════════════
+    _sample_task = {"formatted_title": "Test Title", "torrent_name": "Test Torrent"}
+    _fields_anon = build_form_fields(_sample_task)
+    chk("⑩a build_form_fields 默认强制匿名（uplver='yes'）",
+        _fields_anon.get("uplver") == "yes",
+        f"实得 uplver={_fields_anon.get('uplver')!r}")
+    chk("⑩b 废弃旧的 'anonymous' 键（绝不发 anonymous=1）",
+        "anonymous" not in _fields_anon)
+    _fields_named = build_form_fields(_sample_task, anonymous=False)
+    chk("⑩c 显式传 anonymous=False 时不含 uplver 键（供 update_metadata 保留现状）",
+        "uplver" not in _fields_named)
 
     return ok, fails
 
@@ -1076,7 +1124,6 @@ def main():
     # ★ --json：给 tools/gen_counts.py 读的机读出口。
     #   为什么不让它去正则解析上面的 ✅/❌ 人读行：各脚本的分母口径并不统一
     #   （这里是 ok+fails，opencd_parse 是 total_checked，opencd_rate 是 ok+fails），
-    #   拿一个正则去套多种分母 = 制造一个"看起来很正常的"错数字（ERR-META-01 一族）。
     ap.add_argument("--json", action="store_true",
                     help="只把结果以 JSON 打到末行（给 gen_counts.py 读）")
     args = ap.parse_args()
@@ -1103,3 +1150,4 @@ def main():
 if __name__ == "__main__":
     import sys
     sys.exit(main())
+

@@ -1,8 +1,6 @@
-"""
-本地资源提取：封面图查找与图床上传、抓轨日志读取、CUE 曲目解析。
+"""本地媒体资产提取与处理模块。
 
-run.py 里这些逻辑原本是内联的，backfill_covers.py 也需要同一套（补历史缺失的封面），
-所以抽出来共用，避免两处实现慢慢跑偏。
+提供封面查找、图片压缩、图床上传（PicGo / Lsky Pro）、抓轨日志解析与 CUE 曲目解析等功能。
 """
 import json
 import os
@@ -13,7 +11,6 @@ import requests
 
 import config
 
-# ★ 2026-10-09：最近一次 `upload_to_lsky` 失败的**原始原因串**（成功时清空）。
 #   ★ 用途：让调用方（`publish._crabpt_cover`）区分「本条封面的问题」（如超大小上限）
 #     与「设施级问题」（token/配额/网络）—— 前者跳过本条、后者停整轮。
 #     原先只有 `print`，调用方拿不到原因 ⇒ 只能一律当"设施坏"⇒ 一条坏封面卡死整队。
@@ -51,19 +48,15 @@ IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 # 图床有大小限制，太大的原始扫图先跳过而不是上传失败
 MAX_COVER_BYTES = 15 * 1024 * 1024
 
-# ★★★ 2026-10-10：Lsky（蟹黄堡专用图床）的**单图上限目标**（仅用于"传前压图"）。
 #
 #   ★ 为什么另开一个常量、**不动** `MAX_COVER_BYTES`：
-#     两者管**不同阶段**、语义不同（同一个值会漂移成两个意思，`ERR-META-13`）：
 #       · `MAX_COVER_BYTES`（15 MiB）= **pick/预检**阶段的地板：太离谱的原始扫图
 #         干脆不选，别拿去送死。
 #       · `LSKY_MAX_BYTES`（本项）= **上传**阶段的目标：**超了就压到它以下再传**
 #         （而不是跳过）。压图是"尽力救回"，不是"再设一道墙"。
 #
-#   ★ 实测（2026-10-10，用当前 NAS 的 Lsky token 打 `/api/v1/upload`）：
 #     · 15.6 MB 的 `1e39f05940b6.jpg` ⇒ `{"status":false,"message":"图片大小超出限制"}`
 #     · 0.7 MB 的图 ⇒ `{"status":true,"message":"上传成功"}`
-#     ⇒ 上限落在 (0.7MB, 15.6MB) 之间。用户 2026-10-10 拍板取 **5 MB** 作目标值
 #       （Lsky Pro 常见默认 5MB；压到 5MB 以下足以覆盖绝大多数封面）。
 #   ★ 可被 `.env` 的 `LSKY_MAX_BYTES` 覆盖（运维按本站真实上限调）。
 LSKY_MAX_BYTES = int(os.getenv("LSKY_MAX_BYTES", "") or (5 * 1024 * 1024))
@@ -388,7 +381,7 @@ def lsky_load_token():
 
     ★★ 为什么只认 `token` 字段、不认别的：
       这是**我们的**文件（自己写的），格式由 `lsky_save_token` 定死。
-      多认一种形状 = 以后换个写法也"能读"⇒ 坏了看不出来（`ERR-META-14`）。
+      多认一种形状 = 以后换个写法也"能读"⇒ 坏了看不出来。
     """
     p = lsky_token_path()
     if not os.path.exists(p):
@@ -444,7 +437,7 @@ def lsky_login(email=None, password=None, api_url=None, timeout=30):
 
     ★ 成功判据**只有一条**：`HTTP 200` **且** `status` 为真 **且** `data.token` 非空。
       Lsky 在业务失败时也回 200（`status:false` + `message`）⇒ 只看状态码会把
-      「登录被拒」读成「成功」（`ERR-META-01`：检测方法失效比不检测更危险）。
+      「登录被拒」读成「成功」。
     ★★ token **绝不打印**（同 `guard_auto_key` 的纪律：值不进日志，
       而 `docker logs` 是本项目最容易被抄走的那份）。`说明` 里只出现长度与来源。
     """
@@ -452,7 +445,7 @@ def lsky_login(email=None, password=None, api_url=None, timeout=30):
     password = config.LSKY_PASSWORD if password is None else password
     if not (email or "").strip() or not (password or "").strip():
         return "", ("没配 LSKY_EMAIL / LSKY_PASSWORD ⇒ **无法换 token**。"
-                    "★ 见 ERR-ENV-02：新增的 .env 键要在 **NAS 上手工加**。")
+                    "★ 见 ：新增的 .env 键要在 **NAS 上手工加**。")
 
     url = f"{(api_url or _lsky_base())}/tokens"
     try:
@@ -538,7 +531,7 @@ def _shrink_for_lsky(image_path, max_bytes=None, max_dim=None):
 
     ★★★ 三条铁律：
       ① **绝不覆盖原图**：压过的图写到一个**独立后缀**文件（`<原路径>.lsky.jpg`）。
-         原图是**乌托邦那份**的来源（`ERR-META-13`：一个值在两个位置含义不同），
+         原图是**乌托邦那份**的来源，
          覆盖它 = 把乌托邦页面上的封面也换掉了。
       ② **不联网**：只用本地已有文件重编码，不重新下载（下载由 `cover_fetch` 负责）。
       ③ **能不动就不动**：`size <= max_bytes` ⇒ **原样返回**，不重编码
@@ -546,7 +539,7 @@ def _shrink_for_lsky(image_path, max_bytes=None, max_dim=None):
 
     ★ 依赖 Pillow。★ 若 Pillow **不可用**（旧镜像还没重建）⇒ 本函数**如实降级**：
       不假装压成功，而是把原图原样返回（让上传去撞 Lsky 的墙、得到真实报错），
-      并打印一条**明确**的"Pillow 缺失、压图未生效"提示（`ERR-META-14`：兜底不许冒充结果）。
+      并打印一条**明确**的"Pillow 缺失、压图未生效"提示。
     """
     if not image_path or not os.path.exists(image_path):
         return ""
@@ -633,7 +626,7 @@ def upload_to_lsky(image_path, retries=2, api_url=None, token=None,
       的回收逻辑照抄过来：Lsky 上传同一张图会**直接再存一份**（也可能因策略去重，
       但**没有**约定俗成的 400 + 可回收 URL）。
       ⇒ 照抄的代价是：把一个**真错误**（如 401/403）当成"已存在、复用 URL"而静默吞掉
-        —— 那正是 `ERR-META-01`「检测方法失效比不检测更危险」的形状。
+        —— 那正是 「检测方法失效比不检测更危险」的形状。
       ⇒ 所以这里**只认 `HTTP 200 + status:true + data.links.url`** 这一条成功判据，
         其余一律当失败（返 `""` 并打原因）。
 
@@ -661,7 +654,6 @@ def upload_to_lsky(image_path, retries=2, api_url=None, token=None,
     if not image_path or not os.path.exists(image_path):
         return ""
 
-    # ★★ 传前压图（2026-10-10）。★ 放在**取 token 之前**：压图是纯本地操作，
     #   不该为了一张注定传不上的图去换 token / 扣配额。
     shrunk = _shrink_for_lsky(image_path)
     if not shrunk:
@@ -680,7 +672,6 @@ def upload_to_lsky(image_path, retries=2, api_url=None, token=None,
     #   而 `token` 变量后面会被 `lsky_get_token()` 的返回值覆盖 ⇒ 分不清了。
     token_arg = token
     # ★★ token 的来源：**传进来的** > 缓存 > **换** > `.env` 静态值。
-    #   ★ 2026-09-27 改：原先直接读 `config.LSKY_TOKEN`，而那个值实测是个
     #     **Cookie 串**（见 `lsky_login` 的 docstring）⇒ 401 且一路沉默到发布那天。
     #     ⇒ 现在默认走 `lsky_get_token()`（它会**换**一个），
     #       而"人手抄的值"退到**兜底**位置 —— 保留它，但不指望它。
@@ -694,7 +685,7 @@ def upload_to_lsky(image_path, retries=2, api_url=None, token=None,
         print("    [Lsky 图床] 拿不到可用 token ⇒ **不上传**。"
               "★ 两条修法：① 往 NAS 的 `.env` 加 `LSKY_EMAIL`/`LSKY_PASSWORD`"
               "（推荐，程序自己换）；② 或把接口页的 token 填进 `LSKY_TOKEN`。"
-              "见 ERR-ENV-02。")
+              "见 。")
         return ""
 
     base = (api_url or config.LSKY_API_URL).rstrip("/")
@@ -734,13 +725,11 @@ def upload_to_lsky(image_path, retries=2, api_url=None, token=None,
                     return u
                 last_err = f"响应里没有 data.links.url: {res.text[:150]}"
             elif res.status_code == 401:
-                # ★★ 缓存 token 过期 ⇒ **当场重换一次**（2026-09-27 加）。
                 #   ★ 为什么值得单独一条路：缓存文件的存在就是为了省配额，
                 #     而它**必然**会过期。没有这条，"缓存过期"的表现是
                 #     "蟹黄堡永远发不出去、而日志里只有一句 401"
                 #     —— 每次都要人去 NAS 手工删文件才恢复。
                 #   ★ 只在**没有显式传 token** 时才换：显式传 = 调用方自己管，
-                #     我们替他换会让他传进来的值静默失效（`ERR-META-13` 形状）。
                 if (token_arg is None and attempt == 0 and allow_retoken
                         and lsky_load_token()):
                     new_tok, why = lsky_login(api_url=api_url)
@@ -759,7 +748,7 @@ def upload_to_lsky(image_path, retries=2, api_url=None, token=None,
                                 "★ 优先修法：往 NAS 的 `.env` 加 "
                                 "`LSKY_EMAIL`/`LSKY_PASSWORD`（程序自己换）；"
                                 "或去蟹黄堡「接口」页生成 token 填 `LSKY_TOKEN`"
-                                "（deploy.sh 不带 .env，见 ERR-ENV-02）")
+                                "（deploy.sh 不带 .env，见 ）")
             elif res.status_code == 403:
                 last_err = "HTTP 403 —— 蟹黄堡管理员关闭了接口功能"
             elif res.status_code == 429:
@@ -1039,7 +1028,7 @@ def _cue_file_targets(cue_text):
 def _cue_is_image(cue_text, cue_dir, folder_path):
     """一份 cue 是不是**真·整轨写法**。是返回 True。
 
-    ★★ 判据（2026-10-14 二修，`ERR-PUBLISH-20` 逐轨 cue 复发）：
+    ★★ 判据（2026-10-14 二修， 逐轨 cue 复发）：
 
       **整轨 ⟺ 恰好一条 `FILE` 指令，且它指向的文件真的存在。**
 
@@ -1067,7 +1056,7 @@ def _cue_is_image(cue_text, cue_dir, folder_path):
 
 
 def has_cue(folder_path):
-    """★ 强判据（2026-10-14，`ERR-PUBLISH-20`）：目录是不是**真·整轨**。
+    """★ 强判据（2026-10-14，）：目录是不是**真·整轨**。
 
     ★★ 为什么不能只看"有没有 `.cue` 文件"（旧判据，弱）：
       实测 21662 —— 目录里**有** `群星.-.[…](1992)[WAV].cue`，但它 `FILE` 指的
@@ -1097,7 +1086,7 @@ def has_cue(folder_path):
 def cue_track_type(folder_path):
     """`run.parse_title` 用的版本标签：强判据下 `"整轨"` / `"分轨"`。
 
-    ★ 单一出口 —— 全项目"整轨/分轨"只认这一个判据（`ERR-PUBLISH-20` 修复 ①/②）。
+    ★ 单一出口 —— 全项目"整轨/分轨"只认这一个判据。
       返回的字符串就是写进站点标题、写进 `torrent_name`/`torrent_file` 的那个词，
       不许任何地方另算一遍。
     """
@@ -1107,7 +1096,7 @@ def cue_track_type(folder_path):
 def selftest_cue_track_type():
     """`has_cue` / `cue_track_type` 的**判据自检**（纯本地，造目录实测）。
 
-    ★★ 为什么必须有（`ERR-META-01`：「检测方法失效比不检测更危险」）：
+    ★★ 为什么必须有：
       本判据已**修过两次**，两次都是"上一版看着对、实际对某类目录误判"：
         · 初版（弱）：有 `.cue` 就当整轨 ⇒ 被"cue 指向缺失镜像"骗（21662）。
         · B16 一修：`FILE` 目标存在才算整轨 ⇒ 被"**逐轨 cue**"骗（Kinks，合法分轨写法）。
@@ -1186,7 +1175,6 @@ def selftest_cue_track_type():
 
 # ==================== Lsky token 链路的自检 ====================
 #
-# ★★ 为什么给这一段写自检（`ERR-META-31` 的形状）：
 #   本次实测的根因是「`.env` 里的凭据**看起来配好了**，实际是个 Cookie 串」。
 #   那种错**没有任何判据会报** —— 键在、值非空、长度可观，只在**真发布那一刻**
 #   才以 401 现形。⇒ 光把代码改对不够，要留一条判据让"链路断了"以后也能看出来。
@@ -1233,7 +1221,6 @@ def selftest(online=False):
     #   实测踩到：把真正的 `f"Bearer {token}"` 改成不带前缀之后，判据**照样通过**，
     #   因为文档串里那句「`Authorization: Bearer <token>`」和重换 token 那条路
     #   里也有 `Bearer ` ⇒ 子串搜索命中了**别的地方**。
-    #   ★ 这是本条判据**第一版就是假的**的证据（阴性对照 RC=0）。
     #   ⇒ 拿 **AST 里的真实调用/字面量**来判，不看源码文本。
     # ★ 做法：找出 `upload_to_lsky` 里构造 `headers` 的那个 dict 字面量，
     #   直接看它的键值（这才是**真正发出去**的东西）。
@@ -1281,8 +1268,6 @@ def selftest(online=False):
                     order.append((node.lineno, fn))
         order.sort()
         seq = [f for _l, f in order]
-        # ★★★ 下面这两行我第一版写错了，而错法**正是本条判据要防的东西**
-        #   （`ERR-META-01`：判据算错了，却仍然"通过"）：
         #     `seq.index(...)` 返回的是**下标**，而我拿它去和**行号**比大小。
         #     下标 1 vs 行号 23/35 ⇒ `early` 恒为空 ⇒ 判据**永远通过**。
         #     阴性对照实测：注入根因形状后 RC 仍是 0。
@@ -1300,7 +1285,6 @@ def selftest(online=False):
               "每次上传都换一次，会白扣接口配额（文档里 429 就是配额）")
         # ★ 静态值必须**最后**：它出现的位置要在 lsky_login 的**后面**。
         #   ★★★ 判据**不能**只看"某个 `LSKY_TOKEN` 出现的行号 > lsky_login"
-        #     —— 我第一版就是这么写的，而它**测不出真东西**：
         #     把静态值提到 lsky_login **前面**并 `return`，源码里**另一处**
         #     （末尾那句兜底）行号仍然大于 lsky_login ⇒ 判据照样通过
         #     （阴性对照实测：注入根因形状后 RC=0）。**判据失效比没有判据更危险**。
@@ -1389,3 +1373,4 @@ if __name__ == "__main__":
     for d in _detail:
         print(f"  {d}")
     sys.exit(0 if _ok else 1)
+

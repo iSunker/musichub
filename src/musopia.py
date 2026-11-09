@@ -1,11 +1,7 @@
-"""
-Musopia (NexusPHP) 站点客户端。
+"""Musopia (NexusPHP) 站点客户端。
 
-核心设计：编辑走「读表单 -> 覆盖指定字段 -> 整表提交」，不再手写一份猜的字段列表。
-原因是 takeedit.php 是整表覆盖语义：你没提交的字段，站点当空值处理。之前的
-update_metadata.py 硬编码了一份字段表，medium/audiocodec/team/tags 全填 0 或干脆
-不提交，每编辑一次就把这些属性抹掉一次。先 GET edit.php 把当前值读出来当基线，
-只改要改的，这个问题就不存在了。
+提供种子上传、详情编辑、搜索与防重检查等接口。
+编辑操作采用基线回填机制（GET edit.php 读出当前表单值，仅覆盖目标字段后提交）。
 """
 import os
 import re
@@ -25,13 +21,8 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 # 这些是编辑器的排版按钮和文件上传控件，不属于要回填的表单数据
 SKIP_NAMES = {"b", "i", "u", "url", "IMG", "list", "quote", "tagcount", "nfo"}
 
-# ★★ `edit_torrent` **改不了**页面挂的 `.torrent` 文件（#33 / `ERR-PUBLISH-12`）。
-#   NexusPHP 的 `takeedit.php` 是**纯元数据表单**（`fetch_edit_form` 显式跳过
-#   `type=file`，见本文件 `SKIP` 那个 `continue`；提交也只发文本分片）。
-#   ⇒ 要换挂的种子**只能重发**（新页/新 tid）。把这条事实做成**常量 + 显式拒绝**，
-#     免得有人（或未来的我）以为往 overrides 里塞个 `file` 就能换种。
-#   ★ 这些键名一旦出现在 overrides 里就**拒绝整个编辑**（不是静默忽略）：
-#     静默忽略会让"改种子"看起来成功了，那正是最坏的一种"假成功"。
+# NexusPHP takeedit.php 仅支持修改文本元数据，不支持通过编辑接口替换 .torrent 文件。
+# 当 overrides 中包含文件类键名时主动抛出异常拒绝操作。
 EDIT_CANNOT_CHANGE_TORRENT = True
 EDIT_FILE_LIKE_KEYS = frozenset({
     "file", "torrent", "torrent_file", "infohash", "info_hash", "filehash",
@@ -131,7 +122,7 @@ class MusopiaClient:
             ② 我们对这个 AJAX 端点的**调用姿势**不对：缺/多了参数、或者
                它要求的 `Referer`/`X-Requested-With` 与站点校验不符，
                于是站点**回一个格式正常的空壳页面**（HTTP 200 + 0 字节或空列表）
-               —— 这和 `ERR-SITE-01` 那个「HTTP 200 + 空 body」是同一个形状。
+               —— 这和  那个「HTTP 200 + 空 body」是同一个形状。
           ★★ 定性这件事需要**一次真站点观测**，本机做不到（没有 Cookie、也不该拿
              生产凭据去打站点）：把端点原样回什么、`fetch_my_uploads()` 之外的
              另一个已知能用的列表页（`userdetails.php?id=N` 的 HTML 表格）
@@ -199,7 +190,7 @@ class MusopiaClient:
           **全是白工** —— 真因是**种子已被删除**（277/280 条如此）。
           而那个结论 `tools/reset_deleted_site_status.py` 里**早就写着**
           （2026-09-23 实测定性，用户已确认种子都被删了）。
-          ⇒ 这正是 `ERR-META-01`：**判据本身失效，而失效的输出长得像结论。**
+          ⇒ 这正是 ：**判据本身失效，而失效的输出长得像结论。**
 
         ═══════════════════════════════════════════════════════════════════════
         怎么分辨（判据是**详情页还在不在**）
@@ -221,11 +212,10 @@ class MusopiaClient:
         （若放在正常路径上预探，那才是白花配额。）
 
         ★ 探测本身失败（网络抖动等）⇒ **如实说"分辨不了"**，**不猜**是哪种。
-          猜错方向正是本函数存在的原因（`ERR-META-14`：缺失要如实表达，
+          猜错方向正是本函数存在的原因（：缺失要如实表达，
           不许替换成一个"看着正常"的默认值）。
         """
         # ★ 复用 `fetch_details()`（走 /details.php + _throttle 限速），
-        #   不另写一套请求 —— 两处实现必然漂（`ERR-META-03`）。
         try:
             d = self.fetch_details(torrent_id)
             title = (d.get("title") or "").strip()
@@ -317,7 +307,6 @@ class MusopiaClient:
         #   `fetch_edit_form()` 显式跳过 `type=file`（本文件 :264），本函数也只发
         #   文本分片、**不带任何文件部件**。⇒ 若有人把 `file`/`torrent` 之类键塞进
         #   `overrides`，它**不会**生效，却会静默"提交成功"、让人误以为改了种子
-        #   ⇒ 必须**显式拒绝**（`ERR-PUBLISH-12`：改不了的事别让它"看起来改了"）。
         #   ★ 要换挂的种子，唯一正确路径是**重发**（新页/新 tid）——见 #27/#34。
         #   ★★ 放在**取表单之前**：拒绝是本地判据，不该先敲一次站点才发现（快、且省配额）。
         _bad = [k for k in overrides
@@ -347,7 +336,6 @@ class MusopiaClient:
                 v = [str(x) for x in v]
             else:
                 v = "" if v is None else str(v)
-            # ★★ 2026-09-23 修：多值键（`xxx[]`）必须做**顺序无关**比较。
             #
             #   ★ 症状（实测）：`tags[4][]` 每次都被判成"有变化"，于是**每轮都
             #     真提交一次**、白花 2~3 个请求，而站点上的内容其实一字未改。
@@ -563,7 +551,7 @@ class MusopiaClient:
     def SEARCH_PARAMS(name):
         """列表页搜索的固定参数（**与 `tools/fetch_page.py` 的乌托邦口径一致**）。
 
-        ★ 把参数集中成一处（`ERR-META-03`）：两站复用同一套，改一处即改全部；
+        ★ 把参数集中成一处：两站复用同一套，改一处即改全部；
           也方便自检断言"参数没被写歪"。
         """
         return SEARCH_PARAMS(name)
@@ -573,7 +561,7 @@ def SEARCH_PARAMS(name):
     """（模块级，供两站客户端复用）列表页搜索的固定参数。
 
     ★ `tools/fetch_page.py` 的乌托邦搜索口径 —— 但**查重路已订正 `search_area`**（见下）。
-    ★ 集中一处（`ERR-META-03`）。
+    ★ 集中一处。
     ★★ `search_area`（#27 实测订正，2026-10-11）：**0 → 1**。
        站点 `search_area` 是"搜哪个字段"的选择器，实测各值召回面：
          · `0`（原值）：`Etre`→21、`Forever Now`→4，但**中文艺术家名 `徐元白`→0**（系统性漏中文）
@@ -582,7 +570,7 @@ def SEARCH_PARAMS(name):
          · `3`：全 0（另一种模式，不用）
        ⇒ `0` 会**系统性漏掉中文艺术家**的行 ⇒ 假阴性 ⇒ 漏判重复 ⇒ 又发重复种。
          **必须用 `1`**（召回最全、唯一能召回中文）。
-       ★★★ 但 area=1 **不是无代价的**（`ERR-PUBLISH-17`，「召回面变宽 ≠ 召回变好」）：
+       ★★★ 但 area=1 **不是无代价的**：
          宽召回让单条查询候选从 ~4–21 涨到 109–120 ⇒ 真目标会被 `max_candidates` **截断**
          ⇒ **反而漏召回**（20 行回归 13/20 → 11/20）。**判据精确**只挡住**假阳性**，
          **挡不住**这种"候选被噪声挤出预算"的**假阴性**。
@@ -596,7 +584,6 @@ def SEARCH_PARAMS(name):
 
 # ==================== 查重「召回」：分词 + 查询计划（#23）====================
 #
-# ★★ 为什么需要这一层（#23 / 实测，2026-10-11）：
 #   站点搜索是 **AND（逐 token）+ 对「显示标题」字段匹配**，且**标点会打断** ——
 #   实测：`"Chamber Works 2024"→命中` 但 `"Chamber Works (2024)"→0 候选`；
 #   整条带 `;`/`–`/`[FLAC]` 的本地标题 → **0 候选**。⇒ **只发一条串会漏召回**
@@ -605,7 +592,6 @@ def SEARCH_PARAMS(name):
 #     `info.name` 比对；顺序**精准优先**、**命中即停**（#31）。
 # ★ 召回**宽**只多花请求、**不会**制造假阳性：负判据（"是不是同一版本"）由
 #   `site_verify.compare_hosted_vs_db` 的**精确相等**结构性挡住 —— 与召回宽度无关。
-# ★★ 但"宽"会经**预算截断**制造**假阴性**（`ERR-PUBLISH-17`）⇒ 所以**顺序承重**：
 #   高精度短串必须排前（见 `SEARCH_QUERY_PLAN`）；只去重不排序 = 把 13/20→11/20 的亏重新引入。
 # ★ token 源 = **本地 `info.name`**（不是 `formatted_title`，也不是站点显示标题）：
 #   它是权威身份、与发布者无关，且**不含** `- FLAC 整轨 - OpenCD` 这种站点标题才有的尾巴。
@@ -618,9 +604,7 @@ _SEARCH_SPLIT_RE = re.compile(r"[^0-9A-Za-z" + _CJK_CLASS + r"]+")
 _CJK_ONE_RE = re.compile("[" + _CJK_CLASS + "]")
 
 
-# ==================== 查重「精准优先」的纯判据（#31，2026-10-11）====================
 #
-# ★★ 为什么需要这一层（`ERR-PUBLISH-17`：「召回面变宽 ≠ 召回变好」）：
 #   实测 `search_area=1` 是**唯一**能召回中文艺术家名的口径（`徐元白` area=0 → 0），
 #   但它让单条查询的候选从 ~4–21 涨到 109–120（噪声填满）⇒ 真目标被 `max_candidates`
 #   截断 ⇒ **反而更差**（20 行回归 13/20 → 11/20）。加预算治不了（噪声线性增长）。
@@ -631,7 +615,7 @@ def _is_numeric_tok(tok):
     """token 是不是"纯数字/带分隔的数字"（`2001`/`03`/`250813`/`2024.08`）。
 
     ★ 从原 `SEARCH_QUERY_PLAN` 内部的闭包 `_numeric` 提到模块级 —— 一处定义、多处共用
-      （`ERR-META-03`：口径不许在多处各写一份）。
+      。
     """
     return bool(tok) and all(ch.isdigit() or ch in ".-/" for ch in tok)
 
@@ -721,7 +705,7 @@ def SEARCH_QUERY_PLAN(local_name, *, search_name="", max_queries=5):
     """由本地 `info.name` 生成**精准优先**的有序搜索串列表（纯函数、零网络）。
 
     ═══════════════════════════════════════════════════════════════════════════
-    ★★★ 顺序是**承重**的（#31 / `ERR-PUBLISH-17`：「召回面变宽 ≠ 召回变好」）
+    ★★★ 顺序是**承重**的（#31 / ：「召回面变宽 ≠ 召回变好」）
     ═══════════════════════════════════════════════════════════════════════════
     实测：`search_area=1` 是**唯一**能召回中文艺术家名的口径，但它让单条查询候选从 ~4–21
     涨到 109–120（噪声填满）⇒ 真目标被 `max_candidates` **截断** ⇒ 20 行回归 **13/20 → 11/20**
@@ -761,7 +745,6 @@ def SEARCH_QUERY_PLAN(local_name, *, search_name="", max_queries=5):
 
     wins = []
     if t:
-        # ★★★ 顺序依据（2026-10-11 真站点实测；推翻"单 token 精度最高"的初版假设）：
         #   实测每条查询的候选数 —— **单 token（哪怕 CJK）是宽的、多 token 窗口才是窄的**：
         #     `Etre` 109(pos44) / `Etre 2001 03` **18**(pos8) · `齐秦` 28 / `齐秦 我拿什么爱你` **2**
         #     `群星` 109(pos67) / `群星 爱是我们共同的声音` **2**(pos0) · `Shaggy` 90 / `Shaggy Intoxication 2007` **2**
@@ -822,7 +805,7 @@ def SEARCH_QUERY_PLAN(local_name, *, search_name="", max_queries=5):
 
 def search_and_compare(client, name, *, local_name, base_path="/torrents.php",
                        max_candidates=None, max_queries=None, diag=None):
-    """**两站共用**的查重核心（`ERR-META-03`：一处生效、两站不漂）。
+    """**两站共用**的查重核心。
 
     `client` 需提供：`.get(path, params=…)`、`.download_torrent(tid)`、
     `.SEARCH_PARAMS(name)`（或直接用模块级 `SEARCH_PARAMS`）。
@@ -841,7 +824,7 @@ def search_and_compare(client, name, *, local_name, base_path="/torrents.php",
       绝不被宽扇出查询的噪声吃光（旧形状的 13/20→11/20 亏损即此）。
     :param max_queries: 子查询条数上限；`None` ⇒ 读 `config.DEDUP_MAX_SEARCH_QUERIES`
       （读不到时兜底 5）；`<=0` ⇒ 只发 `name` 一条（旧行为）。
-    :param diag: ★（`ERR-PUBLISH-25` / `S4`）可选的**诊断累加器**（`dict`）。传入则本函数
+    :param diag: ★可选的**诊断累加器**（`dict`）。传入则本函数
       往里记「为啥返回 None」的可解释证据：`queries`（发过的查询）/ `candidates`（见过的候选数）/
       `verified`（已花预算验证的候选数）/ `near_miss`（**不是**同版本、但**名字像**的候选 `[(tid,name)]`）。
       ★ 为什么必须记 `near_miss`：`21811` 那次站点**真的**有一条同 `info.name` 的页，
@@ -853,7 +836,6 @@ def search_and_compare(client, name, *, local_name, base_path="/torrents.php",
     """
     import site_verify
 
-    # ★（`S4` / `ERR-PUBLISH-25`）诊断累加器：**不传则零改动**。传了就一路记证据，
     #   让"返回 None"从一句无法反驳的话变成一份可核对的账。
     if diag is not None:
         diag.setdefault("queries", [])
@@ -867,7 +849,6 @@ def search_and_compare(client, name, *, local_name, base_path="/torrents.php",
         #   ★ 保留它，是要让 `publish._same_name_precheck` 的判据**显式**：
         #     它读 `same_name`，**不**去把 `near_miss` 当同名用 ——
         #     混用两者 = 把"极像"当"相同" ⇒ 会拒发站点本来会收的条目
-        #     （少发是静默的，`ERR-PUBLISH-25` 的教训）。
         diag.setdefault("same_name", [])
         diag["local_name"] = local_name
 
@@ -902,7 +883,6 @@ def search_and_compare(client, name, *, local_name, base_path="/torrents.php",
     #
     #   ★ 为什么不再是"先跑完所有查询取并集、再验证"：那会让**宽扇出查询在前**时，
     #     它的噪声候选先占满 `max_candidates` 预算 ⇒ 精准查询的真目标在**验证前**被截断
-    #     ⇒ 漏召回（实测 20 行 13/20 → 11/20，`ERR-PUBLISH-17`）。
     #   ★ 交错后：`plan` 已按精准优先排序（`SEARCH_QUERY_PLAN`），第一条查询若命中就**返回**,
     #     后续宽查询**根本不发** ⇒ 预算与请求都省在精准查询上。
     #   ★ 不变量（逐条保住，见各 raise/注释）：
@@ -953,7 +933,6 @@ def search_and_compare(client, name, *, local_name, base_path="/torrents.php",
             if verdict == site_verify.MATCH:
                 return tid                 # ★ 命中 ⇒ 即停（后续宽查询不再发）
             # MISMATCH/NO_DB_NAME ⇒ 不是这条 ⇒ 继续试下一个候选
-            # ★（`S4` / `ERR-PUBLISH-25`）两条**互斥**的旁证，都**只记不判**（见 diag 的 docstring）：
             #   ① `same_name`：规范化后**逐字相同**却没进 MATCH 分支 ——
             #      只有 `NO_DB_NAME`（读不出名字）能造成这种局面。这是真·同名冲突证据。
             #   ② `near_miss`：**极像但不等** —— 说明站点上有近亲条目，
@@ -1039,7 +1018,7 @@ def _dump_takeupload(html, torrent_path=None, kind="takeupload"):
 def _extract_error(body):
     """NexusPHP 出错时通常渲染一个 '错误' 页面，把提示抠出来方便排查。
 
-    ★★ 2026-10-04（`ERR-SITE-10`）：**加读 `<title>`**。
+    ★★ 2026-10-04：**加读 `<title>`**。
       实测乌托邦对某些种子回的是 **HTTP 200 + `<title>…上传失败！…</title>`** 的页面，
       **正文**（`#outer`）只有导航/账号栏/全站Free横幅、**零错误文本** ⇒ 老实现的
       四个选择器（`#outer table td.text` / `td.embedded` / `h2` / `h1`）**全部落空**，
@@ -1083,3 +1062,4 @@ def normalize_title(s):
     s = htmllib.unescape(str(s))
     s = re.sub(r"\s+", " ", s)
     return s.strip().lower()
+

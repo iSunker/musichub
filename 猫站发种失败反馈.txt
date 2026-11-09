@@ -1,0 +1,4 @@
+你好，请参考站内类似资源，修正以下问题：
+list 标题不符合 PTerClub 资源命名规范。(点击此处进入 PTerClub 资源命名规范)
+list 转载声明置顶。
+list Markdown改为bbcode

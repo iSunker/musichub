@@ -213,7 +213,7 @@ def select_candidates(limit, tried, retry_failed=False):
 
 class FetchResult:
     """★ 三态：成功(ok=True) / 失败(ok=False, why=…)。★ 空结果与失败**必须分开**
-    （`ERR-META-02`：把"零命中"当成"请求失败"会让人误判站点挂了）。"""
+    。"""
 
     def __init__(self, ok, idx=None, stats=None, why="", from_cache=False,
                  n_requests=0):
@@ -270,7 +270,6 @@ def fetch_index(client, term):
               "search_area": 0, "search_mode": 0}
     r = client.get("/torrentrss.php", **params)
     if r.status_code != 200:
-        # ★ 失败 ⇒ **不落盘**（否则"失败"会被缓存成"零命中"，`ERR-META-02`）
         return FetchResult(False, why=f"HTTP {r.status_code}", n_requests=1)
     try:
         idx, stats = opencd_parse.parse_rss_index(r.text)
@@ -472,7 +471,6 @@ def main():
     print(f"📊 本轮：请求 {n_req} · 命中 {n_hit} · 未中 {n_miss} · 失败 {n_fail}"
           + (" · 🛑配额截断" if quota_hit else ""))
     print(f"   今日已用 {gate.used_day}/{gate.max_per_day}（请求量纲）")
-    # ★★ 「配额截断」与「没活了」**分开报**（`ERR-META-05`：不许混着减）
     if quota_hit:
         print("   ★ 本轮因**配额**提前收工（不是没活了）⇒ 明天接着跑即可。")
     elif n_hit == 0 and n_miss > 0:

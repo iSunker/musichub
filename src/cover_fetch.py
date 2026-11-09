@@ -1,60 +1,15 @@
-"""
-皇后封面的**取回**层：本地优先 → 页面封面位 → 描述图 → 下载 → 落盘缓存。
+"""封面获取层：本地优先匹配、详情页提取、外站/站内下载与落盘缓存。
 
-═══════════════════════════════════════════════════════════════════════════
-它在整条流水线的哪一步
-═══════════════════════════════════════════════════════════════════════════
+获取优先级：
+  1. 本地种子内容目录（assets.find_cover，零网络请求）。
+  2. 详情页封面区（<div class="cover">，站内附件或外站图）。
+  3. 详情页描述区图片（排除频谱图后的候选，兜底）。
 
-    crawl.py            抓详情页 → 落盘 raw_html/<tid>.html
-        ↓
-    opencd_ingest.py    解析结果落库（tasks 行，含 `cover_candidates`）
-        ↓
-    ★ cover_fetch.py    取封面：本地找 → 页面找 → 下载 → **落盘**     ← 本模块
-        ↓
-    assets.upload_to_picgo()   上传到图床
-        ↓
-    db.set_cover()      写回 cover_url（★ **只有成功才写**）        ← 见下面「纪律」
-
-═══════════════════════════════════════════════════════════════════════════
-★ 用户定的优先级（2026-09-21）
-═══════════════════════════════════════════════════════════════════════════
-
-    「封面文件能在已下载好的种子文件里面找出来啊？我记得前面的代码就是这么写的，
-      如果本地有，优先用本地，本地没有再去皇后请求。」
-
-    ① **本地**（qB 的内容目录）：`assets.find_cover(content_path)`
-       ⇒ **0 次皇后请求**，★ 最优先。而且**通常真有** —— 皇后种子在 qB 里做种
-       （闸门①「做种满 3 天」就是证据），内容目录里就有 `folder.jpg`。
-    ② **页面封面位** `<div class="cover">`：站内附件 / 外站图
-    ③ **描述区** `divdescr`：已排除频谱图的图（兜底）
-
-═══════════════════════════════════════════════════════════════════════════
-三条纪律
-═══════════════════════════════════════════════════════════════════════════
-
-1. **绝不写空 `cover_url`**。`assets.py` 的 `upload_to_picgo` docstring 记着历史事故：
-   「绝不能把"上传失败"当成"没有封面"——历史上 `run.py` 重做任务时正是这样
-   把库里已有的 `cover_url` 覆盖成空，连锁导致站点页面封面被抹掉。」
-   而 `db.set_cover()` 是**无条件 UPDATE**（没有"仅当为空才写"的护栏）
-   ⇒ **这条纪律只能由调用方守住**：本模块**任一步失败都返回 `("", …)`**，
-   由调用方据"是否非空"决定要不要写库。
-
-2. **外站图不算皇后的请求配额**。实测封面**约一半是外站图**
-   （`y.gtimg.cn` / `p4.music.126.net` / `imgaes.dpdns.org`）。
-   那些**不走** `crawl.Client.get`（它一进去就 `RateGate.acquire()` 扣配额），
-   而是直接用 `requests` 取 —— 否则会**白耗皇后那 120 秒/请求的额度**。
-
-3. **不读时钟、不碰 DB、不 import `crawl`**。
-   站内下载要复用 `crawl.Client`（拿它的 `RateGate` 与站点基址），
-   但由**调用方传进来**，本模块不 import 它（避免循环导入，也让边界能用 grep 审计）。
-
-═══════════════════════════════════════════════════════════════════════════
-落盘缓存
-═══════════════════════════════════════════════════════════════════════════
-
-照抄 `crawl.RAW_DIR` 那套（`raw_html/`）：env 可覆盖、懒创建、**原子写**（`.tmp`+`os.replace`）。
-键用**远程地址的 sha1 前 12 位**（不只用 tid）—— 因为**同一张图会被多个种子引用**
-（实测 `folder.jpg` 那张图出现在多个页面里），按 tid 存会重复下载、白烧配额。
+接口规则：
+  - 外站图直接使用 requests 下载（支持可选代理），不占用站点请求配额；
+  - 站内图经由 RateGate 限速通道下载；
+  - 任意步骤失败均返回 ("", "", 原因)，由调用方决定是否写库；
+  - 下载文件按远程 URL 的 SHA1 哈希前缀落盘缓存，避免多种子重复下载。
 """
 import hashlib
 import json
@@ -171,9 +126,7 @@ def download(url, *, client=None, dest_dir=None, logger=None):
     external = is_external(u)
     try:
         if external:
-            # ★★ 2026-10-11（#15）：外站图走**可选代理**（`COVER_PROXY`）——
-            #   外站（pixhost 等）对本 NAS 出口 IP 间歇 reset；NAS 上有可用代理。
-            #   `proxies_for()` 没配代理时返回 `None` ⇒ **直连**（行为零变化）。
+            # 外站图按需走代理（未配置时默认直连）
             import net
             _proxies = net.proxies_for(u)
             if _proxies:
@@ -355,10 +308,7 @@ def _check():
     c = _FakeClient()
     chk("正常图片 ⇒ 落盘",
         bool(download("attachments/a/ok.jpg", client=c, dest_dir=cache)))
-    # ★ 这条**必须换内容**而不只是换 Content-Type —— 我们的实现刻意
-    #   只看**魔数**、不看 Content-Type（后缀与头部都会骗人）。
-    #   ★ 第一版我写成"只改 Content-Type、内容仍是 JPEG" ⇒ 实现**正确地**接收了
-    #     它 ⇒ 判据假失败。**判据写错了要改判据，不是改实现**。
+    # 校验：魔数不匹配时必须拒绝接纳
     html_url = "attachments/a/x.jpg"
     p_html = download(html_url, dest_dir=cache, logger=lambda m: None,
                       client=_FakeClient(payloads={html_url: b"<!DOCTYPE html><html>hi</html>"},
@@ -396,8 +346,7 @@ def _check():
     chk("★ 第二次**不增加** client 调用", len(c.calls) == n1, f"{n1} → {len(c.calls)}")
     chk("两次拿到同一个文件", first == second)
 
-    print("\n⑤b ★ #15 外站图走可选代理（COVER_PROXY）：默认直连、配了才走")
-    # ★ 用**假 requests** 替掉 `requests.get`，既不出网，又能断言"传了什么 proxies"。
+    print("\n⑤b 外站图代理支持（默认直连，配了才走）")
     import net as _net
     _saved_get = requests.get
     _seen = {}

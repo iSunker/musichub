@@ -47,7 +47,6 @@ def _qb_paths(tasks):
     if not need:
         return 0
     try:
-        # ★★ 唯一构造点 `qb_client.build`（`ERR-QB-08`）：优先 API Key，回退账号密码。
         import qb_client
         qb = qb_client.build(config)
         by_hash = {}

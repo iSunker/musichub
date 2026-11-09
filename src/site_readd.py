@@ -12,14 +12,14 @@ recheck 到 `progress=1`、reannounce，让站点重新收到我们的上报。
   （`cat=opencd`、只报 `tracker.open.cd`）⇒ 站点从没收到上报 ⇒ 页 0 做种。
   ⇒ 修法 = 把 **B** 加回；**不删 3040**、**不碰 A**。
 ★ ★★★ 身份铁律：**qB 的 `hash` 等于 B 的 infohash** 才算"这条 B 在做种"
-  （`ERR-PUBLISH-15`：绝不能拿 `category`/`name` 当身份 —— 那是专辑级/可重复的键）。
+  。
 
 ═══════════════════════════════════════════════════════════════════════════
 ★★ 与 `tools/readd_site_torrent.py` 的关系
 ═══════════════════════════════════════════════════════════════════════════
 `tools/readd_site_torrent.py`（`#38`）是**手工当班用**的 CLI：显式给 `--ids`、逐条打印。
 本模块把它**抽成库函数**，好让 daemon 线程（`#51`）能按 `site_seed_patrol` 的 `MISSING`
-清单**自动**驱动同一条逻辑 —— 两边**同一份实现**（`ERR-META-03`：别各写一份判据）。
+清单**自动**驱动同一条逻辑 —— 两边**同一份实现**。
 ★ 本模块**不做隔离决策**：它只"执行加回"；"该不该加回"由调用方按巡检结论声明
   （`MISSING` ⇒ 加回；`AMBIGUOUS` ⇒ 交给 `#50`；`NO_SITE_TORRENT` ⇒ 不碰）。
 
@@ -28,9 +28,9 @@ recheck 到 `progress=1`、reannounce，让站点重新收到我们的上报。
 ═══════════════════════════════════════════════════════════════════════════
 · **默认 dry-run**；`dry_run=False` 才真写。
 · **幂等**：B 已在 qB（按 hash）⇒ 直接返回"已存在"，不重复 add。
-· **数据目录用 A 的 `content_path` 的父目录**（`ERR-PUBLISH-13` 那个坑：多文件种
+· **数据目录用 A 的 `content_path` 的父目录**（ 那个坑：多文件种
   `save_path` 必须是 `info.name` 的**父**目录，`/downloads`，不是专辑目录本身）。
-· **回读 tracker `msg`**：`msg` 含 `same-location` ⇒ 判失败（`ERR-PUBLISH-14`：站点见
+· **回读 tracker `msg`**：`msg` 含 `same-location` ⇒ 判失败（：站点见
   到"我们自己的陈旧 peer 占着做种位"）；只有 `status∈{1,2}` 且无 same-location 才算成功。
 """
 import os
@@ -49,7 +49,7 @@ def _getattr(o, name, default=None):
 def resolve_save_path(qb_state_client, a_info_hash, *, fallback="/downloads"):
     """由**皇后原种 A** 在 qB 里的 `content_path` 求 B 的 `save_path`（= 其父目录）。
 
-    ★ `ERR-PUBLISH-13`：多文件种 qB 的 `save_path` 必须是 `info.name` 的**父**目录
+    ★ ：多文件种 qB 的 `save_path` 必须是 `info.name` 的**父**目录
       （`/downloads`）。拿 A 的 `content_path`（`/downloads/<专辑>`）当 save_path 会**错一层**
       ⇒ qB 去 `/downloads/<专辑>/<专辑>/…` 找 ⇒ `progress=0`（实测 `20517` 踩到）。
     ★ A 不在 qB / 查不到 ⇒ 退回 `fallback`（`/downloads`）—— 3020 的 `/downloads` 就是
@@ -101,7 +101,7 @@ def readd_b_torrent(qb_target, raw_b, b_info_hash, save_path, *,
     :param dry_run: True ⇒ 只返回"将做"，不写。
     :param tracker_reader: `callable(b_hash) -> [ (url, status, msg), ... ]` —— 回读 tracker。
       ★ 缺省用 `qb_target.torrents_trackers`。**为的是把 `same-location` 判出来**
-      （`ERR-PUBLISH-14`）。★ 自检可注入假件。
+      。★ 自检可注入假件。
     :param progress_reader: `callable(b_hash) -> (progress, state)` —— 回读进度/状态。
       缺省用 `qb_target.torrents_info`。自检可注入假件。
     :return: `(ok: bool, detail: str)`。**绝不抛**（调用方按 bool 决策）。
@@ -189,7 +189,7 @@ def readd_b_torrent(qb_target, raw_b, b_info_hash, save_path, *,
     detail = (f"progress={prog:.2f} state={state} trk={[(t[0].split('/')[2], t[1], t[2][:40]) for t in tracks]}"
               f"{tracks_err}")
     if same_loc:
-        return False, (f"★ 站点回 same-location（陈旧 peer 占做种位，`ERR-PUBLISH-14`）⇒ {detail}")
+        return False, (f"★ 站点回 same-location（陈旧 peer 占做种位，）⇒ {detail}")
     if prog < 1.0:
         return False, f"progress 仍 <1（校验没认到本地文件？）⇒ {detail}"
     if not ok_status:
@@ -331,7 +331,6 @@ def _selftest():
     chk("④ 真 add 了一次", len(qb4.added), 1)
     chk("④ save_path 传对", qb4.added[0]["save_path"], "/downloads")
 
-    # ── ⑤ ★ same-location ⇒ 失败（ERR-PUBLISH-14 判据）───────────
     qb5 = _FakeQBAdd(tracks=[("https://x/announce.php", 5,
                               "You cannot seed the same torrent in the same location from more than 1 client.")])
     ok, d = readd_b_torrent(qb5, b"\x00", "c" * 40, "/downloads", dry_run=False, sleep=no_sleep)

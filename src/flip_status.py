@@ -9,7 +9,7 @@
 （`elif not torrent_file:`，**2026-09-27 已拆成两支**）就命中
 ⇒ 落 `status='NO_TORRENT_FILE'`。
 
-★ 2026-09-27 已修的那个坑（`ERR-META-29`）：那一支原先写的是
+★ 2026-09-27 已修的那个坑：那一支原先写的是
   `elif not torrent_file or not os.path.exists(str(torrent_file))`，文案是
   `f"拿不到本地种子文件（{torrent_file!r}）"` —— 把「写入侧没传路径（`None`）」
   和「传了路径但盘上没有」**压成同一句话** ⇒ `reason` 印成
@@ -50,7 +50,7 @@
     真发仍归 `publish.py`，且 `ENABLE_PUBLISH=false` 时 daemon 不会发。
 
 ═══════════════════════════════════════════════════════════════════════════
-★★ 口径：**从 `publish.py` 源码里抠**，绝不手抄（ERR-META-03）
+★★ 口径：**从 `publish.py` 源码里抠**，绝不手抄
 ═══════════════════════════════════════════════════════════════════════════
 本脚本判定"能不能发"用的**每一道预检**都从 `publish.py` 抠出来，
 按**抠到的顺序**、用**抠到的条件**逐条算 —— 与 `readiness_probe.py` 同一套做法：
@@ -60,7 +60,7 @@
   · 无 log          ← 抠出 `has_log` 的赋值 + `log_content` / `logs_json` 两处
   · `site_status='EXISTS'` ← `publish.py` 的队列口径里排掉它
 
-★ **抠不到就报错退出**，绝不猜（`ERR-META-01`：失效的检测比没有检测危险）。
+★ **抠不到就报错退出**，绝不猜。
 ★ 判据**另有一条独立哨兵**：本脚本算出的"预检全过的集合"必须与
   `publish.py` **同一份源码**算出的结果一致 —— 见 `--selftest`。
 
@@ -73,7 +73,7 @@
 三条纪律
 ═══════════════════════════════════════════════════════════════════════════
 1. **默认只读**（`--dry-run` 是默认）；真写要 `--apply` **且**
-   `--i-have-stopped-the-container`（两个写者写同一个 SQLite 是 `ERR-DOCKER-03`）。
+   `--i-have-stopped-the-container`（两个写者写同一个 SQLite 是 ）。
 2. **只改一列**：`status`。别的列写前后**逐条比对**，不一致就报出来。
 3. **先出逐条清单**（默认就出）—— 改哪些、为什么、卡在哪，全打给人看。
 
@@ -117,7 +117,6 @@ MANUAL_BLOCK = {
 }
 
 # ★ 库里的列清单：**一个元组，SELECT 与 zip 共用**（列名只写一次）。
-#   `readiness_probe.py` 2026-09-23 踩过"漏一列 ⇒ 后面每列错位一格"
 #   ⇒ 报出"缺封面 4 条"那种**看着像真的**假数。这里从形状上杜绝。
 COLS = ("info_hash", "opencd_tid", "formatted_title", "torrent_name",
         "status", "site_status", "transfer_rule", "cover_url",
@@ -150,7 +149,7 @@ def extract_checks(tree):
           if not tf or not os.path.exists(tf):
       `has_log` 更是**先算一次、再在 except 里重算**的多步赋值。
       ⇒ 只抠条件、自己造 `tf`/`has_log` 就是**人肉翻译**，
-        而人肉翻译正是 `ERR-META-03` 要消灭的东西（会漂、且不报错）。
+        而人肉翻译正是  要消灭的东西（会漂、且不报错）。
       ★ 实测踩过：第一版只抠条件 ⇒ `NameError: name 'tf' is not defined`。
       本脚本因此改成**把源码原文搬过来跑** —— 中间变量、except、注释逻辑
       全都和 `publish.py` **同一份**，没有翻译这一步。
@@ -242,7 +241,6 @@ def extract_checks(tree):
     #   `has_log` 那个 try-except / 中间变量 `tf`）—— 把 `print` 与
     #   `valid/blocked` 那些副作用留在 publish.py 里。
     #   ★ 判据：**这段代码必须自己跑得起来**（不留任何未定义名字）。
-    #     实测踩过：第一版按"是不是 If"筛，把 `has_log = bool(...)` 那行**漏掉了**
     #     （它在 `try` 前，是个普通 Assign）⇒ 抽出 `if not has_log:` 而
     #     `has_log` 从未定义 ⇒ `NameError`。自检当场报出来。
     #   ⇒ 现在改成**白名单 + 自检兜底**：凡是给 `reasons`/`has_log`/`tf`/`lj`
@@ -383,7 +381,7 @@ def main():
         description="把只差一个 status 的行改回 SUCCESS（默认只读）")
     ap.add_argument("--apply", action="store_true", help="真正写库（★ 只改 status 一列）")
     ap.add_argument("--i-have-stopped-the-container", action="store_true",
-                    help="★ 按纪律：写库前必须显式声明容器已停（ERR-DOCKER-03）")
+                    help="★ 按纪律：写库前必须显式声明容器已停")
     ap.add_argument("--tids", default="",
                     help="只处理这几个 opencd_tid（逗号分隔）—— 「先试发两条」用这个")
     ap.add_argument("--limit", type=int, default=40, help="最多打印几条（默认 40）")
@@ -415,7 +413,7 @@ def main():
     print("=" * 74)
     print(f"  库          : {db_path}")
     print(f"  模式        : {'★ 写（--apply）' if args.apply else '只读预览'}")
-    print("\n[判据：★ 从 publish.py 源码**原文抽出来编译**的，不是手写的（ERR-META-03）]")
+    print("\n[判据：★ 从 publish.py 源码**原文抽出来编译**的，不是手写的]")
     for ln in _precheck_lines(extract_checks(tree)):
         print(f"   · {ln}")
 
@@ -426,14 +424,12 @@ def main():
     # ★★★ 判据自检：`torrent_file` / `content_path` 是**容器内路径**
     #   ⇒ `os.path.exists` **只在容器里**才判得准。
     #
-    #   ★ 起因（2026-09-23 深夜，实测踩过）：本机跑本脚本 ⇒ 库里有 258 条
     #     `torrent_file` 非空、而 `os.path.exists` 对它们**全部 False**
     #     （本机没有 `/data/output_torrents/`）⇒ 34 条"其实齐全"的行被误判成
     #     "种子文件缺失" ⇒ 打印出 `预检不过 214`。
     #     ★ 而在**容器里**跑同一条命令，正确数是 `34 / 180 / 224`。
     #     ⇒ 两个数**都"看着像真的"**，而我只差一步就把本机那个当结论用。
     #
-    #   ★★ 这就是 `ERR-META-01`：**失效的判据比没有判据更危险**。
     #     解法不是"记得在容器里跑"（那是人的纪律，会忘 —— 我已忘过一次），
     #     而是**让判据自己宣告失效**：
     #       非空 ⇒ 一条都不存在   ⇒ **报错退出**
@@ -463,7 +459,7 @@ def main():
                     f"   ★ 若你已经是在容器里跑，那说明路径挂载变了 —— "
                     f"先查 docker-compose.yml 的 volumes。\n"
                     f"   （本自检存在的理由：不拦的话会打印出一个**看着像真的**的"
-                    f"“预检不过 N 条”，而那 N 里有一半是错的 —— ERR-META-01。）")
+                    f"“预检不过 N 条”，而那 N 里有一半是错的 —— 。）")
             print(f"   ✅ 非空即存在（或部分存在）⇒ 判据在本环境**成立**")
 
     # ── 分类 ────────────────────────────────────────────────────────────
@@ -484,7 +480,7 @@ def main():
         else:
             to_flip.append(r)
 
-    print(f"\n[分类（★ 不同口径，**不许相减** —— ERR-META-05）]")
+    print(f"\n[分类（★ 不同口径，**不许相减** —— ）]")
     print(f"   ★ 要改回 SUCCESS 的（预检全过 + 不在站上 + status≠SUCCESS）: "
           f"{len(to_flip):>4}")
     print(f"   ├ 已经是 SUCCESS（不用动）                                  : "
@@ -514,9 +510,7 @@ def main():
 
     # ★★ 对账：`readiness_probe.py` 报的数为什么和这里不一样？
     #
-    #   ★ 起因（2026-09-23 深夜实测）：两个探针都自称"预检全过 + status≠SUCCESS"，
     #     而 `readiness_probe` 报 **22**、本脚本报 **0**。差 22 是不能放着不管的
-    #     —— 至少一个的口径没对齐（`ERR-META-03`：口径不一致会产出
     #     "看着像真的"的错数字，而它**不报错**）。
     #
     #   ★★ 本节的**唯一目的**：把差额**算出来**，而不是猜。
@@ -530,8 +524,6 @@ def main():
     #
     #   ★★★ 这一段**必须放在 `if not to_flip: return` 之前** ——
     #     它的用处**恰恰**是"要改的是 0"的时候（那才需要解释差额）。
-    #     实测踩过：第一版放在 return 之后 ⇒ `to_flip=0` 时**整段不打印**
-    #     ⇒ 检测在**最需要它的那一刻不运行**（`ERR-META-01` 的形状）。
     ready_off_site = [r for r, why in on_site if not why and r["status"] != "SUCCESS"]
     ready_on_site_already = [r for r, why in on_site
                              if not why and r["status"] == "SUCCESS"]
@@ -576,7 +568,6 @@ def main():
 
     # ★★ 闸门④ 的提醒：`transfer_rule` 非 ALLOW 的行**即使 status 改对了**
     #   也过不了 `db.PENDING_PUBLISH_WHERE` 的第四句 ⇒ 改 status 帮不到它。
-    #   ★ 这里**不自己实现闸门④**（那是 db.py 的职责，ERR-META-03）——
     #     只把现状**报出来**让人知道后果。
     n_rule = sum(1 for r in to_flip if (r["transfer_rule"] or "") != "ALLOW")
     print(f"\n[★ 闸门④ 提醒（这一条不属于发布预检，是队列口径的第四句）]")
@@ -661,7 +652,7 @@ def selftest(tree):
          `log_content` —— 即真的是那三道预检
       ③ **负向**：`site_status` / `publish_after` **都不在**这几条里
          （前者的口径已被闸门②b 取代、后者是作废的旧闸门②
-          —— 混进来就是拿一个漂移的口径去改行，`ERR-META-03`）
+          —— 混进来就是拿一个漂移的口径去改行，）
       ④ 抓一个"什么都有"的假行 ⇒ 三条预检**全过**；再各去掉一样 ⇒ 各**恰好**
          亮一条。★ 这一条是防"条件编译出来恒真/恒假"的。
     """

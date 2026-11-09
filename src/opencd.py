@@ -62,7 +62,6 @@ except Exception:                                       # noqa: BLE001
 
 
 # ==================================================================== ① parse
-# ★ 2026-10-06：源码已移进 `src/`，但 `opencdhtml/`（样本/证据**资产**，不是代码）
 #   仍在**仓库根**。所以不能再用 `dirname(__file__)` 直接当"资产根"。
 #   判据：`<此文件所在目录>/opencdhtml` 在 ⇒ 就是它（容器内 /app 平铺）；
 #         否则取上一级（本机 `src/opencd.py` → 仓库根）。
@@ -90,7 +89,6 @@ RULE_VALUES = {
     "欢迎转载": RULE_ALLOW,
     "禁止轉載": RULE_DENY,
     "禁止转载": RULE_DENY,
-    # ★ 2026-09-23 加：第三个「禁转」的说法。
     #   ★ 实测来源：tid=200002（Mary Black - Babes In The Wood）详情页
     #     `轉載規則` 字段原文 = 「未經允許不得轉載」—— 当时不在表里 ⇒ 落
     #     NEED_CONFIRM。语义明确是**禁止**（"未经允许不得转载"）。
@@ -241,7 +239,7 @@ def _descr_text_only(div):
       ⇒ 简介里只要**文字**；封面由我们自己的 `cover_url` 负责（`descr.build_descr`
         第一块就是 `[center][img]…[/img][/center]`）。
       ★ 在**解析层**剥，不在渲染层剥 —— 否则同一个判据两处实现，必然漂移
-        （`ERR-META-03`）。
+        。
 
     ★ 为什么不在这里做"去掉 `[img]`/`[b]` 等 BBCode"之类的清洗：
       `divdescr` 是**用户正文**，里面出现的方括号是**内容**，不是标记。
@@ -308,7 +306,6 @@ def parse_detail(html, *, source_file=None):
     # ---------- 简介 / 曲目 / 日志 ----------
     # ★ 这三样一律走 `_clean_long`（保真），**不走 `_norm`** —— 理由见 _clean_long 的注释。
     div = soup.find(id="divdescr")
-    # ★★ 2026-09-26 改：改走 `_descr_text_only()` —— 剥掉 `<img>`
     #    再取文本。原先的 `_clean_long(div.get_text("\n"))` 会把 15/58 个页面里
     #    的扫描缩略图**留在 HTML 里**（`get_text` 只是取不出标签，图本身还在
     #    `div` 里；真正的问题是把这段正文搬去站点时图会被一起带走）。
@@ -369,7 +366,7 @@ def _extract_tracklist(soup):
 
 
 # 频谱图/非封面的排除词（★ 小写后比，两侧都要覆盖）
-# ★★ 2026-09-21 实测依据：`divdescr` 里的图**不一定是封面**，实测见过
+    # 详情正文解析
 #    `频谱图.JPG`、`xxx-spectrogram.png`、`01. 孩兒.flac-full.png`、`01. 孩兒.flac-zoom.png`
 #    （谭咏麟那页的 `divdescr` 里全是频谱图）。不排除就会**把频谱图当封面传上图床**。
 _COVER_EXCLUDE = ("频谱", "頻譜", "spectrogram", ".flac-full", ".flac-zoom", "spectrum")
@@ -466,7 +463,6 @@ def _rank_covers(items):
 # 所以列表页是**唯一的入口**，也是控制频次的关键：一次请求就知道该抓哪些，
 # 避免盲猜 id 去撞（既费请求、又正撞上「注意频次」那条）。
 #
-# ★ 实测（2026-09-19，脱敏列表页样本）拿到的结构：
 #   · 每行是一个 `<table class="torrentname">`（**嵌套**在外层 <tr> 里的表格）
 #   · **每行里同时有** `details.php?id=N` 与 `plugin_details.php?id=N`，**同一个 id**
 #   · 列序：td[2]=标题 td[3][4]=促销相关 td[5]=相对时间 td[6]=大小
@@ -476,7 +472,6 @@ def _rank_covers(items):
 #       做種/下載/完成 `247/0/549` 与详情页「同伴 245 做種 1 下載」「完成 546」
 #       **同量级吻合**（同一时刻的浮动读数）。
 #
-# ★★ **真正的陷阱是「在哪扫」+「正则边界」，不是用哪个文件名** —— 这条我第一版归因错了，
 #    订正于此（两处都实测过）：
 #      ① 陷阱是**子串匹配**：`userdetails.php?id=85068` 这个 URL 里**字面上包含**
 #         `details.php?id=85068` ⇒ 无边界锚的正则**会**把它抓出来。实测
@@ -502,7 +497,6 @@ LIST_DETAIL_HREF = re.compile(r"plugin_details\.php\?id=(\d+)")
 #    ⇒ 第 4 步必须**按标签名映射**，不是搬数字。这是最容易出的静默错误。
 # ★ 用途：① 解析「標籤列表」时把名字对回值（若需要）；
 #        ② 第 4 步做「皇后名 → Musopia 值」映射时的**输入侧**参照。
-# ★★ 实测（2026-09-19）还发现**两条清洗规则**，映射时都必须做：
 #   ① **去掉括号后缀**：皇后是 `古典(Classical)`，Musopia 的键是 `古典`（无后缀）。
 #      实测 `descr.TAGS.get("古典(Classical)")` → None（查不到）⇒ 不去后缀必然丢标签。
 #   ② **异体字**：皇后写 `其它地区`，Musopia 写 `其他地区`（`descr.py:25`）
@@ -604,16 +598,13 @@ EXPECT = {
         "source": "原抓",
         "tags": ["大陆", "港台", "古典(Classical)"],
         "name": "郭凤女、何华栈 - 魂断乌江（粤曲对唱） 2000 - WAV 整軌 - alin13788",
-        # ★ 原样保留**双空格**（`YAMAHA  CRW-F1E`）—— 第一版我手抄期望值时
         #   顺手归一化掉了，导致"期望"本身是错的。字段短值确实会归一化，
         #   但这一处的双空格在**源页面里就是两个**，归一化后只留一个。
         "small_descr": "YAMAHA CRW-F1E | 低速原抓 | Log100% | 高清扫描完整图册 |WAV|",
         "log_nonempty": True,
         # ★ **行数判据**：这是抓「日志被压扁」的那一条。只判 nonempty 是抓不到的 ——
-        #   第一版把 69 行塌成 1 行，log_nonempty 照样 True（实测）。
         "log_lines": 69,
         "tracklist_nonempty": True,
-        # ★ 曲目行数同样是判据：第一版带出 HTML 缩进（`\t\t\t01.…`）与空行，
         #   还会把页面自带的「曲目列表：」标签带进来（渲染后标题重复）。
         "tracklist_lines": 2,
         "tracklist_has_label": False,
@@ -705,7 +696,6 @@ def _check_searchpages():
 
 # ==================== 皇后 RSS 反查（torrentrss.php） ====================
 #
-# ★★ 背景（2026-10-12 实测，见 `.scratch/B12-tid-reverse-lookup.md`）：
 #   皇后**搜索页**没有 hash 字段（40hex 搜返回无关空结果页）⇒「按 infohash 反查」在
 #   搜索页**不存在**。但 **RSS** 里每条 item 自带：
 #     `<guid>`   = **真 infohash**（40hex，`isPermaLink="false"`）
@@ -731,7 +721,7 @@ def _rss_added_utc(pubdate):
 
     ★ 语义**必须与 `sync_opencd_tid.added_at_utc` 一字不差**：闸门② 拿这个串与
       `datetime('now')`（UTC）做**字符串比较**，差 8 小时会在 7 天门槛上表现为
-      「偶尔差一天放行」（`ERR-SQL-03` 的教科书形状）。
+      「偶尔差一天放行」。
       本函数不 import `sync_opencd_tid`（它必须保持"零请求、不 import 网络层"的
       硬纪律，反向 import 会造成依赖倒置）⇒ 逻辑**照抄**，并在这里用判据钉死等价。
     ★ `pubDate` 是 RFC-822（`Mon, 12 Oct 2026 03:29:25 +0800`，带时区）——
@@ -769,7 +759,6 @@ def parse_rss_index(xml_text):
              "undated": 0, "dupe_hashes": 0, "dupe_tids": 0}
     root = ET.fromstring(xml_text or "")
     # ★ XML 坏了 ⇒ `ET.ParseError` 向上抛，**不静默当空**。调用方（fetch_index）
-    #   据此判"请求失败"而不是"零命中"——`ERR-META-02`：空成功与失败必须区分。
     for it in root.iter("item"):
         stats["items"] += 1
         guid = (it.findtext("guid") or "").strip()
@@ -893,7 +882,6 @@ def _check_rss_index():
 </channel></rss>"""
     idx, stats = parse_rss_index(xml)
     key = "41a8f10d0000000000000000000000000000f86b"   # ★ 大小写归一后的键
-    # ★★ UTC 口径硬对照：`2026-10-12 03:29:25 +0800` = `2026-10-11 19:29:25` UTC
     #    （跨日！—— 正是"差 8 小时"最容易露馅的点）
     utc_chrono = _rss_added_utc("Mon, 12 Oct 2026 03:29:25 +0800")
     fuzzy_cases = [
@@ -1082,7 +1070,6 @@ def _check_listpage():
     # ★ 陷阱的**机制**用构造串验（不依赖样本内容）——
     #   因为**脱敏样本里已经没有 85068 了**（脱敏器把它换成了 `<UID>`），
     #   所以「在全页无锚扫会不会中招」**无法在脱敏样本上复现**。
-    #   第一版我把这条写成 `"85068" in re.findall(...)` 期望 True ⇒ **跑出来是 False**，
     #   因为样本里根本没有那个 id。★ 教训：**判据必须能在被测样本上真的成立**，
     #   否则它是个假判据（这次是它自己把我拦下来的，算它立功）。
     mech_ok = bool(re.search(r"details\.php\?id=85068", "userdetails.php?id=85068")) \
@@ -1386,7 +1373,7 @@ class RateGate:
         self._now = time.monotonic            # ★ 单调钟：不受系统改时间影响
         self._origin = self._now()
         self._count_round = 0
-        self._day_key = day_key               # 当日标识（如 '2026-09-19'）
+        self._day_key = day_key
         self._log = log or (lambda m: None)
 
         # ★★ 外部账本（跨进程持久）。**鸭子类型**：只要有 get(key)->int 与
@@ -1446,7 +1433,7 @@ class RateGate:
         跨天检查：`day_key` 与当前不同就**按新日期从账本重载**当日计数。
 
         ★ 由调用方（crawl 阶段）在每轮开头传当天日期进来 ——
-          这里**不自己读时钟**，因为那会引入时区问题（`ERR-SQL-03` 的教训：
+          这里**不自己读时钟**，因为那会引入时区问题（ 的教训：
           库里的时间戳是 UTC、日志是 CST，混了就会得出"今晚没写入"的错误结论）。
           ★ 调用方传的 `day_key` 与账本 `day_key` 是**同一个口径**（都是本地日
             字符串，见 `db.LEDGER_COLUMNS` 的注释）—— 这两个必须同源，
@@ -1833,7 +1820,6 @@ def _strip_suffix(name):
 #     若哪天 Musopia 改了编号，只改 descr.py 一处即可，这张表不用动。
 #     （本项目「同一事实只在一处维护」的成文约定，见 A.11。）
 #
-# ★★ 2026-09-21 订正：原先这里写着「剩下 5 项故意不映射（Musopia 没有对应标签）」
 #    —— **那句话是错的**，是我在手上没有真实表单时的旧判断。
 #    真实证据：乌托邦 `takeupload.php` 的 `tags[4][]` **实测 44 项**（逐行读出，
 #    见 `descr.TAGS`）。皇后那 27 项**全都能在乌托邦找到对应**，
@@ -1863,7 +1849,6 @@ TAG_NAME_MAP = {
     "乡村": "乡村",
     "儿童": "儿童",
     "器乐": "器乐",              # ★ 皇后表里**没有**这个标签，但 Musopia 有 —— 留着备用
-    # ★★ 以下 11 项是 2026-09-21 拿到真实表单后补上的（原先全落 unmapped）。
     #    右边一律是**乌托邦真实标签里的名字**（`descr.TAGS` 有编号才算数）。
     "汽车": "汽车",              # 乌托邦 28 garage
     "民族": "民族",              # 26 National
@@ -1956,13 +1941,13 @@ def map_audiocodec(opencd_format):
 def track_type_from_format(opencd_format):
     """皇后的 `format`（如 `FLAC 分轨` / `WAV 整轨`）→ 版本标签 `"整轨"` / `"分轨"`。
 
-    ★ 2026-10-14（`ERR-PUBLISH-20` 修复②）：皇后路的**唯一**版本判据。
+    ★ 2026-10-14：皇后路的**唯一**版本判据。
       皇后的 `格式` 那一格**已经把版本写明了**（`整轨` = 单文件+CUE，`分轨`
       = 多文件），这是**事实**、不是要猜的东西 ⇒ 从这里读，别去种名里抠。
 
     ★ 认不出（空 / 既无「整轨」也无「分轨」）⇒ 返回 `""`（**未知**）——
       **不猜**。"不知道版本"必须能被表达成空，不能兜底成某一版本
-      （`ERR-META-14`：不确定不许长得像确定）。
+      。
     """
     blob = opencd_format or ""
     if "整轨" in blob:
@@ -2097,7 +2082,6 @@ def map_all(info):
         "small_descr": info.get("small_descr") or "",
         "tracklist": info.get("tracklist") or "",
         "log_content": info.get("log_content") or "",
-        # ★★ 皇后简介正文（2026-09-26 加）：`opencd_parse.py:233` 从
         #    `<div id="divdescr">` 读到的**原文**，经 `_clean_long` 保真（不动内部空白）。
         #
         #    ★ 为什么现在才加：这个值**一直**被抓下来，但 `map_all` 不返回它 ⇒
@@ -2105,7 +2089,6 @@ def map_all(info):
         #      `descr` 键出现 **0** 次；连 `unmapped` 都没有它）。
         #      ⇒ 站上的简介一直是 `descr.build_descr()` **现渲染**的
         #        （封面 + 曲目 + 日志），与皇后正文无关。
-        #      ★★ 这正是本项目栽过多次的形状：**抓到了、没往外传**（`ERR-DATA-01` 同族；
         #         `db.TASK_FIELDS` 里那段"数据在手边、就是没传进来"是同一个）。
         #
         #    ★ 图**已由解析层剥掉**（见 `opencd_parse._descr_text_only`）——
@@ -2113,7 +2096,6 @@ def map_all(info):
         #      / `Inside.jpg` 等**缩略图**（`.thumb.jpg`），且历史注释明确警告过
         #      里面会混 `频谱图.JPG` / `xxx-spectrogram.png`。渲染侧只要文字，
         #      图片由我们自己的 `cover_url` 负责 ⇒ 在**解析层**剥，而不是渲染层再剥
-        #      （`ERR-META-03`：同一判据两处实现必然漂移）。
         "descr": info.get("descr") or "",
         # ★ 艺术家 / 发行年份：**透传，不改写**。落位见 descr.build_form_fields
         #   （`custom_fields[4][1]` / `[4][2]`）。取不到就是 ""，调用方原样发空。
@@ -2139,7 +2121,6 @@ TAG_CASES = [
     ("其它地区 → 8（★「其它」↔「其他」用字不同）", "其它地区", "8", False),
     ("流行(Pop) → 10", "流行(Pop)", "10", False),
     ("器乐 → 34（皇后没这标签，但 Musopia 有）", "器乐", "34", False),
-    # ★★ 以下 11 项 2026-09-21 **订正**：原先断言它们落 unmapped，那是错的 ——
     #    拿到乌托邦真实表单后发现**乌托邦全都有这些标签**（见 TAG_NAME_MAP 上方注释）。
     ("★ 订正：贝斯(Drum Bass) → 14（乌托邦写 Drum&Bass，靠剥括号接上）",
      "贝斯(Drum Bass)", "14", False),
@@ -2188,7 +2169,6 @@ TEAM_CASES = [
     ("认不出的 → 0，**不挑一个近的**", "莫名其妙的组", "0"),
 ]
 
-# ★★ 版本标签（2026-10-14，`ERR-PUBLISH-20` 修复②）—— 皇后路的唯一版本判据。
 #   ★ 认不出（既无「整轨」也无「分轨」）⇒ **空串**（未知），**不猜**：
 #     这是本条判据与 `map_audiocodec`（取不到给 "0"）**刻意不同**的地方 ——
 #     "版本未知"必须能与"确定是分轨"区分开，不能兜底成某一版本。
@@ -2462,7 +2442,6 @@ def _check_gate():
 
     print("\n③b ★★ 非有限值（NaN / inf）也必须**不满足** —— 阴性对照")
     # ★ 这条防的是「`nan < 3` 是 False ⇒ 被误判成满足」：
-    #   2026-09-21 实测过 `decide(nan)` → READY_TO_FETCH（**放行**），
     #   违反本模块「宁可晚抓，不可早发」的纪律。删掉 `math.isfinite` 那行，
     #   下面两条必须当场 ❌。
     for bad, label in ((float("nan"), "NaN"), (float("inf"), "inf"),
@@ -2665,8 +2644,6 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
                           "皇后的 NFO/LOG 为空（页面 divnfo 里就是空的）")
     # ④ `.torrent` 拿不到 / 文件不在 ⇒ `publish.py` 必然拦，先落状态省得每轮重判
     #
-    #    ★★★ 2026-09-27：**这一支原来把两件不同的事写成同一句话**，而且那句话
-    #       是**错的**（`ERR-META-14`：错的"为什么"会把读的人引去查一个不存在的问题）。
     #
     #    实测现场（sid 15972 / 15974 / 17099 / 17264 / 17265 五条）：
     #      · `reason` = `拿不到本地种子文件（None）`   ← 括号里是 **None**
@@ -2701,7 +2678,6 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
         # ★ 文案纪律（**由判据⑫-B 钉住**）：这句话里**不许**出现"不存在 /
         #   拿不到"这类**断言文件没有**的字样 —— 本模块**无从知道**文件在不在
         #   （它不查 qB）。一出现那几个字，读的人就会去盘上找文件，
-        #   而那正是这次要修的误导（`ERR-META-14`）。
         status, reason = (STATUS_NO_TORRENT_FILE,
                           "调用方未传 torrent_file（None）⇒ 无从核对本地有无该文件，"
                           "故落此状态；这不代表文件缺失")
@@ -2709,7 +2685,6 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
         status, reason = (STATUS_NO_TORRENT_FILE,
                           f"传入的 .torrent 路径在盘上不存在（{torrent_file!r}）")
     else:
-        # ★★ 2026-09-23：**闸门① 已退役**（见 `opencd_gate.py` 模块头）。
         #
         #    原先这里调 `opencd_gate.decide(days, ...)`，而 `days` 来自
         #    `qb_seed_days` —— 而**所有调用方都传 `None`**（`crawl.run_manual`
@@ -2718,7 +2693,6 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
         #    `status='NOT_SEEDED'` ⇒ 卡在发布队列闸门①（`status='SUCCESS'`）
         #    ⇒ **皇后路一行都发不出去**。
         #
-        #    ★ 实测证据（2026-09-23）：生产库 `status` 分布里
         #      **`NOT_SEEDED` = 0 行** —— 因为闸门① 是**最后一道**，
         #      只有"infohash 对、非禁转、有 log、有 .torrent"的行才会走到它，
         #      而那样完美的行**当时一条都没有**。所以它既没拦住任何东西，
@@ -2726,7 +2700,6 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
         #
         #    ★ 现在直接落 `SUCCESS`：闸门②（发布日期 + 7 天）在
         #      `db.PENDING_PUBLISH_WHERE` 里，**在发布队列那一层**判 ——
-        #      那是它该待的地方（本模块不该重复实现，`ERR-META-03`）。
         status, reason = STATUS_OK, ""
 
     if reasons:
@@ -2743,7 +2716,6 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
         #    `custom_fields[4][3]`，而那一格是**必填**的抓轨日志 textarea。
         #    漏了它，本步就白做（而且很可能正是「HTTP 200 + 空 body」的成因）。
         "log_content": m["log_content"] or "",
-        # ★★ 皇后简介正文（2026-09-26 补）—— 同 `small_descr` 一路：`map_all` 透传，
         #    `descr.build_descr()` 把它作为正文块（`divdescr` 原文，解析层已剥图）。
         #    ★ 它同时也在 `mapped_json` 快照里（`save_task` 下面那一行写整个 `m`
         #      dict），但**必须显式写成列**：渲染读的是顶层键，而顶层键来自
@@ -2753,7 +2725,6 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
         "artist": m["artist"] or "",
         "year": m["year"] or "",          # ★ 原样（带「年」字），发送前不转
         "opencd_tid": str(raw_tid or ""),
-        # ★★ 皇后的**发布日期**（2026-09-23 补）—— 闸门② 的输入。
         #    ★ 由**调用方**显式传入（本函数是纯函数，不去 join 外部库）：
         #      现实里它来自 `sync_opencd_tid.py` 已填好的 `tasks.opencd_added_at`。
         #    ★ 传 `None` ⇒ 这一列不进 kwargs ⇒ `save_task` 的 upsert
@@ -2770,7 +2741,6 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
         "unmapped_json": json.dumps(m.get("unmapped") or [], ensure_ascii=False),
         # ★ `map_all()` 的**证据快照** —— 发布时读它，不重算（重算会随映射表漂移）
         "mapped_json": json.dumps(m, ensure_ascii=False, default=str),
-        # ★★ 皇后的**转载规则**（2026-09-23 补，三态 ALLOW/NEED_CONFIRM/DENY）。
         #    ★ 为什么必须单独落库：它是**"许不许发"**的判据，而 `mapped_json` 是
         #      **"发什么"**的字段快照 —— 两件事。实测 `id=200982` 的规则是
         #      「禁止轉載」，而它当时**已排进发布队列**（队列不知道有这回事）⇒
@@ -2778,7 +2748,6 @@ def build_row(info, *, raw_tid, info_hash, torrent_file=None,
         #    ★ 取 `info["transfer_rule"]`（`opencd_parse` 已归一成三态）；
         #      原始串在 `transfer_rule_raw`，需要时另可取。
         "transfer_rule": info.get("transfer_rule") or "",
-        # ★★ 版本标签（2026-10-14，`ERR-PUBLISH-20` 修复②）：皇后路的**唯一**
         #    版本判据 = 皇后 `格式` 里写明的词（`FLAC 分轨` / `WAV 整轨`…）。
         #    ★ 为什么落库：`run.py` 的抓轨路用 `assets.cue_track_type()` 判版本，
         #      两条路**必须写同一列**，否则同一行的版本又会各说各的（本 bug 的根）。
@@ -2852,7 +2821,7 @@ def _calls_in(fn, name):
       纯字符串匹配会把那些注释当成"还在调用"⇒ 判据**永远失败**，
       于是要么判据被删掉（丢失这条性质），要么改成 `"xyz.decide(" not in src`
       这种更脆的写法（照样会被注释绊倒）。
-    ★ 教训（`ERR-META-01` 一族）：**检测方法本身出错**比没有检测更危险 ——
+    ★ 教训：**检测方法本身出错**比没有检测更危险 ——
       它会让你以为"这条性质已经被看着了"，其实那个断言在对着注释发火。
     """
     import ast as _ast
@@ -2910,19 +2879,13 @@ def _check_ingest():
     NOW = datetime(2026, 9, 21, 12, 0, 0, tzinfo=timezone.utc)
 
     # ★★★ 闸门② 的夹具必须锚在 **`datetime('now')`**（= 闸门 SQL 用的那个时间源），
-    #      不能锚在写死的 `NOW` —— 见下面 `GATE2_NOW` 的长注释（`ERR-META-01`）。
     #
     # ★ 判据：**夹具与它要测的那句 SQL 必须在同一个时间源上。**
     #   闸门② 的 SQL 是 `opencd_added_at <= datetime('now', '-7 days')`
     #   ⇒ 那句话里的"现在"是**真实墙钟**（每次跑都不一样）。
-    #   而原先的夹具是 `NOW - timedelta(days=1)`，`NOW` 写死成 2026-09-21
-    #   ⇒ 落库值 2026-09-20 在**写下那天**确实"很新"，
-    #     但**今天**（2026-09-27）它已经比 `datetime('now','-7 days')` 还旧
     #     ⇒ 情形A（"1 天前 ⇒ 不在队列"）**必然误报**，且误报那天离写下的日子
     #       越远，越不可能被人联想到是这个原因。
     #
-    #   ★★ 实测（2026-09-27）：`datetime('now','-7 days')` = 2026-09-20 13:19，
-    #      而夹具落库 = 2026-09-20 12:00 ⇒ `12:00 <= 13:19` 成立 ⇒ 被放行
     #      ⇒ 自检报「❌ 发布日期 1 天前 ⇒ 不在队列」。
     #      这不是生产逻辑错，是**夹具过期**。
     #
@@ -2973,7 +2936,6 @@ def _check_ingest():
 
     # ══════════════════════════════════════════════════════════════════════
     # ③④ 原为「闸门①（做种 3 天）未满 ⇒ NOT_SEEDED」的两条判据。
-    #    ★★ 闸门① 已于 2026-09-23 **退役**（理由见 `opencd_gate.py` 模块头：
     #       生产库 `qb_seed_days` 555 行全 NULL ⇒ 它既没拦过东西、也永不放行；
     #       而"种子下完可用"这件事改由**更强的证据**承担 —— 它能从 vertex2 库
     #       按 infohash 配到皇后的页面，说明它是个完整可下的种子）。
@@ -2981,7 +2943,6 @@ def _check_ingest():
     #      传什么值都必须落 `SUCCESS`（"不知道做种时长"不再是一道闸）。
     #    ★ 为什么**不删掉**这两段：它们是"闸门①曾经存在过、且为什么不再存在"
     #      的**可执行记录**。删掉之后，将来有人看到 `qb_seed_days` 这一列，
-    #      不会再有任何地方告诉他"这一列已经没人读了"（`ERR-META-04`）。
     # ══════════════════════════════════════════════════════════════════════
     print("\n③ ★ 闸门①已退役：`qb_seed_days` **不再参与**判定，传什么都是 SUCCESS")
     for days, label in ((None, "None（拿不到）"), (0.0, "0 天"), (2.99, "2.99 天"),
@@ -3049,13 +3010,11 @@ def _check_ingest():
     inq3 = any(t["info_hash"] == ih2 for t in db.get_pending_publish())
     chk("★★ 发布日期为空 ⇒ **不在**队列（空 ⇒ 拦，**判据反转**）", not inq3)
 
-    # ★★★ 情形 D —— **阴性对照**（`ERR-META-18`）：证明上面那几条**真的在测闸门②**。
     #
     #   ★ 为什么必须有这一条（这是本节最有价值的一条）：
     #     情形A（"未满 ⇒ 不在队列"）**天然是个"默认就通过"的判据** ——
     #     只要某处把这条行拦下来（或行压根没进库、或被别的闸门挡住），
     #     它就会**通过**，而闸门② **完全可能是不存在的**。
-    #     ⇒ 上面"情形A 通过"这件事，**推不出**"闸门② 在工作"（`ERR-META-01`：
     #       判据看着对、测的却是别的东西）。
     #
     #   ★ 做法：把闸门② 那句 SQL **独立地**、**注入成永真**（`AND 1=1`）跑一遍
@@ -3102,7 +3061,6 @@ def _check_ingest():
     #     这样替换后原文自己的两个 `AND` 都留着，注入成 `AND 1=1 AND` 天然成立。
     #   ★ 一般化：**做 SQL 字符串替换前，先把要替换的那一段的**两个边界**逐字符
     #     打印出来**（`repr` 一下就能看见 `))AND` 这种粘连）—— 靠"看着像"改
-    #     会连错三次，而那三次本可以一次都不发生（`ERR-META-01` 的形状）。
     # ★★★ 最终正解（第 5 次才对，把边界一次说清）：
     #   原文粘连处是 `...'-7 days'))AND (opencd_tid ...` ——
     #   闸门② 的 `))` 之后**紧贴**下一个连接词 `AND`（**没有空格**）。
@@ -3191,7 +3149,6 @@ def _check_ingest():
     for st_name in NON_PUBLISH_STATUSES:
         # ★ `opencd_added_at` 设成"早就够了"，**故意只让 status 这一条来拦** ——
         #   否则闸门② 会一起把它们挡下，这条判据就分不清"是 status 拦的
-        #   还是日期拦的"（`ERR-META-05`：两个口径不许混）。
         conn.execute("UPDATE tasks SET status=?, opencd_added_at=? "
                      "WHERE info_hash=?",
                      (st_name, (GATE2_NOW - timedelta(days=GATE2_EDGE * 4)).strftime(TS_FMT), ALLOW_H))
@@ -3201,9 +3158,7 @@ def _check_ingest():
         chk(f"{st_name} 不在队列", n == 0)
     conn.close()
 
-    # ── ⑫-B ★★★ 2026-09-27 新判据：第 ④ 条必须**分辨两支** ──────────────
     #
-    #  为什么非要加这条判据（`ERR-META-28`：一条断言若说不出"什么输入会让它
     #  失败"，它就不是判据）：
     #    上面⑫ 只断言「NO_TORRENT_FILE 不在队列」—— 而**两支**产出的状态码
     #    相同 ⇒ **旧代码（混成一句）和新代码（分开两支）都能让⑫ 通过**。
@@ -3235,16 +3190,13 @@ def _check_ingest():
         f"{why_none!r}")
     chk("② 传了路径但盘上没有 ⇒ reason 说的是「盘上不存在」",
         "不存在" in why_miss, f"{why_miss!r}")
-    # ★★ ③ 这一条我第一版写错了，把过程记下来（因为它**正是**本项目反复栽的那个坑）：
     #
-    #   第一版写的是 `why_none != why_miss`（"两支的文案必须不相等"），
     #   并在**注入旧 bug 的阴性对照**里**通过了** —— 而旧 bug 恰恰就是
     #   "两支合并"！⇒ 它看着像在钉这件事，其实**没钉住**。
     #
     #   ★ 为什么：旧代码 `f"拿不到本地种子文件（{torrent_file!r}）"` 是**一条
     #     分支**，但 `{torrent_file!r}` 会把 `None` 和路径分别插进去
     #     ⇒ 两句话**字符串不相等**（`（None）` vs `（'/不存在/…'）`）
-    #     ⇒ `!=` 为真 ⇒ 断言通过。**这又是 `ERR-META-28`**：
     #     我说不出"什么输入会让 ③ 失败"，而实际上**旧 bug 就不会让它失败**。
     #
     #   ★ 真正的判据不能问"两句话一样吗"（那是**表象**），要问
@@ -3279,7 +3231,6 @@ def _check_ingest():
     print("\n⑬ ★★ 端到端（最有价值的一条）：队列的行 → 渲染 → 标签")
     import descr
     conn = db.connect()
-    # ★ 2026-09-23：队列条件里 `publish_after` 已被 `opencd_added_at` 取代
     #   ⇒ 这条前置**必须**把它也设成"8 天前"，否则选不出来
     #   （这正是 `db.PENDING_PUBLISH_WHERE` 那句"空 ⇒ 拦"的现场演示）。
     conn.execute("UPDATE tasks SET status='SUCCESS', "
@@ -3304,7 +3255,6 @@ def _check_ingest():
         chk("custom_fields[4][3] 非空（必填的抓轨日志）",
             bool((f.get("custom_fields[4][3]") or "").strip()))
 
-    # ── ⑭ ★★ 2026-10-04 新判据：种子量纲的账（kind='seed'）────────────────
     #   要钉住两条性质：
     #     ① **新入库一条** ⇒ 该 kind 当天账 +1；
     #     ② **重复 ingest 同一条**（UPSERT）⇒ **不**再 +1（否则重跑虚报产能）。
@@ -3414,3 +3364,4 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+

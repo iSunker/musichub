@@ -102,6 +102,8 @@ x-common: &common
     #     绝不删本目录本身（`handoff._safe_rmtree` 有护栏，护栏①即为此）。
     #   · ★ 回滚：删掉本行（则 enqueue/复制没有可见落点，交棒不成立）。
     - ${PUBLISH_DIR:-/volume2/docker_ssd/qbit-publish/Download}:/publish
+    # 挂载宿主机媒体根目录（只读），保证与 qbit-publish 拥有对等的文件系统可见性，支撑软链接校验与交棒清盘
+    - /volume1/video:/volume1/video:ro
     # ★★ vertex2（另一个项目）的库，只读挂进来 —— `sync_opencd_tid.py` 靠它按
     #   infohash 找出皇后的 `details.php?id=`。它是本项目**唯一的 id 来源**。
     #   ★ 挂的是**目录**不是文件：sync_opencd_tid.py 期望的路径是

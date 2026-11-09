@@ -52,7 +52,7 @@ def extract_info_name(torrent_bytes, *, torf_mod=None):
 
     ★★ 只认 `metainfo["info"]["name"]` —— **绝不**退回 `torf.Torrent.name`：
        单文件种子上 `t.name` 是**文件名**（`plan_mv_17304.py:80-88`），
-       拿它比会给"看起来对、其实错"的假结论（`ERR-META-01` 的形状）。
+       拿它比会给"看起来对、其实错"的假结论。
        解不出 ⇒ `(None, 原因)`，让上层判 `NO-DB-NAME`/`DOWNLOAD-FAILED`，
        **不许**在这里猜一个名字出来。
     """
@@ -107,12 +107,10 @@ def compare_hosted_vs_db(db_name, hosted_name):
     return MATCH if a == b else MISMATCH
 
 
-# ★★「名字相近」的判据（`S4` / `ERR-PUBLISH-25`）—— **只用于诊断，绝不用于判定重复**。
 #
 #   为什么存在：`21811` 那次站点**真的**挂着一条 `info.name` 与本方**逐字相同**的页，
 #   而 `search_and_compare` 返回了 `None`。调用方只看到"未发现同版本"一句话，
 #   无法分辨"站点上没有"与"站点上有、但我没搜到/没验到"。于是我只能去猜字段，
-#   连猜三轮全错（`ERR-PUBLISH-25`）。
 #   ⇒ 这里给"**近亲条目**"一个判据：它出现 ⇒ 这条大概率是**同名冲突**，
 #     而不是"站点上没有这条"。
 #
@@ -182,7 +180,7 @@ def extract_files(torrent_bytes, *, torf_mod=None):
     `files` = 归一化后（正斜杠、去首尾）的文件路径列表，**已排序**；单文件种
     则为一个元素的列表（`info.name`）。
 
-    ★ 2026-10-14（`ERR-PUBLISH-20` 修复③）：版本一致性闸门要的是**文件集**，
+    ★ 2026-10-14：版本一致性闸门要的是**文件集**，
       不是 `info.name`。实测 21662 —— 分轨/整轨两种版本**共用同一个目录名**
       （`info.name` 都是那个 basename）⇒ **只比 `info.name` 比不出挂错版本**。
       要比的是"里面到底装了哪些文件"（12 个分轨 flac vs 1 个整轨 wav）。
@@ -235,7 +233,7 @@ def files_of_dir(folder_path):
     """把一个**本地目录**折成与 `extract_files` **同口径**的文件集（相对路径，已排序）。
 
     ★ 与 `.torrent` 侧同规矩（`_norm_path` + 排序），否则两边永远比不平
-      （`ERR-META-03`：同一事实只维护一份口径）。
+      。
     ★ 目录不存在 / 读不出 ⇒ `[]`（调用方据此判"比不了 ⇒ 不拦"，不猜）。
     ★ **不含**目录项本身（`.torrent` 里也不会出现目录名那一层）。
     """
@@ -290,9 +288,9 @@ def edit_target_ok(local_name, hosted_name):
 
     ★★ 判据 = **站侧 `.torrent` 的 `info.name` 与本地 `.torrent` 的 `info.name`
       归一化后精确相等**（复用 `compare_hosted_vs_db`）—— 与查重判据同一把尺
-      （`ERR-META-03`：同一事实只维护一份口径）。
+      。
     ★★ **拿不到站侧名 / 本地名为空 ⇒ 拒改**（`NO_DB_NAME` ⇒ 拒）：
-      "不可知"**不是**"是我的"（同 `ERR-PUBLISH-14`：别拿推测当事实去执行不可逆动作）。
+      "不可知"**不是**"是我的"（同 ：别拿推测当事实去执行不可逆动作）。
     ★ 与 `#33`（edit 改不了挂的 `.torrent`）**是两件事**：那条管"改不了文件"，
       本条管"别改错页" —— 两条都要有。
     """
@@ -329,7 +327,7 @@ def page_exists(details_html):
 def classify(*, page_ok, torrent_bytes, db_name):
     """把"页面/下载/名字"三件事收成一个判定 + 一句人话。返回 `(verdict, hosted_name_or_None, note)`。
 
-    ★ 这里集中定义**判定顺序**，避免每个调用方各写一份 `if` 链（`ERR-META-03`）：
+    ★ 这里集中定义**判定顺序**，避免每个调用方各写一份 `if` 链：
         1) 页面不存在           → `MISSING_PAGE`（先判，因为壳页也能"下载"到东西/什么都没有）
         2) 没拿到种子字节        → `DOWNLOAD_FAILED`
         3) 从字节里取不出 info.name → `NO_DB_NAME`（附原因）

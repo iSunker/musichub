@@ -1,46 +1,8 @@
+"""发种数据流转与做种交棒模块。
+
+管理成品媒体数据从 HDD 存储目录至 SSD 发种区的复制、
+以及做种达标（出种数或做种时长满足阈值）后由发种器向常规做种器交棒并安全清理 SSD 副本的完整生命周期。
 """
-★★ 发种交棒（#92 新流程，2026-10-07）—— 复制成品 HDD→SSD / 判据 / 交棒 3040→3020 / 清 SSD。
-
-用户 2026-10-07 定稿的流程（逐字意图）：
-    ① 发种前：把成品从 HDD(`/volume1/video/music/<专辑>`，= 3020 的 `/downloads`)
-       **复制**到 **3040 看得见的 SSD 发种区**（`<PUBLISH_CONTAINER_DIR>/<专辑>`，
-       宿主 = `/volume2/docker_ssd/qbit-publish/Download/<专辑>`）。
-    ② 3040(publish，SSD) 用**站点 .torrent** 加种 + 校验 + 发种 + 做种。
-    ③ 满足「**出种≥N** 或 **做种≥D 天**」⇒ 把**种子任务**从 3040 交棒到 3020。
-    ④ 清盘：删 3040 任务 + 删 SSD 副本。
-    ★★ HDD 原数据**全程不动** —— 3020 的 `/downloads` 就是 `/volume1/video/music`，
-      所以交棒是**零拷贝的任务迁移**（export .torrent → add 3020 → recheck），不搬数据。
-
-★★★ 落点订正（2026-10-07 #133/#92-f1，**这是修 bug**）：
-    原先复制目标是 `/publish`（= **musopia 容器自己**的挂载点，宿主 `opencd2others/publish_data`），
-    但 **3040 的 `/downloads` 是另一个宿主目录** ⇒ 复制到 `/publish` 的东西 **3040 根本看不见**
-    （三条种补救时不得不手工 cp 就是此故）。现在 `PUBLISH_CONTAINER_DIR` 钩到
-    **3040 的 Download 目录**上；3040 加种时 `save_path` 给**父目录**（`/downloads`），
-    数据在 `/downloads/<专辑>/`（父目录语义实测，见 NAS-92 §2）。
-
-★★★ 隔离铁律（用户 2026-10-07：「**仅限本项目的音乐种子**才移动到 3040 交接做种，
-    这个 3020qb 我可能还要发其他种子的」）：
-    · 本流程**只能**作用于"本项目音乐种" —— 判据 = **3040 上的分类命中白名单**
-      `config.HANDOFF_OWN_CATEGORIES`（默认 `{Musopia, CrabPT}`）。
-    · 三道闸门：入队前 / 交棒前 / 清盘前各过一遍（`is_own_project`）。
-    · 3040 上**用户手加的、或分类不在白名单的**种 ⇒ **绝不**交棒、**绝不**清盘。
-    · 交棒到 3020 时用的 `category` **只能**取白名单之一（便于日后"只清本项目"），
-      绝不占用 3020 用户手发种用的分类。
-
-★★★ 本模块的设计纪律（照抄 `readd_queue.py`，别发明自己的方言）：
-    · **写/读分离但同一份实现**：本项目的人/脚本写队列、daemon 线程读队列，
-      两边 import 同一份函数 ⇒ 不会"两处各写一份判据"。
-    · **状态落盘**（`/data/handoff_queue.json`），不靠内存 —— 容器重启后还在。
-    · **原子写**：`.tmp` + `os.replace`。
-    · **幂等键 = infohash**：同一条种不会重复入队。
-
-★★★ 安全铁律（`rm` 的边界，违反 = 灾难）：
-    · 成品只能落在 `PUBLISH_CONTAINER_DIR`（= **3040 的下载根**）**下面**；本模块所有 `rm`
-      都**只删 `PUBLISH_CONTAINER_DIR/<专辑>` 这一个具体子目录**。
-    · **绝不** `rm -rf` 本目录本身（它现在**就是 3040 的 `/downloads`**，删它 = 清空 3040）。
-      见 `_safe_rmtree()` 的多重护栏。
-"""
-
 import base64
 import io
 import json
@@ -229,7 +191,7 @@ def copy_to_publish_area(src_path, album_name, dry_run=True):
     ★ `dry_run=True` ⇒ 只报"要复制什么到哪"，**不落盘**。
     ★★★ 判"已复制完成"用 **逐字节核对**（`verify_publish_area_complete`：文件数+总字节），
       **绝不**用"目录非空"—— 那条判据把 3040 的 qB **自己写进来的半截数据**当成了
-      "已复制好"⇒ 跳过复制 ⇒ 变下载（2026-10-07 `Beyond` 实测，`ERR-PUBLISH-06`）。
+      "已复制好"⇒ 跳过复制 ⇒ 变下载（2026-10-07 `Beyond` 实测，）。
     ★ 已完整 ⇒ 秒回（只 walk 列名+大小，不读文件内容），幂等不重复拷；
       不完整/缺失 ⇒ `copytree(dirs_exist_ok=True)` **补齐/覆盖**。
     ★★ 只用 `copytree`/`copyfile` **单向** 复制；**绝不**反过来动 `src_path`（HDD 原文件）。
@@ -255,6 +217,59 @@ def copy_to_publish_area(src_path, album_name, dry_run=True):
     return dst
 
 
+def ensure_hardlinks(src_dir, dst_dir, dry_run=False):
+    """将源目录/文件递归硬链接（os.link）到目标目录中，实现零磁盘冗余做种。
+
+    - 支持单文件或整目录递归处理；
+    - 目标父目录自动创建；
+    - 幂等性：目标文件已存在且与源文件同一 inode 时，直接跳过；
+    - 若目标文件已存在但为普通文件且 inode 不同，则安全替换；
+    - 返回 (成功布尔值, 详情信息)。
+    """
+    if not os.path.exists(src_dir):
+        return False, f"源路径不存在: {src_dir}"
+
+    if dry_run:
+        return True, f"[dry-run] 将硬链接 {src_dir} → {dst_dir}"
+
+    try:
+        if os.path.isfile(src_dir):
+            os.makedirs(os.path.dirname(dst_dir), exist_ok=True)
+            if os.path.exists(dst_dir):
+                if os.path.samefile(src_dir, dst_dir):
+                    return True, "单文件硬链接已存在且一致"
+                os.remove(dst_dir)
+            os.link(src_dir, dst_dir)
+            return True, f"已完成单文件硬链接: {dst_dir}"
+
+        if not os.path.isdir(src_dir):
+            return False, f"源路径不是有效文件或目录: {src_dir}"
+
+        os.makedirs(dst_dir, exist_ok=True)
+        linked_count = 0
+        skipped_count = 0
+
+        for root, _dirs, files in os.walk(src_dir):
+            rel_dir = os.path.relpath(root, src_dir)
+            cur_dst_dir = os.path.join(dst_dir, rel_dir) if rel_dir != "." else dst_dir
+            os.makedirs(cur_dst_dir, exist_ok=True)
+
+            for fn in files:
+                s_file = os.path.join(root, fn)
+                d_file = os.path.join(cur_dst_dir, fn)
+                if os.path.exists(d_file):
+                    if os.path.samefile(s_file, d_file):
+                        skipped_count += 1
+                        continue
+                    os.remove(d_file)
+                os.link(s_file, d_file)
+                linked_count += 1
+
+        return True, f"硬链接建立完成 (新增: {linked_count}, 跳过已有: {skipped_count})"
+    except Exception as e:
+        return False, f"建立硬链接异常: {type(e).__name__}: {e}"
+
+
 def _dir_total_bytes(path):
     """递归求目录（或单文件）的字节总数；出错/不存在 ⇒ 返回 -1（当作"算不出来"）。"""
     try:
@@ -274,9 +289,7 @@ def _dir_total_bytes(path):
         return -1
 
 
-# ==================== 逐片校验（`S6` / `ERR-PUBLISH-23`）====================
 #
-# ★★ 为什么"文件数 + 总字节数"不够（`ERR-PUBLISH-23`，`21811` 实测）：
 #   那条种在站点上 44 个文件、盘上 44 个文件、**逐文件字节数一个不差**、
 #   `du -sb` 两边同为 `954748123` —— 按"文件数+字节数"判据**完全就位**。
 #   但按 torrent 自己声明的顺序逐片校验：**ok=49 / bad=407**，qB 永远 `progress<1`。
@@ -307,11 +320,11 @@ def _file_piece_hashes(path, piece_length, *, _chunk=1 << 20):
 def verify_pieces(src_path, torrent_bytes, *, max_pieces=None):
     """按 `torrent_bytes` 自己声明的**文件顺序 + 片长**逐片比对 `src_path` 的字节。返回 `(ok, 说明)`。
 
-    ★★ 这是 `ERR-PUBLISH-23` 落地的那条强判据：**文件集合/字节数相同推不出分片相同**。
+    ★★ 这是  落地的那条强判据：**文件集合/字节数相同推不出分片相同**。
       ⇒ 判据 MUST 是「按 torrent 的顺序把字节串起来，逐片算 sha1，与 torrent 里的
         `pieces` 逐片比对」，全对才算"这个目录能做出这个种"。
 
-    ★★★ 路径拼接的两个坑（同一个坑踩了三次，`ERR-PUBLISH-23`）：
+    ★★★ 路径拼接的两个坑（同一个坑踩了三次，）：
       ① `torf` 的 `str(f)` **已含顶层目录名**；`metainfo['info']['files'][i]['path']`
          **不含**。本函数用 `info['files']` 的 `path` 列表 ⇒ 需要 `join(root, name, *path)`。
       ② 单文件种没有 `info['files']`，路径就是 `join(root, info['name'])`。
@@ -410,7 +423,6 @@ def verify_pieces(src_path, torrent_bytes, *, max_pieces=None):
 
 
 def verify_publish_area_complete(src_path, album_name, *, torrent_file=None):
-    # ★★ 2026-10-20 实测：`torrent_file` 这个口子**在任何真路径上都拿不到值** ——
     #   `begin_handoff_for_task` 判完一级就 `return`，从不把 torrent 传下来
     #   （见该函数「关键闸门」那段），所以二级逐片校验在生产里**从未跑过一次**。
     #   此处保留形参只为兼容 selftest / 未来的真接线点；**它不会自动生效**。
@@ -419,15 +431,15 @@ def verify_publish_area_complete(src_path, album_name, *, torrent_file=None):
     ★ 两级判据，**便宜的先走、贵的后走**（顺序不能反）：
       · **一级（必要条件）**：文件数相同 且 总字节相同 —— 挡"只拷了头几个文件"。
       · **二级（强判据，`S6` 新增）**：给了 `torrent_file` 就再**逐片比 hash**
-        —— 挡"字节数全对但内容/拼接顺序不同"（`ERR-PUBLISH-23`：`21811` 44 文件、
+        —— 挡"字节数全对但内容/拼接顺序不同"（：`21811` 44 文件、
         逐文件字节数一个不差、`du -sb` 完全一致，逐片却是 **ok=49 / bad=407**）。
       ★★ 为什么二级是**可选**（`torrent_file=None` 时只有一级）：本函数被 `begin_handoff_for_task`
         在**复制刚结束时**调用，那一刻 `.torrent` 未必已生成（`publish.py` 里制种与交棒顺序
-        不保证）⇒ 强制要求会把整条交棒链打挂（`ERR-ENV-02` 的味道：新判据不许改变旧调用方的行为）。
+        不保证）⇒ 强制要求会把整条交棒链打挂。
         ⇒ 调用方**有**种子时必须传；没传就在说明里留一句"只做了一级"，免得读日志的人
-        以为"已逐片验过"（`ERR-META-01`：判据覆盖面要写清楚）。
+        以为"已逐片验过"。
 
-    ★★ 为什么必须有这一步（2026-10-07 #134 实测踩到，**这就是那两个种的病根**）：
+    ★★ 为什么必须有这一步（2026-10-07
       原先 `begin_handoff_for_task` 复制完就 `return True`，**从不核对**复制结果；
       调用方（`publish.py`）又**丢弃**了它的返回值 ⇒ 复制**失败/半截**时照样把任务
       推进 3040 ⇒ qB 去 `<save_path>/<album>` 找不到文件 ⇒ **progress=0 变下载**
@@ -486,7 +498,7 @@ def begin_handoff_for_task(src_path, album_name, info_hash, task=None,
         ② **★ 核对复制确实完整**（`verify_publish_area_complete`，逐字节）；
         ③ 把这条种写进交棒队列，记下 3040 分类 / 3020 目标分类 / 目标 save_path。
 
-    ★★ 只在 `ENABLE_HANDOFF=true` 时做（**默认关** ⇒ 老行为一字不改，ERR-ENV-02）。
+    ★★ 只在 `ENABLE_HANDOFF=true` 时做（**默认关** ⇒ 老行为一字不改，）。
     ★★ 幂等：已在队列（同 infohash）⇒ 直接返回（不重复复制/入队）。
     ★ `task` 是 publish 侧的 task dict（可选，用于备注名）。
     ★★★ 返回 `(成功, 说明)`。**成功 = 数据确已就位**（复制完成 + 逐字节核对通过）。
@@ -508,7 +520,6 @@ def begin_handoff_for_task(src_path, album_name, info_hash, task=None,
         # ★ dry-run 不落盘 ⇒ 无可核对；如实说明，返回 True 以免演练里假拦（闸门才是有意义的演练对象）。
         return True, f"[dry-run] 将复制 {src_path} → {ssd_dir} 并入队（未核对）"
     # ★★ 关键闸门：数据没逐字节就位 ⇒ 不返回成功（调用方据此**拒绝回加**）。
-    # ★★★ 2026-10-20 诚实标注：这里**没给** `torrent_file` ⇒ `S6` 的二级逐片校验
     #   在本函数的真路径上**不跑**，闸门实际只是"逐字节"。
     #   为什么没顺手接上：`torrent_file` 只在**已发种成功**的分支里有；而被拒后落库的
     #   `torrent_file`（如 `…2011-2011 FLAC 分轨.torrent` 实际是 `…Multi File.torrent`）
@@ -533,8 +544,9 @@ def begin_handoff_for_task(src_path, album_name, info_hash, task=None,
 # ==================== 交棒判据（步③ 的触发）====================
 
 def judge(num_complete, added_on, now=None,
-          seeders_min=None, seed_days=None):
-    """判断一条种是否够格交棒。返回 `(是否交棒, 原因字符串)`。
+          seeders_min=None, seed_days=None, published_at=None,
+          return_remaining=False):
+    """判断一条种是否够格交棒。默认返回 `(是否交棒, 原因字符串)`；若 `return_remaining=True` 则返回 `(是否交棒, 原因字符串, 预计达标所需剩余秒数)`。
 
     ★★ "出种≥N"的口径（这里最容易被读错，逐字说明）：
       qB 的 `num_complete` = **swarm 里做种者总数**，它**把本机自己算进去**。
@@ -542,7 +554,14 @@ def judge(num_complete, added_on, now=None,
         `num_complete - 1 >= seeders_min`（**减掉自己**）。
       ★ 若直接拿 `num_complete >= 3` 去比，则"**只有自己在做种**"(num_complete=1)
         还不算数，那还好；但"自己 + 2 个"=3 会被当成"出种 3" —— **少数一个**。
-        这属于"判据提到了对的词、却问了个差一的问题"（ERR-META 一族）⇒ 明确减 1。
+        这属于"判据提到了对的词、却问了个差一的问题"⇒ 明确减 1。
+
+    ★★ 做种天数基准（2026-11-03 修复）：`published_at`（上站时间）与 `added_on`
+      （种进 3040 的时间）取**较早者**。原因：延迟回加/重新加种会把 `added_on`
+      刷新成"现在" ⇒ 若只认 `added_on`，"做种≥3 天"会被**无限重置**（实测 7 条
+      PENDING 里 3 条 added_on 仅 0.79~1.80 天即此故）。
+      ★ 用 **min** 而不是 max：目标是不让回加重置计时器；取 max 反而会选更晚的时间，
+        把重置保留下来。`published_at` 缺失 ⇒ 退回 `added_on`（与修复前一致）。
 
     ★ 阴性对照（本函数必须能"说不"）：
       · 只有自己做种（num_complete=1）、且做种 0 天 ⇒ **(False, …)**，不交棒。
@@ -555,16 +574,30 @@ def judge(num_complete, added_on, now=None,
 
     others_seeding = int(num_complete or 0) - 1        # ★ 减掉本机自己
     if others_seeding >= seeders_min:
-        return True, f"出种 {others_seeding}≥{seeders_min}（num_complete={num_complete} 含自己）"
+        msg = f"出种 {others_seeding}≥{seeders_min}（num_complete={num_complete} 含自己）"
+        return (True, msg, 0) if return_remaining else (True, msg)
 
     try:
-        age_days = (now - float(added_on)) / 86400.0
+        base = float(added_on)
     except (TypeError, ValueError):
-        age_days = 0.0
+        base = None
+    try:
+        pub = float(published_at) if published_at else None
+    except (TypeError, ValueError):
+        pub = None
+    if pub and pub > 0 and base and base > 0:
+        base = min(base, pub)              # ★ 取较早者 ⇒ 回加不会重置计时
+    elif pub and pub > 0 and not base:
+        base = pub
+    age_days = 0.0 if base is None else (now - base) / 86400.0
     if age_days >= seed_days:
-        return True, f"做种 {age_days:.2f}≥{seed_days} 天（added_on={added_on}）"
+        msg = (f"做种 {age_days:.2f}≥{seed_days} 天"
+               f"（基准={base:g}，added_on={added_on}，published_at={published_at}）")
+        return (True, msg, 0) if return_remaining else (True, msg)
 
-    return False, (f"未达：出种 {others_seeding}<{seeders_min} 且 做种 {age_days:.2f}<{seed_days} 天")
+    remaining_seconds = max(0.0, (float(seed_days) * 86400.0) - (0.0 if base is None else (now - base)))
+    msg = f"未达：出种 {others_seeding}<{seeders_min} 且 做种 {age_days:.2f}<{seed_days} 天"
+    return (False, msg, remaining_seconds) if return_remaining else (False, msg)
 
 
 def _torrent_field(t, name, default=None):
@@ -598,7 +631,7 @@ def pick_handoff_candidates(torrents, now=None, seeders_min=None, seed_days=None
 def _find_on_3040(qb_src, info_hash, name=None):
     """在 3040 上找一条种，返回 `(torrent|None, how)`。
 
-    ★★★ #45（2026-10-08 实测钉死）：**3040 上挂的是"站点那份 .torrent"(B)，其 infohash
+    ★★★
       与 DB 的 `tasks.info_hash`（皇后原种 A）**不同**！原因：站点会重写 announce/passkey
       ⇒ 同一专辑在 3040 的 hash ≠ 队列里记的 hash。
       实测：队列 3 条全 `PENDING` / `3040 上还没有这条种`，而 3040 **明明有**这些专辑
@@ -626,15 +659,29 @@ def _find_on_3040(qb_src, info_hash, name=None):
     return None, ""
 
 
+def _published_at(info_hash):
+    """该条种在本项目的**首发上站时间**（epoch 秒）。读不到 ⇒ None（不猜）。
+
+    ★ 只用于交棒判据的计时基准（见 `judge`）；`db` 惰性 import 防止循环依赖，
+      且任何异常都收敛成 None ⇒ 退回 `added_on`（与修复前行为一致）。
+    """
+    try:
+        import db
+        return db.site_publish_first_at(info_hash)
+    except Exception:                                             # noqa: BLE001
+        return None
+
+
 def eligible_on_3040(qb_src, info_hash, name=None, now=None,
-                     seeders_min=None, seed_days=None):
-    """★★ #136：判"3040 上这条是否**够格交棒**"。返回 `(present, eligible, why)`。
+                     seeders_min=None, seed_days=None, published_at=None,
+                     return_remaining=False):
+    """★★ #136：判"3040 上这条是否**够格交棒**"。默认返回 `(present, eligible, why)`；若 `return_remaining=True` 则返回 `(present, eligible, why, rem_sec)`。
 
     ★★ 为什么（用户 2026-10-07 拍板）：交棒语义 = **够格才交棒**（出种≥N 或 做种≥D 天），
       **不是**发布后就立即推给 3020。原代码 `process_one` 对 PENDING 条目**立即交棒**，
       而 `judge`/`pick_handoff_candidates` 只在 selftest 里被调 ⇒ "出种≥3 才交棒"从未生效
       （实测：`☆ac8.13f` 20 个别人做种却一直没交棒、整个容器 `已交棒到 3020` 计数=0）。
-    ★ 三态（显式区分，同 `ERR-META-14`：不许把"还没轮到"与"够格"混一个词）：
+    ★ 三态（显式区分，同 ：不许把"还没轮到"与"够格"混一个词）：
       · `present=False` ⇒ 3040 上**还没这条种**（延迟回加还没到点/失败了）⇒ **等**，不交棒。
       · `present=True, eligible=False` ⇒ 在做种但**还不**够格 ⇒ **等**，不交棒。
       · `present=True, eligible=True` ⇒ 够格 ⇒ 交棒。
@@ -644,24 +691,38 @@ def eligible_on_3040(qb_src, info_hash, name=None, now=None,
     """
     now = _now() if now is None else now
     if qb_src is None:
-        return False, False, "无 3040 连接"
+        return (False, False, "无 3040 连接", 0) if return_remaining else (False, False, "无 3040 连接")
     try:
         t, how = _find_on_3040(qb_src, info_hash, name=name)
     except Exception as e:                                        # noqa: BLE001
-        return False, False, str(e)
+        return (False, False, str(e), 0) if return_remaining else (False, False, str(e))
     if t is None:
-        return False, False, "3040 上还没有这条种（延迟回加未到/失败）⇒ 等"
+        msg = "3040 上还没有这条种（延迟回加未到/失败）⇒ 等"
+        return (False, False, msg, 3600) if return_remaining else (False, False, msg)
     # ★ 先要 progress≥1（做完种）才有资格谈"出种/做种天数"。
     progress = float(_torrent_field(t, "progress", 0) or 0)
     if progress < 1.0:
-        return True, False, f"3040 上还没做完种（progress={progress:.2f}）⇒ 等"
+        msg = f"3040 上还没做完种（progress={progress:.2f}）⇒ 等"
+        return (True, False, msg, 300) if return_remaining else (True, False, msg)
     nc = _torrent_field(t, "num_complete", 0)
     added = _torrent_field(t, "added_on", 0)
-    ok, why = judge(nc, added, now=now, seeders_min=seeders_min, seed_days=seed_days)
+    # ★ 计时基准：优先用调用方给的"上站/入队时间"（队列条目自带 `enqueued_at`，
+    #   不受回加重置）；没有再查 `site_publish`。两者都没有 ⇒ 退回 added_on。
+    #   ★ 为什么不只查 `site_publish`：队列里的 info_hash 是 **A（原种）**，
+    #     `site_publish.info_hash` 是 **B（站点种）** —— 不同 hash 空间（实测零交集），
+    #     直接按 hash 查会恒为 None。`enqueued_at` 是发布时写下的、稳定的同一事实。
+    pub = published_at or _published_at(info_hash)
+    res = judge(nc, added, now=now, seeders_min=seeders_min, seed_days=seed_days,
+                published_at=pub, return_remaining=return_remaining)
+    if return_remaining:
+        ok, why, rem_sec = res
+    else:
+        ok, why = res
+        rem_sec = 0
     if how == "name":
         # 提示身份不一致（值得记一笔）：hash 没找到、按名字才找到。
         why = f"[按名字命中 3040] {why}"
-    return True, ok, why
+    return (True, ok, why, rem_sec) if return_remaining else (True, ok, why)
 
 
 # ==================== 交棒 3040→3020（步③，零拷贝）====================
@@ -675,27 +736,20 @@ def export_torrent_bytes(qb, info_hash):
 
 
 def handoff_to_3020(qb_src, qb_dst, info_hash, target_save_path, dry_run=True,
-                   target_category=None, own_categories=None, name=None):
-    """把种的**任务**从 3040 交棒到 3020：export → add(3020, save_path) → recheck。
+                   target_category=None, own_categories=None, name=None,
+                   src_path=None, album=None, dst_host=None):
+    """把种的任务从 3010 交棒到常规做种实例（如 3220/3240）。
 
-    ★★ **零拷贝**：不搬数据 —— 3020 的 `/downloads` 就是 `/volume1/video/music`，
-      所以只要给对 `save_path`（HDD 原文件所在），3020 自己校验即可。
-    ★★★ **隔离闸门（第一道）**：交棒前先查 3040 上该种的 `category`，
-      不命中白名单（`is_own_project`）⇒ **拒绝交棒**，返回 `(False, 原因)`。
-      ★ 为什么在这里也查一遍：队列可能被外部篡改/残留旧项 ⇒ 不只信入队时的判据。
-    ★ `target_category` = 交棒到 3020 后打哪个分类。★ **只能取白名单之一**；
-      缺省 = `config.PUBLISH_CATEGORY`。传给非白名单值 ⇒ 拒（防污染 3020 分类体系）。
-    ★ `dry_run=True` ⇒ 只打印计划，不 add、不 recheck。
-    ★★★ #45：`name` 用于"按站点 .torrent 的 name 兜底命中"（3040 挂 B/站点种，其 hash
-      与 `info_hash`(A/皇后原种) **不同**）。**export 与 recheck 必须用 3040 上的真实 hash**
-      （`real_hash`），否则 export 用 A ⇒ 导出的是皇后原种（报 open.cd）⇒ 交棒给它 = 交错了种。
-    ★ 返回 `(成功, 原因)`。**不删任何东西**（删是下一步 `finalize_source`）。
+    零开销硬链接机制：
+      在向目标 qB 添加任务前，确保源文件（/volume1/.../music3/专辑）
+      已通过 ensure_hardlinks 递归硬链接到目标物理目录（/volume1/.../music1或2/专辑）。
+      目标 qB 挂载的 /downloads 即可直接对齐做种，零重新校验，零磁盘空间浪费。
     """
     # ---- 隔离闸门：先确认"这是本项目种的分类"（查 3040 实况）----
     cat, gate_err = _source_category(qb_src, info_hash, dry_run=dry_run, name=name)
     if gate_err:
         return False, gate_err
-    # ★ #45：拿 3040 上的**真实 hash**（可能是 B，与 info_hash=A 不同）。
+    # ★ #45：拿 3040 上的真实 hash（可能是 B，与 info_hash=A 不同）。
     real_hash = info_hash
     try:
         _t, _how = _find_on_3040(qb_src, info_hash, name=name)
@@ -710,8 +764,34 @@ def handoff_to_3020(qb_src, qb_dst, info_hash, target_save_path, dry_run=True,
     tcat = target_category if target_category else (cat or config.PUBLISH_CATEGORY)
     if not is_own_project(tcat, own_categories):
         return False, f"拒交棒：目标分类 {tcat!r} 不在本项目白名单"
+
+    # ---- 零开销硬链接建立（HDD music3 -> 目标 HDD music1/music2）----
+    if dst_host:
+        target_root_dir = config.HANDOFF_DIR_MAP.get(dst_host)
+        if target_root_dir and album:
+            dest_album_dir = os.path.join(target_root_dir, album)
+            # 源物理路径优先取 src_path，若为容器内 /downloads 则映射为宿主物理路径
+            real_src_path = src_path
+            if real_src_path and real_src_path.startswith("/downloads"):
+                music3_root = config.HANDOFF_DIR_MAP.get(
+                    config.QB_HOST_OPENCD, "/volume1/video/download/music/music3"
+                )
+                rel = os.path.relpath(real_src_path, "/downloads")
+                real_src_path = os.path.join(music3_root, rel) if rel != "." else music3_root
+
+            if real_src_path and os.path.exists(real_src_path):
+                hl_ok, hl_msg = ensure_hardlinks(real_src_path, dest_album_dir, dry_run=dry_run)
+                if not hl_ok:
+                    return False, f"交棒前硬链接失败: {hl_msg}"
+                if dry_run:
+                    print(f"🅿️  [handoff][dry-run] 硬链接: {hl_msg}")
+                else:
+                    print(f"🔗 [handoff] 跨库硬链接建立成功: {dest_album_dir}")
+            else:
+                print(f"⚠️  [handoff] 未找到源音乐目录，跳过硬链接预热: {real_src_path}")
+
     if dry_run:
-        print(f"🅿️  [handoff][dry-run] 将交棒 {real_hash[:12]}… → 3020 "
+        print(f"🅿️  [handoff][dry-run] 将交棒 {real_hash[:12]}… → 目标实例 "
               f"save_path={target_save_path} category={tcat}（3040分类={cat}）")
         return True, "dry-run"
     try:
@@ -733,10 +813,10 @@ def handoff_to_3020(qb_src, qb_dst, info_hash, target_save_path, dry_run=True,
         name_e = type(e).__name__
         # 409 = 3020 上已有这条种（多半是别的容器辅种抢先加了）⇒ 视为"已在做种"。
         if name_e == "Conflict409Error":
-            print(f"ℹ️  [handoff] 3020 已有该种（409）= 视为已交棒: {real_hash[:12]}…")
+            print(f"ℹ️  [handoff] 目标做种实例已有该种（409）= 视为已交棒: {real_hash[:12]}…")
             return True, "409 已存在"
-        return False, f"add 3020 失败: {name_e}: {e}"
-    print(f"✅ [handoff] 已交棒到 3020（待 3020 校验）: {real_hash[:12]}… category={tcat}")
+        return False, f"add 目标实例失败: {name_e}: {e}"
+    print(f"✅ [handoff] 已交棒到目标做种实例（待校验）: {real_hash[:12]}… category={tcat}")
     return True, "added+recheck"
 
 
@@ -801,30 +881,34 @@ def verify_3020_seeding(qb_dst, info_hash, name=None):
 # ==================== 清 SSD 副本（步④，严格时序）====================
 
 def _safe_rmtree(path):
-    """★ 只在 `PUBLISH_CONTAINER_DIR` **之下**删一个具体子目录。
+    """★ 只在 `PUBLISH_CONTAINER_DIR` **之下**清理一个具体子目录或软链接。
 
     多重护栏（任何一条不满足 ⇒ 拒删并返回 False）：
-      ① path 必须**严格位于** `PUBLISH_CONTAINER_DIR` 之下（不是它本身）；
+      ① path 必须位于 `PUBLISH_CONTAINER_DIR` 之下（不是它本身）；
       ② 规范化后不得等于 publish 根；
-      ③ 必须是目录且不是符号链接（防 `rm` 顺着软链删到别处）。
-    ★★ 绝不 `rm -rf` 本目录本身 —— 它现在**就是 3040 的 `/downloads`**（#133 订正后），
-      删它 = **清空 3040**。护栏① 就是为此。
+      ③ 若为软链接，直接 unlink 软链接本身，绝不跟随软链接递归删除；
+      ④ 若为真实目录，递归删除 SSD 副本。
     """
-    root = os.path.realpath(config.PUBLISH_CONTAINER_DIR)
-    real = os.path.realpath(path)
-    if real == root:
-        print(f"❌ [handoff] 拒删：目标是发种区根目录本身 ({real}) —— "
-              f"★ 这就是 3040 的 /downloads，删它=清空 3040")
+    root = os.path.abspath(config.PUBLISH_CONTAINER_DIR)
+    target = os.path.abspath(path)
+    if target == root:
+        print(f"❌ [handoff] 拒删：目标是发种区根目录本身 ({target})")
         return False
-    if not real.startswith(root + os.sep):
-        print(f"❌ [handoff] 拒删：目标不在发种区之下 ({real} ∉ {root})")
+    if not target.startswith(root + os.sep):
+        print(f"❌ [handoff] 拒删：目标不在发种区之下 ({target} ∉ {root})")
         return False
     if os.path.islink(path):
-        print(f"❌ [handoff] 拒删：目标是符号链接 ({path})")
-        return False
+        os.unlink(path)
+        print(f"🗑️  [handoff] 已删 SSD 软链接: {path}")
+        return True
     if not os.path.isdir(path):
         print(f"ℹ️  [handoff] 待删目录不存在（已清理？）: {path}")
         return True
+    real = os.path.realpath(path)
+    if not real.startswith(root + os.sep):
+        # 自身不是软链接但 realpath 逃逸到了外层（如包含外层挂载）
+        print(f"❌ [handoff] 拒删：目录真实路径不在发种区之下 ({real} ∉ {root})")
+        return False
     shutil.rmtree(path)
     print(f"🗑️  [handoff] 已删 SSD 副本: {path}")
     return True
@@ -882,13 +966,64 @@ def finalize_source(qb_src, info_hash, ssd_dir, dry_run=True, own_categories=Non
 
 SEEDING_STATES = {"stalledUP", "uploading", "forcedUP", "queuedUP"}
 
+#: `eligible_on_3040` 里"3040 上找不到该种"的原因前缀 —— 只有**身份匹配失败**才计入熔断。
+#: ★ 连不上/无客户端等**环境**问题不计入（否则一次 qB 抖动就会把健康条目熔断掉）。
+_MATCH_MISS_MARK = "3040 上还没有这条种"
 
-def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
+
+def _mark_failed(item, why):
+    """把一条标成 FAILED（计 attempts + 指数退避），达上限 ⇒ ABANDONED。返回新 state。
+
+    ★ 2026-11-03（排查报告
+      `pending[:HANDOFF_MAX_PER_ROUND]` ⇒ 队头几条永久失败会**占满名额**，后面健康的
+      条目永远轮不到（实测 11-02 入队的 2 条 `attempts=0` 卡住即此故）。
+    """
+    info_hash = item.get("infohash", "")
+    attempts = int(item.get("attempts", 0) or 0) + 1
+    first_failed = item.get("first_failed_at") or _now()
+    if attempts >= config.HANDOFF_MAX_ATTEMPTS:
+        update_item(info_hash, state="ABANDONED", last_error=why,
+                    attempts=attempts, first_failed_at=first_failed,
+                    next_check_at=None)
+        print(f"❌ [handoff] {info_hash[:12]}… 连续失败 {attempts} 次，"
+              f"熔断为 ABANDONED（移出 pending）: {why}")
+        return "ABANDONED"
+    delay = min(config.HANDOFF_RETRY_BASE * (2 ** max(0, attempts - 1)),
+                config.HANDOFF_RETRY_CAP)
+    update_item(info_hash, state="FAILED", last_error=why,
+                attempts=attempts, first_failed_at=first_failed,
+                next_check_at=_now() + delay)
+    return "FAILED"
+
+
+def _mark_match_missing(item, why):
+    """3040 上"hash 与 name 都匹配不到"的连续计数；超阈值 ⇒ ABANDONED。
+
+    ★ 这类失败**重试再多也无解**（3040 上挂的根本不是这条种的同身份副本），
+      故用独立计数器 `match_fail` 而不是 `attempts`，超阈值直接移出 pending。
+    """
+    info_hash = item.get("infohash", "")
+    fails = int(item.get("match_fail", 0) or 0) + 1
+    if fails >= config.HANDOFF_MATCH_MAX_FAILS:
+        update_item(info_hash, state="ABANDONED",
+                    last_error=f"3040 上连续 {fails} 轮匹配不到该种 ⇒ 熔断: {why}",
+                    match_fail=fails, next_check_at=None)
+        print(f"❌ [handoff] {info_hash[:12]}… 身份匹配连续失败 {fails} 次，"
+              f"熔断为 ABANDONED（移出 pending）: {why}")
+        return "ABANDONED"
+    update_item(info_hash, state="PENDING",
+                last_error=f"等 3040 回加/够格（匹配失败 {fails}/"
+                           f"{config.HANDOFF_MATCH_MAX_FAILS}）: {why}",
+                match_fail=fails)
+    return "PENDING"
+
+
+def process_one(qb_src, qb_dst, item, now=None, dry_run=None, dst_host=None):
     """推进队列里**一条**的状态机（PENDING→…→DONE）。返回新的 state 字符串。
 
     ★ 每步都幂等：3020 已存在(409) ⇒ 视为已交棒；SSD 目录已不在 ⇒ 视为已清。
     ★ 任一步失败 ⇒ 置 FAILED 并记 `last_error`（不删任何东西，下轮可重试）。
-    ★★★ #136（2026-10-07 实测 `217848`）：`FAILED` **必须重新走交棒**，**绝不**
+    ★★★
       落到 `verify_3020_seeding` + `finalize_source`。原代码的交棒块只认
       `("PENDING", "HANDOFF_ADDED")` ⇒ 一条 `FAILED` 条目会**跳过交棒**、直接
       往下走到清盘：若此时 3020 那边**恰好已有该种在做种**（例如辅种工具抢先加了），
@@ -896,7 +1031,7 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
       副本还在用**的 SSD 目录删掉 ⇒ 延迟回加(15min后)指向一个刚被删的目录 ⇒
       变下载（`queuedDL progress=0`）。⇒ 现在把 `FAILED` 也纳入交棒块：要么**重试
       交棒**（幂等，409=已在）后正常推进，要么**再判 FAILED 并提前 return** ——
-      **两条路都不会 fall-through 到 finalize**。同族 `ERR-PUBLISH-07`（存在≠完成）。
+      **两条路都不会 fall-through 到 finalize**。同族 （存在≠完成）。
     ★ 本函数**绝不 raise**（daemon 线程调用）。
     """
     dry_run = config.HANDOFF_DRY_RUN == "true" if dry_run is None else dry_run
@@ -915,18 +1050,32 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
         # ★★★ `FAILED` 也在内（#136）：FAILED 只代表"上一轮某步没过"，**不代表已交棒**。
         #   让它重走交棒块 ⇒ 失败则提前 return（不 fall-through 到 finalize）。
         if item.get("state") in ("PENDING", "HANDOFF_ADDED", "FAILED"):
-            # ★★★ #136（用户 2026-10-07 拍板「够格才交棒」）：**只在 PENDING（新条目）
             #   上判"够格"** —— 在途态（HANDOFF_ADDED）与 FAILED（重试）已经过了这道门，
             #   不再重复判（否则交棒到一半的条目会被打回等待）。
             #   ★ 为什么必须有这道门：原代码对 PENDING **立即交棒**，`judge` 是死代码 ⇒
             #     "出种≥N 才交棒"从未生效（实测 `已交棒到 3020` 计数=0）。
             #   ★ 不够格 ⇒ **停在 PENDING**（不交棒、不标 FAILED、不动源）⇒ 下轮再看。
             if item.get("state") == "PENDING" and not dry_run:
-                _present, _elig, _ewhy = eligible_on_3040(qb_src, info_hash,
-                                                          name=item.get("name") or item.get("album"))
-                if not _elig:
+                _present, _elig, _ewhy, _rem_sec = eligible_on_3040(qb_src, info_hash,
+                                                                    name=item.get("name") or item.get("album"),
+                                                                    published_at=item.get("enqueued_at"),
+                                                                    return_remaining=True)
+                if not _present and _MATCH_MISS_MARK in (_ewhy or ""):
+                    #   超阈值熔断为 ABANDONED（移出 pending）—— 重试再多也无解。
+                    return _mark_match_missing(item, _ewhy)
+                if not _present:
+                    # ★ 环境问题（qB 无连接/连不上）**不计熔断**，否则一次抖动会误杀健康条目。
                     update_item(info_hash, state="PENDING",
-                                last_error=f"等够格交棒: {_ewhy}")
+                                last_error=f"等 3040 就绪: {_ewhy}")
+                    return "PENDING"
+                if item.get("match_fail"):
+                    update_item(info_hash, match_fail=0)     # 命中 ⇒ 清零计数
+                if not _elig:
+                    # ★ 退避机制：设置 next_check_at 为预计达标时间（至少退避 1 小时 / 3600 秒），避免霸占每轮配额
+                    delay = max(3600.0, float(_rem_sec or 3600.0))
+                    update_item(info_hash, state="PENDING",
+                                last_error=f"等够格交棒: {_ewhy}",
+                                next_check_at=_now() + delay)
                     return "PENDING"
             # ★★★ #134 第四道闸门：交棒前**确认 SSD 副本还在**。
             #   ★ 为什么：队列条目可能在"数据其实没到位/已被清"的情况下残留（例如某轮
@@ -939,17 +1088,16 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
                 if not ssd_ok and ssd_dir:
                     # 兜底：老条目没有 src_path/album ⇒ 退化为"目录存在且非空"。
                     if not (os.path.isdir(ssd_dir) and os.listdir(ssd_dir)):
-                        update_item(info_hash, state="FAILED",
-                                    last_error=f"发种区副本不在位，拒交棒: {ssd_why}",
-                                    first_failed_at=item.get("first_failed_at") or _now())
-                        return "FAILED"
+                        return _mark_failed(
+                            item, f"发种区副本不在位，拒交棒: {ssd_why}")
             ok, why = handoff_to_3020(qb_src, qb_dst, info_hash, target, dry_run=dry_run,
                                      target_category=target_cat or None,
-                                     name=item.get("name") or item.get("album"))
+                                     name=item.get("name") or item.get("album"),
+                                     src_path=item.get("src_path"),
+                                     album=item.get("album"),
+                                     dst_host=dst_host)
             if not ok:
-                update_item(info_hash, state="FAILED", last_error=why,
-                            first_failed_at=item.get("first_failed_at") or _now())
-                return "FAILED"
+                return _mark_failed(item, why)
             update_item(info_hash, state="HANDOFF_ADDED")
             handed_off = True
             if dry_run:
@@ -960,8 +1108,11 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
         ready, why = ((True, "dry-run") if dry_run
                       else verify_3020_seeding(qb_dst, info_hash, name=_nm))
         if not ready:
-            # 3020 还没校验完 ⇒ 停在这一步，下轮再看（**不**删源）
-            update_item(info_hash, state="HANDOFF_RECHECK", last_error=why)
+            attempts = int(item.get("attempts", 0) or 0) + 1
+            delay = min(config.HANDOFF_RETRY_BASE * (2 ** max(0, attempts - 1)),
+                        config.HANDOFF_RETRY_CAP)
+            update_item(info_hash, state="HANDOFF_RECHECK", last_error=why,
+                        attempts=attempts, next_check_at=_now() + delay)
             return "HANDOFF_RECHECK"
         update_item(info_hash, state="HANDOFF_SEEDING")
         # ---- 清盘（★ 只有 3020 已做种才走到这）----
@@ -969,9 +1120,7 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
         #   `handed_off=True`（PENDING/FAILED 都过了交棒块，在途态本身也为真）；此处
         #   显式再拦一次 —— 宁可停在 HANDOFF_SEEDING 让人工看，也不删不该删的盘。
         if not handed_off:
-            update_item(info_hash, state="FAILED",
-                        last_error="未完成交棒却走到清盘（已拦，拒删源）⇒ 需人工核")
-            return "FAILED"
+            return _mark_failed(item, "未完成交棒却走到清盘（已拦，拒删源）⇒ 需人工核")
         if finalize_source(qb_src, info_hash, ssd_dir, dry_run=dry_run, name=_nm):
             if not dry_run:
                 remove_item(info_hash)
@@ -980,8 +1129,7 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None):
             #    而状态其实是 DONE —— NAS-92g 实测踩到，纯误导）。
             update_item(info_hash, state="DONE", last_error="")
             return "DONE"
-        update_item(info_hash, state="FAILED", last_error="清盘失败")
-        return "FAILED"
+        return _mark_failed(item, "清盘失败")
     except Exception as e:                                        # noqa: BLE001
-        update_item(info_hash, state="FAILED", last_error=f"{type(e).__name__}: {e}")
-        return "FAILED"
+        return _mark_failed(item, f"{type(e).__name__}: {e}")
+

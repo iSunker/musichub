@@ -1,6 +1,6 @@
 """★ 只读观测：抓一份 edit.php?id=17099，看 custom_fields 到底是什么元素、值在哪。
 
-★★ 本脚本**只观测、不下结论、不改代码**（ERR-META-11：结论不能先烤进脚本）。
+★★ 本脚本**只观测、不下结论、不改代码**。
    ⇒ 它**只**做三件事：
      ① 出网 1 次（过 Requests-Session，但 edit.php 是 **Musopia** 不是皇后 ⇒
         不过皇后 RateGate，也不进皇后配额台账 —— 两个站点两本账）；
@@ -10,7 +10,7 @@
 ★ 为什么落盘而不是直接分析：改一次解析要重放几次 ⇒ 不能每次都再敲站点
   （`crawl.save_raw` 的 docstring 就是这个理由，本脚本沿用同一规矩）。
 ★ 为什么用 `crawl.save_raw`：它已经在落盘目录与原子替换上都写好了；
-  复用同一个函数 ⇒ 不会出现"两份落盘目录口径"（ERR-META-03）。
+  复用同一个函数 ⇒ 不会出现"两份落盘目录口径"。
 """
 import os
 import re
@@ -36,7 +36,7 @@ r = c.get("/edit.php", params={"id": TID})
 html = r.text or ""
 print(f"  HTTP      : {r.status_code}")
 print(f"  body 字节 : {len(html)}")
-print(f"  ★ 注意     : 200 + 0 字节 = ERR-SITE-01 形状（'回了个空壳'），"
+print(f"  ★ 注意     : 200 + 0 字节 =  形状（'回了个空壳'），"
       f"不是'站点上没有'")
 
 if not html.strip():

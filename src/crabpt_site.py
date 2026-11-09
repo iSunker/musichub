@@ -1,49 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""蟹黄堡（crabpt.vip）发布适配层 —— 把一条 task 渲染成 `takeupload.php` 的表单字段。
+"""蟹黄堡（crabpt.vip）发布适配层。
 
-═══════════════════════════════════════════════════════════════════════════
-为什么单独一个文件（不是往 descr.build_form_fields 里加分支）
-═══════════════════════════════════════════════════════════════════════════
-★ `descr.build_form_fields()` 的输出**在蟹黄堡大部分用不上**，实测（PLAN 附录 C.7）：
-
-    语义         乌托邦                      蟹黄堡
-    --------     ------------------------    ---------------------------
-    媒介         `medium_sel`                ★ `source_sel[4]`（**没有 medium_sel**）
-    音频编码     `audiocodec_sel`(FLAC=1)    `audiocodec_sel[4]`(FLAC=10)
-    地区         ★ 在 `tags[4][]` 里(大陆=4…)  ★★ 独立字段 `processing_sel[4]`
-    艺术家/年份/  `custom_fields[4][N]`       ★★ **完全没有 custom_fields**
-      厂牌/抓轨日志
-    MediaInfo    无独立字段                  ★ `technical_info`
-
-⇒ 差异**不是"字段名多一个 [4]"**，而是**字段集合不同**（一个用 custom_fields、
-另一个不用；一个把地区放标签里、另一个有独立字段）。
-⇒ 硬要塞进 `build_form_fields()` 会让那个函数里一半的分支在蟹黄堡走不到，
-  而**走不到的分支比没有分支更危险**（它看着像"已处理"）。⇒ 独立成文件，
-  并在这里**逐字段写明来源**。
-
-★★ 两站标签体系也**不同类**（这是最容易被忽略的一条，实测）：
-    乌托邦 `tags[4][]` = 地区 + 音乐风格 + 禁转/首发
-    蟹黄堡 `tags[4][]` = **影视属性为主**（剧情/战争/犯罪/惊悚/科幻/动画…）
-  ⇒ **不能复用** `opencd_map.TAG_NAME_MAP`（那张表右列是乌托邦的**名字**）。
-  本文件只映射**两边语义明确同源**的那几个（禁转 / 自购），其余**不硬凑**。
-
-═══════════════════════════════════════════════════════════════════════════
-★ 字段值的出处（都是**实测**，不是推断；详见 PLAN-crabpt.md 附录 C）
-═══════════════════════════════════════════════════════════════════════════
-  · 表单 action `takeupload.php` / 分组 `[4]` / `type=408`  —— 发布页原文
-    ★★ 2026-09-28 订正：**`takeupload.php` 是 POST 端点（提交），不是可读的页面**；
-       **空白表单页是 `GET /upload.php`**（站点导航「发布」指向它）。
-       ⇒ 读基线要用 `/upload.php`，提交才用 `takeupload.php`。见
-         `CrabptClient.fetch_upload_form()` 的 docstring（那里记着两个 bug）。
-  · 六个 select 的全部选项                              —— 发布页 `<select>` 逐项读出
-  · `tags[4][]` 37 项的「值 → 名字」                    —— BeautifulSoup 读 `<label>`
-  · `source_sel` 的用法（音乐多为 Other，WEB 发行才用 WEB-DL）—— 四条真实详情页反推
-
-★★ 一条**已知的、必须如实标注的**缺口（别把它读成"已解决"）：
-   `processing_sel[4]`（地区）的取值**是从皇后的地区标签映射**来的，
-   而皇后那一列**是"日韩"合并的** ⇒ **拆不出日本(5)与韩国(6)**，
-   只能落到 `1 其他`。这与 `opencd_map.py` 把"映射不上显式列出"的做法一致。
+将通用任务记录（task）转换为蟹黄堡站点 takeupload.php 的发布表单字段，包括：
+  - 分类（type=408 音乐）；
+  - 媒介（source_sel[4]）与音频编码（audiocodec_sel[4]）；
+  - 地区选择（processing_sel[4]）；
+  - 简介正文与图床封面适配；
+  - 默认强制匿名发布（uplver='yes'）。
 """
 import os
 import re
@@ -59,13 +23,11 @@ import opencd
 
 # ★ 复用乌托邦那份 UA / 错误提取 —— 两站都是 NexusPHP，出错的页面形状同族。
 #   ★ 不各写一份：这两样不是"站点差异"，是"NexusPHP 共性"，各写一份就是两个口径
-#     （`ERR-META-03`），而它们**恰恰是排错时唯一能看的东西**。
 #   ★ 方向是单向的（crabpt_site → musopia），不会成环：
 #     `musopia.py` 不 import 本文件，也不 import publish。
 from musopia import SiteError, UA, _extract_error, _dump_takeupload
 
 # ==================== 分类 id ====================
-# ★ 音乐 = 408（实测）。★ 必须与 config 同源，不手抄（ERR-META-03）。
 MUSIC_TYPE = config.CRABPT_MUSIC_CATEGORY
 
 # ==================== `source_sel[4]`：媒介 ====================
@@ -187,7 +149,6 @@ def map_audiocodec(musopia_audiocodec):
 #     日韩        7                  ★ **拆不出** ⇒ 5（见下）
 #     其它地区    8                  1
 #
-# ★★ 为什么"日韩"落到 `5 日本`（2026-09-27 用户拍板，**原先落 `1 其他`**）：
 #    皇后那一列**只有一个合并值 `日韩`**，而蟹黄堡要分 `5 日本` / `6 韩国`
 #    ⇒ **信息不足，数学上拆不出来**（这不是 bug，是上游数据粒度不够）。
 #    用户的决定：**落 `5 日本`**。
@@ -200,13 +161,12 @@ def map_audiocodec(musopia_audiocodec):
 #
 #    ★ 所以这一支**仍然进 `notes`**（不静默）：读日志的人要看得出
 #      "这条的地区是**猜**的，可能是韩国被动标成日本"。
-#      ⇒ 判据：**"我不确定"必须能被表达出来**（`ERR-SITE-06` 同族）——
 #        落 5 是**决定**，但"为什么是 5"必须留在说明里。
 _PROCESSING_BY_MUSOPIA_TAG = {
     "大陆": 2,
     "港台": 3,
     "欧美": 4,
-    "日韩": 5,          # ★ 用户 2026-09-27 拍板：拆不出 ⇒ 落日本(5)，见上
+    "日韩": 5,
     "其它地区": 1,
     "其他地区": 1,      # ★ 两站用字不同（乌托邦写"其他"、皇后写"其它"）
 }
@@ -247,7 +207,6 @@ def map_processing(musopia_tags):
         if name is None:
             continue
         # ★ 先记"这一支有已知的不精确"，**不 continue** —— 若它在映射表里有值，
-        #   就照常返回那个值（见上面 docstring 里 2026-09-27 那段）。
         if name in _PROCESSING_SPLIT_LOST:
             notes.append(f"皇后标签「{name}」：{_PROCESSING_SPLIT_LOST[name]}")
         if name in _PROCESSING_BY_MUSOPIA_TAG:
@@ -260,7 +219,6 @@ def map_processing(musopia_tags):
 
 # ==================== `tags[4][]`：标签 ====================
 #
-# ★★★ 2026-09-25 用户纠正 —— 本段原先写的是「禁转 两边同名、必须传过去」，
 #    **那是错的，而且错在根上**。用户原话：
 #        「从皇后往蟹黄堡转发，为什么要勾选蟹黄堡的禁转？」
 #
@@ -272,10 +230,8 @@ def map_processing(musopia_tags):
 #      ⇒ ★ 勾上它是**假数据**（写了一个我们无权主张的事实）。
 #
 #    ★★ 而这个错误**本项目早就解决过**，就在 `descr.TAG_NEVER_FORWARD`
-#       （2026-09-21 用户拍板，乌托邦那一侧）：
 #          「禁转(1)/首发(2) —— **语义相反**：我们是**转载**过去的」
 #       ⇒ 我在写蟹黄堡这个**新调用方**时，**没有把那条既有判据带过来**
-#         —— 这正是 `ERR-META-16`（"同一个语义来自哪一列/哪一份判据，
 #         换了调用方不能凭印象"）的又一次实例，而且这次的代价是**往站点写假数据**。
 #       ⇒ 修法不是"这里再写一份黑名单"，而是**复用 `descr.filter_forward_tags()`**
 #         —— 两站共用一份"转发方向白名单"，将来改一处两站都跟。
@@ -311,7 +267,6 @@ def map_tags(musopia_tags):
          —— 就算有，我们也不勾（见上）。
     """
     # ★★ 方向过滤：★ 复用乌托邦那份既有判据，**不在这里再写一份黑名单**
-    #    （`ERR-META-03`：两处各写一份必然漂移，而这次漂移的代价是**写假数据**）。
     #    ★ `dropped` 要**返回给调用方**并打印 —— 不静默丢（同 `map_tags` 的契约）。
     values = [str(x) for x in (musopia_tags or [])]
     kept, dropped = descr.filter_forward_tags(values)
@@ -335,7 +290,6 @@ def map_tags(musopia_tags):
     # ★★ 被方向过滤剔掉的，**并进 unmapped 一起报**（不静默丢）。
     #   ★ 但**带上理由**：它们没落上**不是**因为"蟹黄堡没有这一项"，
     #     而是因为**我们本来就不该勾**。两种"没落上"混成一个列表会让人误判
-    #     （`ERR-META-14`：兜底与映射结果必须分开说）。
     for v, nm, why in dropped:
         unmapped.append(f"{nm}（★ 方向过滤：{why}）")
     return out, unmapped
@@ -347,13 +301,12 @@ def map_tags(musopia_tags):
 #     分辨率 · 视频编码 · 制作组 —— 四条样本**全部**是 `Other`。
 #   ★ 音乐种本来就没有分辨率/视频编码（那是视频概念），制作组皇后元数据里**没有**。
 #   ⇒ ★ 填 `Other` 是**有先例、站点接受**的，比"猜一个具体值"安全得多。
-#   ★★ 不许去猜"这条像哪个制作组"—— 那是把猜测当事实（ERR-META-01 一族）。
 STANDARD_OTHER = 1
 CODEC_OTHER = 1
 TEAM_OTHER = 1
 
 
-def build_fields(task, *, anonymous=False):
+def build_fields(task, *, anonymous=True):
     """把一条 task（db 里的 dict）渲染成蟹黄堡 `takeupload.php` 的字段 dict。
 
     返回 `(fields, audit)`：
@@ -370,7 +323,7 @@ def build_fields(task, *, anonymous=False):
         `tags` / `medium_sel` / `audiocodec_sel` / `team_sel` 这四列 ——
         它们是 `mapped_json` 里的 JSON。不铺平 ⇒ 那四个键是 `None`
         ⇒ 本文件会把它们**一律映成 `1`（Other）**，而那是**看着正常的假值**：
-        页面能提交成功，只是**音频编码、地区、标签全丢**（`ERR-META-01` 的形状）。
+        页面能提交成功，只是**音频编码、地区、标签全丢**。
       ★ 实测踩过（2026-09-24）：样例的 `audiocodec_sel[4]=1`，而标题里明明写着 FLAC
         —— 那时就是漏了这一步，且**审计行只报"值=1"，读起来像"映射结果"**。
         ⇒ 现在铺平后，**若四键仍为空，会由下面的 audit 显式报"没有来源"**。
@@ -378,7 +331,6 @@ def build_fields(task, *, anonymous=False):
     task = db.merge_mapped(dict(task))     # ★ 拷贝一份，不改调用方的 dict
     audit = []
 
-    # ---- 标题：★ 原样透传（2026-09-24 用户拍板：「皇后标题怎么起就怎么起」）
     #
     # ★ 蟹黄堡页面自带提示：「若不填将使用种子文件名」⇒ ★ **留空也是合法选项**。
     #   但我们的库里 `formatted_title` 已经是渲染好的标题 ⇒ 填它，
@@ -387,7 +339,6 @@ def build_fields(task, *, anonymous=False):
     audit.append(f"name（标题）← task.formatted_title 原样，未加任何后缀")
 
     # ---- 副标题：★ 复用 descr 里那份**唯一**的口径
-    #      （2026-09-24 从 `build_form_fields()` 抽出 `build_small_descr_for_task()`）
     #      ★ 不在这里自己算 —— 副标题是**两站提交的同一个字段**，
     #        各算一份就可能两站不一样，且不会报错。
     small_descr = descr.build_small_descr_for_task(task)
@@ -410,7 +361,6 @@ def build_fields(task, *, anonymous=False):
         log_content=task.get("log_content") or "",
         log_filename=task.get("log_filename") or "",
         logs=logs,
-        # ★★ 皇后简介正文（2026-09-26 加）—— **两站必须传同一个值**。
         #    ★ 为什么这里也要传：`build_descr()` 是**两站共用**的（本文件上方
         #      那条注释已写明"格式同构、可直接复用"）。若这边不传，乌托邦页面
         #      有皇后正文、蟹黄堡页面没有 —— 那是**没人要求过的差异**，
@@ -422,12 +372,10 @@ def build_fields(task, *, anonymous=False):
         #      兜底取列 `opencd_descr`：万一将来有人把 merge 那步挪走，
         #      这里不会**静默**变成空。
         opencd_descr=task.get("descr") or task.get("opencd_descr") or "",
-        # ★★★ 2026-09-27：**蟹黄堡不要日志折叠块**（用户拍板「折叠代码也不需要」）。
         #   ★ 这一行是**承重的**：不传 `site=` 的话 `_skip_logs` 就是 False
         #     ⇒ 蟹黄堡的简介里会长出 `[spoiler=LOG][code]…[/code][/spoiler]`，
         #     而**不会报任何错**（`build_descr` 照常返回一段合法 BBCode）。
         #   ★ 用法是 `db.SITE_CRABPT` 常量而不是字面量 `"crabpt"` ——
-        #     站名只有 `db` 那两个常量是唯一真值源（`ERR-META-03`），
         #     本文件也**只**用常量（见文件头"站点名"那条）。
         site=db.SITE_CRABPT,
     )
@@ -452,7 +400,6 @@ def build_fields(task, *, anonymous=False):
                  + (f"　★ 未映射/未勾：{unmapped_tags}" if unmapped_tags else ""))
 
     # ★★ 一条**显式的 TODO**（不是"忘了"）：
-    #   乌托邦那一侧会给每条种子勾上 `OpenCD`（来源标记，2026-09-21 用户点名
     #   「opencd 勾上」）。蟹黄堡**有没有这一项，未实测** ⇒ ★ 这里**不猜**。
     #   ★ 想要补上它，判据是**一次真实观测**：在蟹黄堡发布页的 `tags[4][]` 选项里
     #     找有没有一个叫 `OpenCD` / 含义为"来自 OpenCD"的项。
@@ -466,8 +413,6 @@ def build_fields(task, *, anonymous=False):
     #   时，它和"来源有值、映射成了 Other"长得一模一样**（都印成 `⇒ 1`）。
     #     · `task.medium_sel=12 ⇒ 1`   = 映射结果正确（Other 就是 1）
     #     · `task.medium_sel=None ⇒ 1` = **我们什么都没拿到**，1 只是兜底
-    #   ⇒ 两者**结论相反**却**排版相同** —— 这正是 `ERR-META-13`（同一数字在不同
-    #     位置含义不同）与 `ERR-META-01`（判据看着对但量错了东西）的合流。
     #   ⇒ 处置：把"来源为空"单独报一行，指出它会让站点上那几个字段**全丢**。
     _empty_src = [n for n, v in (
         ("medium_sel", musopia_medium),
@@ -502,6 +447,10 @@ def build_fields(task, *, anonymous=False):
         # 标签：多值 ⇒ 用 list，requests 会编成重复的 `tags[4][]=N`
         "tags[4][]": ct,
     }
+    if anonymous:
+        fields["uplver"] = "yes"
+        audit.append("uplver=yes (匿名发布)")
+
     return fields, audit
 
 
@@ -632,21 +581,21 @@ class CrabptClient:
         """在**蟹黄堡全站范围**搜 `name`，返回**已存在同版本**的 tid 或 `None`。
 
         ★★ 与 `musopia.MusopiaClient.find_existing_by_name` 是**同一套判据**（复用
-          `musopia.search_and_compare`，`ERR-META-03`：两站共用一处核心，绝不各写一份）。
+          `musopia.search_and_compare`，：两站共用一处核心，绝不各写一份）。
           判据 = 站侧 `.torrent` 的 `info.name` 与本地 `local_name` 精确相等（非标题）。
         ★★ **召回**（#23/#31）也在**同一处**：`search_and_compare` 按 `musopia.SEARCH_QUERY_PLAN`
           发**多条子查询**、精准优先、命中即停（修长名/标点名/CJK 名的漏召回）—— 蟹黄堡**自动**继承。
         ★★ `max_candidates` 默认 **`None`** ⇒ 读 `config.DEDUP_MAX_CANDIDATES`（与乌托邦同源）。
           ★ 旧版硬编码 `8`，**永不读 config** ⇒ 蟹黄堡实际跑的是 #31 之前那套预算（8），
-            与 area=1（#31 之后的口径）错配 —— 那正是 20 行回归 11/20 的配置（`ERR-META-03`：口径漂移）。
+            与 area=1（#31 之后的口径）错配 —— 那正是 20 行回归 11/20 的配置。
             预算是 #31 的**安全阀**，两站该取同一个值、同一个旋钮。
         ★ 本类**不继承** `MusopiaClient`（见类头注释：乌托邦那条是主发布线，
           共用连接会有回归风险）⇒ 只复用**函数**，不复用**连接与提交**。
         ★★ 任何网络/解析异常**向上抛**（`publish._dedup_lookup` 按"停轮非 0"处理）；
           `None` 的语义**只有**"搜到了、但不重复"。
-        ★★ `diag`（`S4` / `ERR-PUBLISH-25`）：可选的诊断累加器（`dict`），原样转给
+        ★★ `diag`（`S4` / ）：可选的诊断累加器（`dict`），原样转给
           `musopia.search_and_compare`。**不传则行为逐字不变**。两站共用同一份诊断口径
-          （`ERR-META-03`），免得一边有证据一边只有一句话。
+          ，免得一边有证据一边只有一句话。
         """
         import musopia
         return musopia.search_and_compare(self, name, local_name=local_name,
@@ -667,7 +616,7 @@ class CrabptClient:
             蟹黄堡失效 ⇒ 回 **401 + Basic 认证弹窗**（NexusPHP 的 `.htaccess`
                           保护整站；`WWW-Authenticate: Basic realm="crabpt.vip"`）
             ★ 所以"有没有登录页"这条判据在蟹黄堡**恒为假** ⇒ 照抄过来会把
-              "Cookie 全废"报成"登录成功"（`ERR-META-01` 的经典形状）。
+              "Cookie 全废"报成"登录成功"。
           ⇒ 判据用**响应形状**：401 / 带 `WWW-Authenticate` ⇒ 判定失效并抛。
 
         ★ 另记一条**不能当判据**的东西（实测 2026-09-25）：出错时站点回的那张
@@ -681,7 +630,7 @@ class CrabptClient:
             raise SiteError(
                 f"蟹黄堡拒绝访问（HTTP {r.status_code}，带 WWW-Authenticate）"
                 f" ⇒ CRABPT_COOKIE 已失效或没配上。请更新 NAS `.env` 的 "
-                f"CRABPT_COOKIE（见 ERR-ENV-02：新增键要在 NAS 手工加）")
+                f"CRABPT_COOKIE（见 ：新增键要在 NAS 手工加）")
         if r.status_code != 200:
             raise SiteError(f"访问蟹黄堡 torrents.php 失败，HTTP {r.status_code}")
         body = r.text or ""
@@ -721,7 +670,7 @@ class CrabptClient:
              实际有 **101** 个字段（编辑器按钮、别的分类组等）。先读一次，
              才能把"我们没填的"与"站点没有的"分开。
           ② ★★★ **它是唯一能在提交前发现"账号不能发种"的判据。**
-             `ERR-SITE-01`（乌托邦实测）：Cookie 有效 ≠ 有发种权限 ——
+             （乌托邦实测）：Cookie 有效 ≠ 有发种权限 ——
              权限被关后站点回的是 **HTTP 200 的普通页**，不是 302、不是报错。
              ⇒ 若不做这一步，我们会带着一个"看着成功"的 200 走完整个提交，
                把失败**留给不可逆的那一步**才发现。
@@ -733,7 +682,7 @@ class CrabptClient:
             · 页面退回登录页            ⇒ Cookie 失效
             · 没有 `#compose` 表单      ⇒ 不是发布页（权限被关 / 版式变了 / 路径变了）
             · 有 `#compose` 但缺 4 个字段 ⇒ 站点改名了（**保留这条**，但排最后）
-          ★ 纪律（`ERR-SITE-06` 同族）：一个报错若并列多种原因，就必须同时给出
+          ★ 纪律：一个报错若并列多种原因，就必须同时给出
             **分辨它们的判据**；否则读的人只能猜，而猜错的代价已经实测过。
 
         ★ 返回的 `form.action` 是**站点自己写的** action（相对或绝对），
@@ -754,7 +703,6 @@ class CrabptClient:
         # ★★ 按 **id** 选，不按"第几个"选：页面上第 1 个 form 是**搜索框**。
         form = bs.find("form", id="compose")
         if form is None:
-            # ★ 把"页面里究竟有什么"报出来 —— 这是 ERR-SITE-01 那个
             #   「HTTP 200 + 看不出原因」的**解药**：至少要能看出这不是发布页。
             #   ★★ 顺带把"页面上一共有几个 form、各自是什么"打出来：
             #     本次就是因为只报"缺字段"，才把"选错 form"读成了"版式变了"。
@@ -774,7 +722,7 @@ class CrabptClient:
                    "路径被改回了 `takeupload.php`（GET 它 = 提交空表单）。"
                    "正确路径是 `/upload.php` —— 见本函数 docstring ①。"
                    if is_submit_err else
-                   "。★ 见 ERR-SITE-01：Cookie 有效 ≠ 有发种权限 —— "
+                   "。★ 见 ：Cookie 有效 ≠ 有发种权限 —— "
                    "这类失败在 NexusPHP 上就是回一张 HTTP 200 的普通页。"
                    "⇒ 请确认该账号的**发种权限**（或页面版式/路径是否已变）。"))
 
@@ -875,7 +823,6 @@ class CrabptClient:
         if tid:
             return tid, "ok"
 
-        # ★★ 失败支一律落盘（对称 #19 / 2026-10-04 的 #23）——否则每次排查都要**重发**
         #   （= 真发种，不可逆）。★ 后缀用 `crabpt-takeupload`：与乌托邦那份**分开**，
         #   否则转种场景（同一条种子在两站都发）两站失败页会**互相覆盖**（见
         #   `musopia._dump_takeupload` 的 `kind` 说明）。
@@ -892,7 +839,6 @@ class CrabptClient:
         #        蟹黄堡这份**可能是真发成功了**（本函数 `allow_redirects=True`，
         #        id 只是没读到）⇒ **不许**当 REJECT（否则漏发/发重），
         #        判 UNKNOWN ⇒ 调用方**停 + 非 0 + 要人上站点核对**，**不推进队列**。
-        #   ★ 盲区（已实测，`opencdhtml/crabpt-upload-2026-10-04.html`）：蟹黄堡页面 markup
         #     与乌托邦不同（无 `h1/h2`；`#outer table td.text` 命中的是 `nav_block` 导航块）。
         #     `_extract_error` 有"<300 字且含 错误/Error/失败"的护栏 ⇒ 对导航块返回 `''`
         #     （**不会伪造错误**，已验证）。但**真错误页若不用那些 selector 就抠不出来**
@@ -909,7 +855,6 @@ class CrabptClient:
             return None, f"REJECT: {err}"
 
         # ★ 到这里：HTTP 200、页面上没有报错、也没有 details 链接。
-        #   这正是 `ERR-SITE-01` 那个"看着正常"的形状 ⇒ **不许说成功**，
         #   但也**不许说失败**（说了失败就会有人重试 ⇒ 发重）。
         #   ⇒ 归 `UNKNOWN:`（调用方停 + 非 0，不推进队列）。
         return None, (f"UNKNOWN: HTTP {r.status_code}，既没拿到 details 链接 "
@@ -921,12 +866,10 @@ class CrabptClient:
 # ==================== 自检（纯离线：零请求、零写库） ====================
 #
 # ★★ 为什么值得给这个文件加自检（它原先一个都没有）：
-#    2026-09-27 改「日韩 → 5」时踩到一个**静默失效**风险 ——
 #    `map_processing` 里原来对 `_PROCESSING_SPLIT_LOST` 是 **`continue`**，
 #    而当时「日韩」**只**在那张表里（映射表里没有）⇒ 跳过 ⇒ 兜底 1。
 #    改法必须**同时**把「日韩」加进映射表、并**去掉那个 continue**。
 #    只做一半（只加表、留着 continue）⇒ 结果**还是 1**，
-#    而代码"看起来"改了、不报错、跑得通 —— 这正是 `ERR-META-01` 的形状。
 #    ⇒ 判据必须钉住**返回值**（5），不是"表里有没有这个键"。
 #
 # ★ 判据分四层（每层都能单独失败）：
@@ -986,7 +929,6 @@ def selftest(verbose=True):
     # ★★ 为什么必须在这一侧测：`descr.py` 自检⑨ 钉的是 **build_descr 本身**
     #    的三种行为；而"**本文件调用时有没有传 site**"是**另一个**判据 ——
     #    不传的话 `site` 默认 None ⇒ 日志折叠块照样长出来，而 descr 那边
-    #    全绿（它测的场景自带 site 参数）。这正是 `ERR-META-01`：
     #    两条判据各自都"看着在跑"，合起来覆盖不到那条缝。
     print("\n④ 接线：build_fields 调 build_descr 时**必须**传 site=蟹黄堡")
     _src = open(_os.path.abspath(__file__), encoding="utf-8").read()
@@ -1002,12 +944,18 @@ def selftest(verbose=True):
         chk(f"build_descr 调用传了 `site=`（共 {len(_calls)} 个调用点）",
             "site" in _kws, f"实得关键字参数 {sorted(_kws)}")
         # ★ 值必须是 `db.SITE_CRABPT` 而不是字面量 —— 站名只有 db 那两个常量
-        #   是唯一真值源（ERR-META-03）。
         _vals = [getattr(k.value, "attr", None) or getattr(k.value, "value", None)
                  for c in _calls for k in c.keywords if k.arg == "site"]
         chk("site 的值是 `db.SITE_CRABPT`（不是手抄字面量）",
             all(v == "SITE_CRABPT" for v in _vals) if _vals else False,
             f"实得 {_vals}")
+
+    print("\n⑤ 强制匿名发布：build_fields 必须默认带 uplver=yes")
+    _f_anon, _a_anon = build_fields({"torrent_name": "Test"})
+    chk("build_fields 默认带 uplver='yes'", _f_anon.get("uplver") == "yes", f"实得 {_f_anon.get('uplver')}")
+    chk("audit 明确记录匿名", any("uplver=yes" in line for line in _a_anon))
+    _f_named, _ = build_fields({"torrent_name": "Test"}, anonymous=False)
+    chk("显式 anonymous=False 时不带 uplver", "uplver" not in _f_named)
 
     print()
     print("=" * 72)
@@ -1022,3 +970,4 @@ if __name__ == "__main__":
     _ok, _n = selftest()
     print("★ 退出码：0 = 全过；1 = 有断言不符" if _ok else "★ 退出码 1（有断言不符）")
     _sys.exit(0 if _ok else 1)
+

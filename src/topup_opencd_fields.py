@@ -42,7 +42,7 @@
      下一轮把已经试过的**跳过**（除非 `--retry-failed`）。
    ★ 为什么不复用 `opencd_quota` 那张表：它是**配额账本**（一行一天一个数），
      语义是"发了几个请求"；把"抓过哪个 tid"塞进去会让两个口径混在一列里
-     （`ERR-META-05`：不同口径的数不许放在一起）。
+     。
 
 4. **配额与"没活"必须分开报**（`crawl.py` 同款纪律）：
    `RateGate` 抛 `DailyQuotaExceeded` 是**保护**，不是错误；
@@ -81,12 +81,12 @@
    ⇒ 实测的教训：改之前，399 条里**排最前的绝大多数是 EXISTS**，
      每天 50 个请求全花在够不着的行上，**队列因此长期是 0**。
    ★ 要**重推已上站的行**：用 `--tids` 显式点名（默认拒绝 + 显式授权）。
-   ★ 两个口径（全部 / 可补）在摘要里**分开报**，不许混着减（`ERR-META-05`）。
+   ★ 两个口径（全部 / 可补）在摘要里**分开报**，不许混着减。
 
 ═══════════════════════════════════════════════════════════════════════════
 在哪跑
 ═══════════════════════════════════════════════════════════════════════════
-★ **容器内**（皇后 Cookie 在 NAS 的 `.env` 里，本机读不到 —— `ERR-ENV-02`）。
+★ **容器内**（皇后 Cookie 在 NAS 的 `.env` 里，本机读不到 —— ）。
   ⇒ 用法（NAS 上，**先停掉常驻 daemon 或至少确认它不在跑 crawl**）：
       sudo docker compose run --rm tools python topup_opencd_fields.py --dry-run
       sudo docker compose run --rm tools python topup_opencd_fields.py --apply --limit 5
@@ -130,9 +130,7 @@ TRIED_FILE = "topup_tried.jsonl"
 #     而没 log 的 180 条会落 `NO_LOG`（第一代规矩：不发）。
 #     ⇒ 一次跑完两类，各自的结论由 `opencd_ingest` 分别落库，不必分两次排队。
 #
-# ★★ 2026-09-23 深夜修：**"还没补过" ≠ "补了有用"** —— 加 `site_status != 'EXISTS'`。
 #
-#   ★ 起因（实测，2026-09-23 23:0x 的 `--dry-run` 输出）：本口径当时选中 **399 条**，
 #     而**真正花请求的前 8 条 `site_status` 全是 `EXISTS`**（已上站）。
 #     ⇒ **它们在给"已在站上、永远不会重进队列"的行花配额。**
 #
@@ -140,8 +138,6 @@ TRIED_FILE = "topup_tried.jsonl"
 #     `db.PENDING_PUBLISH_WHERE` 的第二句就是
 #     `(site_status IS NULL OR site_status != 'EXISTS')` ⇒ **已上站的行走不到队列**。
 #     而补 `mapped_json` 唯一的**目的**就是让行能过闸门③ 进队列
-#     （★ 2026-09-28 订正：原先这里写"补完还要**另一步**才能发" —— 那"另一步"
-#      是改回 `status`，而**根因已修**（见 `ERR-DATA-06`）：本步现在会带回
 #      库里已有的 `torrent_file` ⇒ `status` 保持 `SUCCESS`，**不用再补一步**）。
 #     ⇒ 对 `EXISTS` 的行，这个目的是**不可能达成**的 ⇒ 请求**纯浪费**。
 #
@@ -150,7 +146,6 @@ TRIED_FILE = "topup_tried.jsonl"
 #     ⇒ 排在最前的那 219 条里绝大多数是 EXISTS ⇒ **真正该补的
 #     （未上站、有 tid、没页面，实测只有几十条）被挤到 399 条的最后**
 #     ⇒ **每天的 50 个请求全花在够不着的行上，队列永远是 0。**
-#     ★ 这是典型的 `ERR-META-01` 形状：脚本报告"在干活、选了 399 条"，
 #       而**干的全是无效功** —— 比没在跑更糟，因为它看起来在跑。
 #
 #   ★★ 要**重推已上站的行**怎么办（不是禁止，是**必须显式**）：
@@ -159,7 +154,6 @@ TRIED_FILE = "topup_tried.jsonl"
 #       ⇒ 「默认不浪费配额」+「要重推必须自己点名」，与闸门④ 的
 #         "默认拒绝 + 显式授权"是同一个分寸。
 #
-# ★ 两个口径**都保留、分开报**（`ERR-META-05`：不同口径的数不许混着减）：
 #     `TARGET_WHERE`    = 还没补过的**全部**（含已上站）→ 摘要里作"还剩多少活"
 #     `PICK_WHERE`      = 其中**补了有用**的（未上站）    → 真正会进选批的池子
 TARGET_WHERE = ("(opencd_tid IS NOT NULL AND opencd_tid != '') "
@@ -231,7 +225,7 @@ def select_batch(limit, tried, retry_failed=False, tids=()):
         "顺手重抓一遍"（这正是要防的形状：点名一个已补好的，结果白花一个请求）。
       ⇒ 返回的第三个值 `n_target` 仍是**全库目标行数**（`TARGET_WHERE` 口径，
         不受 `tids` 影响）—— 摘要里那个数是"还剩多少活"，不是"这轮点了几条"
-        （`ERR-META-05`：两个口径不能混）。
+        。
 
       ★ 为什么需要它：批量路的游标是 `tid` 升序，**天然选不到指定行**；
         而"精确补这 3 条"和"每天补一批"是**两个不同的需求**
@@ -243,18 +237,15 @@ def select_batch(limit, tried, retry_failed=False, tids=()):
         # ★ `opencd_added_at` 必须一起选出来 —— 否则入库时传不了发布日期，
         #   那些行就会因为闸门② 的"空 ⇒ 拦"而**永远发不出去**（见 db.py 闸门②）。
         #
-        # ★★ 两个口径**都要**（`ERR-META-05`：不同口径分开报，别混着减）：
         #   · `n_target_all` = `TARGET_WHERE`（**全部**还没补过的，含已上站）
         #     ⇒ 摘要里"还剩多少活"用这个 —— 它与用户脑子里的那个数一致。
         #   · `rows`         = 批量路用的池子：
         #        点名（`tids` 非空）⇒ **仍是 `TARGET_WHERE`**（点名可点 EXISTS 的行，
         #                              因为"显式点名"正是重推的正当路径）
         #        批量（`tids` 空）  ⇒ `PICK_WHERE`（**排除已上站**，不浪费配额）
-        # ★★ `torrent_file` 必须一起选出来（2026-09-28 加）—— 理由见下面
         #    `opencd_ingest.ingest()` 调用点那段：库里已有的路径要**原样带回去**，
         #    否则入库会把它判成"调用方没传" ⇒ `status` 掉成 `NO_TORRENT_FILE`
         #    ⇒ 这条**永远进不了发布队列**（队列第一句就是 `status='SUCCESS'`）。
-        #    ⚠️ 实测（2026-09-28）：全库发布队列是 **0 条**，唯一原因就是这一格。
         _cols = ("info_hash, opencd_tid, status, site_status, torrent_name, "
                  "opencd_added_at, torrent_file")
         n_target_all = conn.execute(
@@ -285,7 +276,6 @@ def select_batch(limit, tried, retry_failed=False, tids=()):
     def key(r):
         tid = str(r["opencd_tid"])
         # ★★ 四级排序，**顺序就是优先级**（见 docstring）：
-        #    ① 未上站（补了**有用**）—— 2026-09-23 深夜新增，现在是第一优先级
         #    ② 有 log（用户点名的批次）  ③ 已落盘（零请求）  ④ tid 确定性升序
         return (0 if (r["site_status"] or "") != "EXISTS" else 1,
                 0 if r["status"] == "SUCCESS" else 1,
@@ -315,7 +305,6 @@ def main():
         description="按 tid 直取详情页、补全皇后行内容（分小批，过 RateGate）")
     ap.add_argument("--apply", action="store_true",
                     help="★ 真抓真入库。不加 = 只读预览（默认）")
-    # ★★ 2026-10-12 补：`--dry-run` 此前**只写在 docstring / compose 示例里**，
     #   argparse 里**根本没有**它 ⇒ `daemon.py` 的 crawl 阶段在
     #   `OPENCD_CRAWL_DRY_RUN=true`（**默认值**）时传 `--dry-run` 会当场
     #   `error: unrecognized arguments: --dry-run` **崩掉整个 crawl 阶段**。
@@ -356,7 +345,6 @@ def main():
         args.limit, tried, args.retry_failed, tids=want_tids)
 
     print(f"\n  目标行数  : {n_target}（口径 = {TARGET_WHERE}）")
-    # ★★ 两个口径**分开报**（`ERR-META-05`：不许混着减）。
     #   ★ 这一行就是那个"浪费配额"bug 的**可见化** —— 修之前，选批池子
     #     等于 `n_target`（399），而其中绝大多数是已上站的无效功。
     print(f"  ★ 其中可补（未上站·补了有用）: {n_pick}"
@@ -399,7 +387,6 @@ def main():
     if not args.apply:
         print("\n" + "=" * 74)
         print("★ 只读预览到此（**没发任何请求、没写库**）。要真跑：")
-        # ★★ 2026-09-23 修：提示行必须**回显用户实际给的全部参数**。
         #   原先写死 `--apply --limit N` —— 用户带 `--tids` 时，照抄这行会
         #   **丢掉点名**、退化成"按优先级批量"，于是**补的是别的行**（静默选错批，
         #   与 `select_batch` 排序键那个坑同族：工具跑得好好的，选中的集合不是要的）。
@@ -433,12 +420,10 @@ def main():
     if not client.cookie:
         sys.exit("❌ 缺 OPENCD_COOKIE（在容器里的 .env 配）")
 
-    # ★★ 2026-09-23 深夜修：**配额满要在发第一个请求之前就优雅退出**。
     #
     #   ★ 起因（实测）：今日已用 51/50 时跑 `--apply`，`check_login()` 里
     #     `gate.acquire()` 抛 `DailyQuotaExceeded` ⇒ 用户看到的是**一坨 traceback**，
     #     而真实语义是「今天额度用完了，明天再来」——**是保护，不是故障**。
-    #     ★ 这是 `ERR-META-01` 的形状：**表现的语义与真实语义不符**。
     #       traceback 会让人以为脚本坏了、去查代码，而正确动作是"明天再跑"。
     #   ⇒ 分两步：
     #     ① 开工前先看**还有没有额度**（`used_day` 与账本比，不发任何请求）
@@ -502,7 +487,6 @@ def main():
         print(f"    转载规则 = {raw!r} → {rule}")
 
         # ★★ 入库（纯本地、零请求）。**把库里已有的 `torrent_file` 原样带回去**
-        #    （2026-09-28 改；原先这里传的是 `None`，见下）。
         #
         #    ★ 原先为什么传 `None`（纪律 5/6 的理由）：那些行的 `.torrent` 在 qB 那边，
         #      而**重建 `.torrent` 会换 announce passkey ⇒ 改 infohash**（严禁）。
@@ -514,7 +498,6 @@ def main():
         #      核不过也**不会**丢路径，只是落 `NO_TORRENT_FILE` + 换一句真话）。
         #      ⇒ infohash 风险为 0（本步不碰种子文件），而 `status` 能保住 `SUCCESS`。
         #
-        #    ★★ 不改这一处的后果（2026-09-28 实测，**这才是真正的代价**）：
         #      每一次 `topup` 补一行，就把那行的 `status` 从 `SUCCESS` 打成
         #      `NO_TORRENT_FILE` ⇒ 补得越多，**发布队列越空**。
         #      现场：全库 `PENDING_PUBLISH_WHERE` = **0 条**，而其中
@@ -522,7 +505,6 @@ def main():
         #      `torrent_file` 也非空 —— 只因 `status` 是 `NO_TORRENT_FILE`
         #      而**全部卡在队列之外**。⇒ 一个"补数据"的工具，
         #      副作用是"把行从队列里踢出去"，而这件事**不报任何错**。
-        #      （`ERR-META-14` 一族：判据与它要服务的对象反了。）
         #
         #    ★ 分寸：**只带库里已有的值，绝不凭空造**。库里为空 ⇒ 仍传 `None`
         #      ⇒ 仍是 `NO_TORRENT_FILE`（那是如实说"我不知道"）。
@@ -558,7 +540,7 @@ def main():
 
     # ── 摘要 ────────────────────────────────────────────────────────────────
     print("\n" + "=" * 74)
-    print("③ ★ 摘要（各口径分开，不混着减 —— ERR-META-05）")
+    print("③ ★ 摘要（各口径分开，不混着减 —— ）")
     print("=" * 74)
     print(f"  本轮选中      : {len(picked)}")
     print(f"  ├ 本地已有    : {stats['cached']}（零请求）")
@@ -566,7 +548,6 @@ def main():
     print(f"  └ 抓取失败    : {stats['failed']}")
     print(f"  今日请求已用  : {gate.used_day}/{gate.max_per_day}"
           f"（本轮开始前 {used_before}）")
-    # ★ 种子量纲：与"请求"分开报（ERR-META-05：两种口径不许混着减）。
     #   来源：`opencd_ingest.ingest()` 在"真的新入库一条"时 +1（kind='seed'）。
     try:
         _today = time.strftime("%Y-%m-%d")
@@ -592,7 +573,7 @@ def main():
     print("④ ★★ 下一步（**本脚本刻意不做**）")
     print("-" * 74)
     print("""  · ★ `status` **不再被本脚本改成 `NO_TORRENT_FILE`**（2026-09-28 修，
-     见 `ERR-DATA-06`）：本步会**把库里已有的 `torrent_file` 原样交回**
+     见 ）：本步会**把库里已有的 `torrent_file` 原样交回**
      ⇒ 那些行的 `status` 保持 `SUCCESS`（库里那列本来就为空的行除外 ——
      那种情况仍落 `NO_TORRENT_FILE`，因为**确实不知道**文件在哪）。
   · `mapped_json`/`artist`/`year`/`transfer_rule` 已经补好了 ⇒

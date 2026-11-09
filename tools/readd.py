@@ -1082,6 +1082,19 @@ def _main_qb(argv=None):
             print(f"      ⚠️  读不出站点种子的 infohash（{why}）")
             print("          ⇒ ★ 加进去也**无法复核**（复核只能按 hash 查）")
             no_hash.append(sid)
+        else:
+            # ★★★ 前置做种状态闸门（幂等拦截）：若已在正常做种，跳过重复添加
+            try:
+                _got_cur = qb.torrents_info(torrent_hashes=new_hash)
+                if _got_cur:
+                    _t_cur = _got_cur[0]
+                    _prog_cur = float(getattr(_t_cur, "progress", 0) or 0)
+                    _st_cur = str(getattr(_t_cur, "state", "") or "")
+                    if _prog_cur >= 1.0 and _st_cur in SEEDING_STATES:
+                        print(f"      ℹ️  已在 qB 正常做种（state={_st_cur} progress={_prog_cur:.2f}）⇒ 跳过重复回加")
+                        continue
+            except Exception as _e_gate:
+                print(f"      ⚠️  预查做种状态失败（继续尝试添加）: {_e_gate}")
         # ★ 参数**只有这三个**：save_path / is_paused / category（照抄 readd_to_qb）
         #   ★★ 绝不传 contentLayout / is_root_folder（docstring ①）
         #   ★★ 绝不传 is_skip_checking（docstring ②）
@@ -1342,10 +1355,17 @@ def _main_crabpt(argv=None):
               f"真 infohash = {new_hash or '（读不出：'+why+'）'}")
         # 已经在做种就不必再加
         if new_hash:
-            got = qb.torrents_info(torrent_hashes=new_hash)
-            if got and got[0].state in SEEDING_STATES:
-                print(f"      ✅ 已在 qB 做种（state={got[0].state}）⇒ 无需回加")
-                continue
+            try:
+                got = qb.torrents_info(torrent_hashes=new_hash)
+                if got:
+                    _t_c = got[0]
+                    _prog_c = float(getattr(_t_c, "progress", 0) or 0)
+                    _st_c = str(getattr(_t_c, "state", "") or "")
+                    if _prog_c >= 1.0 and _st_c in SEEDING_STATES:
+                        print(f"      ✅ 已在 qB 正常做种（state={_st_c} progress={_prog_c:.2f}）⇒ 幂等拦截跳过回加")
+                        continue
+            except Exception as _e_chk:
+                print(f"      ⚠️  预查做种状态失败（继续尝试加回）: {_e_chk}")
         todo.append((r, save_path, content, new_hash, title))
 
     print()

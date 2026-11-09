@@ -1,70 +1,7 @@
-"""
-OpenCD（皇后）抓取层 —— ★ **本项目唯一主动访问别人站点的模块**。
+"""OpenCD 页面抓取层。
 
-═══════════════════════════════════════════════════════════════════════════
-★ 本模块现在只做一件事：**按已知的 tid 抓那一个详情页**
-═══════════════════════════════════════════════════════════════════════════
-      tid（从 VT 库来） → 抓详情页 → 落盘 raw_html/<tid>.html → opencd_ingest 入库
-
-★★ 2026-09-23：**「按种子名称搜索皇后」这条路已被整条删除**（用户决定）。
-   删除的是：`search_candidates()` / `match_by_name()` / `run_from_qb()` /
-   `qb_torrents()` / `--from-qb` / `--search` / `--max-candidates`。
-
-   **为什么删**（三条都是实测，不是"觉得不好"）：
-     ① **贵** —— 一条 2~3 请求（搜索 1 + 验候选 1~5 + 详情页 0~1），
-        而 `OPENCD_MAX_PER_DAY` 当时只有 50（**请求**量纲；现已是 **500**）。
-     ② **会搜错** —— 实测搜「齐秦 - 我拿什么爱你」返回 **2 条**
-        （FLAC 分轨 / WAV 整轨），名字几乎相同 ⇒ 取第一条就发错种子。
-        根因：搜索是**子串匹配**，而 qB 名字是第一阶段为 Musopia 生成的
-        （带 `[FLAC]` / `(2001)`），与皇后标题 `艺人 - 专辑 年份 - 格式 分軌`
-        **天然不同** ⇒ 命中率极低而误配风险高。
-     ③ **抓了也发不出去** —— 那条路传 `qb_seed_days=None` ⇒ 每行落
-        `NOT_SEEDED` ⇒ 卡在发布队列闸门①（`status='SUCCESS'`）。
-
-   **现在的 id 从哪来**：`sync_opencd_tid.py` —— 读**另一个项目**（vertex2）的库，
-   按 **`info_hash`**（内容哈希，不可伪造）配对出皇后的 `details.php?id=`。
-   实测命中 **430/547**，而按 `torrent_name` 只有 **1/547**。
-   ★ 它**零请求**（不 import `requests`、不 import 本模块），是唯一"不抓页面就能拿到 id"的路。
-
-   ★★ **id 和页面内容是两件事**（别混）：VT 只给**页面编号**，不给页面内容。
-      而摘要里那些字段（转载规则 / 标签 / 媒介 / 製作組 / 艺术家 / 年份）**只存在于页面上**，
-      `db.PENDING_PUBLISH_WHERE` 的闸门③④ 正是因此存在。
-      ⇒ 拿到 id 之后**仍然必须抓页面**，那件事由 `topup_opencd_fields.py` 做。
-
-═══════════════════════════════════════════════════════════════════════════
-频率控制（★ 用户反复强调；三道闸门见 `opencd_rate.py`）
-═══════════════════════════════════════════════════════════════════════════
-  · 阶段周期（多久跑一轮）→ `daemon.py` 管，本模块不管
-  · 每轮预算 / 每日上限 / 最小间隔 → 全部过 `RateGate`（**每个请求都要过**）
-  · 详情页**抓过就跳** —— 这才是真正省请求的机制（不是把间隔调大）
-
-★ 2026-09-19 调整（用户要求）：每请求最小间隔 **2s → 120s**；
-  每日上限 **300 → 50**。
-★★ 2026-10-12 调整（用户要求）：每日上限 **50 → 500**（**请求**量纲；站点允许）。
-  ★ 最小间隔 120s **保持不变**（站点礼仪，另需批准）。
-✅ 2026-09-22：**跨轮持久计数已接线** —— 主流程构造 `RateGate` 时传 `ledger=_DbLedger()`，
-  计数落在 `data.db` 的 `opencd_quota` 表里 ⇒ 「每日 50」从"每轮 50"变回**真的每日 50**。
-★ 2026-09-23 量纲订正：删掉名称搜索后，**一条种子 = 1 个请求**（只抓详情页）
-  ⇒ `OPENCD_MAX_PER_DAY=50` 现在约等于 **50 个页面/天**，不再是旧的
-  "2~3 请求/种子 ⇒ 约 17~25 个/天"。（`opencd_rate.py` 的「已知缺口」① 仍记着
-  "请求 vs 种子"这个量纲问题本身 —— 那是账本层面的事，与本条订正不冲突。）
-
-═══════════════════════════════════════════════════════════════════════════
-用法
-═══════════════════════════════════════════════════════════════════════════
-    python crawl.py --tid 200610           # 主动抓：指定 id
-    python crawl.py --url <详情页URL>       # 主动抓：指定 URL
-    python crawl.py --tid 200610 --info-hash <40hex>   # 指定 id 并入库
-
-★★ **批量抓由 `topup_opencd_fields.py` 做**，不是本模块 —— 它负责"选哪几条、
-   台账去重、把 `fetch_detail` + `opencd_ingest` 按批串起来"。本模块只提供
-   **一个出网原语**（`fetch_detail`）。
-
-★★ 关于 `--dry-run`：本模块的 `--tid` / `--url` 路**本就不写库**（除非显式给
-   `--info-hash`），`client.dry_run=True` 时会跳过入库并只打日志。
-   ★ 历史教训（`ERR-META-01`）：`run_from_qb` 那条已删除的路上，`--dry-run`
-   曾**真的把每个待抓详情页都敲一遍** —— docstring 说"不发请求"而实际发了。
-   现在剩下的这条路没有"待抓循环"，不存在那个形状。
+提供通过已知 tid 获取详情页 HTML 的出网原语（fetch_detail），
+配合 RateGate 速率与每日限额控制，将详情页缓存至 raw_html/<tid>.html。
 """
 import argparse
 import os
@@ -92,17 +29,7 @@ RAW_DIR = os.getenv("OPENCD_RAW_DIR", os.path.join(config.DATA_DIR, "raw_html"))
 # ==================== 配额账本适配器 ====================
 
 class _DbLedger:
-    """
-    把 `db.ledger_get/ledger_add` 适配成 `RateGate` 要的鸭子类型接口。
-
-    ★ 为什么适配器在这里、不在 `opencd_rate.py`：
-      `opencd_rate.py` 刻意保持**零项目内依赖**（只 import stdlib），这样它的
-      闸门逻辑能被脱离 `.env`/`DATA_DIR` 单独测（`python opencd_rate.py --selftest`）。
-      在那边 `import db` 会把 `config.require_env(...)` 的副作用（缺 .env 直接
-      `sys.exit`）带进去 ⇒ 那条自检就再也跑不起来了。
-    ★ 为什么不在 `db.py` 里直接做成一个类：`db.py` 是**纯数据层**，不该知道
-      `RateGate` 的接口长什么样。放这里 = 依赖方向正确（crawl 同时知道两边）。
-    """
+    """将 db.ledger_get/ledger_add 适配为 RateGate 所需接口。"""
 
     def __init__(self, kind=db.LEDGER_KIND_REQUEST):
         self.kind = kind
@@ -117,28 +44,10 @@ class _DbLedger:
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-# ==================== 默认频率参数（可用 .env 覆盖） ====================
-# ★ 2026-09-19 调整（用户要求）：最小间隔 2s → **120s**；每日上限 300 → **50**。
-# ★★ 量纲（2026-09-23 订正）：`OPENCD_MAX_PER_DAY` 是**请求**量纲。
-#    删除名称搜索后**一条种子 = 1 个请求**（只抓详情页，抓过的还跳过）
-#    ⇒ `OPENCD_MAX_PER_DAY=50` 现在约等于 **50 个页面/天**。
-#    ★ 旧的"2~3 请求/种子 ⇒ 约 17~25 个/天"是**名称搜索时代**的比例，已作废。
-#    ★ 但"请求 vs 种子"这个**账面**量纲问题本身仍在 —— 见 `opencd_rate.py`
-#      模块头「已知缺口」①（想按种子卡要在入库那步记 kind='seed'），
-#      **别读成已解决**。
+# 默认频率与配额参数（支持通过环境变量覆盖）
 DEFAULT_MAX_PER_ROUND = int(os.getenv("OPENCD_MAX_PER_ROUND", "20"))
 DEFAULT_MIN_INTERVAL = float(os.getenv("OPENCD_MIN_INTERVAL", "120"))
-# ★★ 2026-10-12 调整（用户要求）：每日上限 50 → **500**（量纲 = **请求**/天）。
-#    依据：站点每天允许搜 500 次，用户明确"一天能搜 500 个，把限制改一下"。
-#    ★ `min_interval`(120s) **不动** —— 那是站点礼仪，放宽需用户另批
-#      （500×120s=16.7h，一天发不完 500 个；实际由 `DailyQuotaExceeded` 早收工，
-#      不是每轮都顶格跑）。注意本模块是唯一源头，其余脚本都从这两个常量兜底读。
 DEFAULT_MAX_PER_DAY = int(os.getenv("OPENCD_MAX_PER_DAY", "500"))
-# ⚠️ 原来这里还有个 DEFAULT_INTERVAL（OPENCD_INTERVAL，阶段周期）—— 已删。
-#   ★ 它**零消费者**：抓取节奏是 `daemon.py` 的事（本模块 :20-21 自己就这么写），
-#     而 crawl 还没接进 daemon ⇒ 这个值从来没人读过。
-#     留一个"调了没效果"的旋钮，比没有这个旋钮更糟（`opencd_rate.py` 的 reset_round()
-#     那条注释是同一个道理）。
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -157,18 +66,9 @@ class Client:
     def __init__(self, cookie=None, gate=None, dry_run=False):
         self.base = (os.getenv("OPENCD_URL", "https://open.cd")).rstrip("/")
         self.cookie = cookie or os.getenv("OPENCD_COOKIE", "")
-        # ★ 2026-09-19：**删掉**原来这里的 `gate or RateGate(...)` 兜底。
-        #   那个兜底造的 gate **没有 day_key** ⇒ 「每日上限」静默失效
-        #   （`roll_day()` 永远不会清零，`_day_key=None` 与任何日期都不等）。
-        #   「有个看起来能跑的兜底」比「必须显式传」危险得多 ——
-        #   同"密钥不留默认值"的推理（见 `config.py`：「不留看起来能跑的默认值」）。
-        #   ★ 零影响已核实：自检 5 处 `crawl.Client(...)` 全都显式传 `gate=`。
+        # 必须显式传入已绑定 day_key 的 RateGate 实例
         if gate is None:
-            raise ValueError(
-                "Client 必须显式传 gate=（RateGate 实例）。"
-                "不传时闸门没有 day_key，「每日上限」会静默失效 —— "
-                "频率控制是本条流水线最要紧的纪律，不允许有绕过它的路径。"
-            )
+            raise ValueError("Client 必须显式传 gate=（RateGate 实例）")
         self.gate = gate
         self.dry_run = dry_run
         self.sess = net.new_session()
@@ -375,7 +275,7 @@ def main():
     # ★ 2026-09-23 订正：旧的"一种子 ≈ 2~3 请求 ⇒ 折合约 17~25 个种子/天"是
     #   **名称搜索时代**的比例。删除名称搜索后**一条 = 1 个请求**（只抓详情页，
     #   抓过的还跳过）⇒ 必须重报，否则运维照旧比例估产能会**低估一倍**
-    #   （`ERR-META-04`：改了行为却不改文档）。
+    #   。
     log(f"   ★ 折算：一条种子 = **1 个请求**（只抓详情页）⇒ "
         f"约 {gate.max_per_day} 个页面/天。")
     log(f"   ✅ 跨轮持久已启用：当日已用 {gate.used_day}/{gate.max_per_day}（账本 "
@@ -386,7 +286,7 @@ def main():
     try:
         _seeds = db.ledger_get(day_key, kind=db.LEDGER_KIND_SEED)
         log(f"   📦 今日**种子**入库：{_seeds} 条"
-            f"（kind='seed'，与上面的请求账**分开**；ERR-META-05）")
+            f"（kind='seed'，与上面的请求账**分开**；）")
     except Exception as e:                                      # noqa: BLE001
         log(f"   📦 今日种子入库：读账本失败（{type(e).__name__}）")
 

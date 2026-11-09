@@ -40,15 +40,15 @@ qBittorrent(:3020, 分类 opencd)
 | 我卡住了（页面没图 / 记录被跳过 / 容器 unhealthy） | **排障** |
 | 搞清调度为什么是单容器 | **为什么是单容器 + 自研调度** |
 | **下一步该做什么** | **当前状态与下一步** |
-| 想看踩过哪些坑、根因是什么 | **ERRATA.md**（`ERR-*` 表：一句话教训 + 根因） |
+| 想看踩过哪些坑、根因是什么 | [`AGENTS.md`](file:///D:/Projects/PT-Project/opencd2others/AGENTS.md)（§6 全局教训与 ERR-* 规则库） |
 | **想知道各种数现在是多少** | **`counts.json`**（自动生成，别手改；`python tools/gen_counts.py` 重新生成）|
 
 > **两份文档 + 一份生成物怎么分工**：
 > **README = 操作手册**（唯一事实源：命令、步骤、症状→解法、为什么这么做）；
-> **ERRATA.md = 教训索引**（每条坑一个 `ERR-*` 可检索 ID + 根因，**只有表、不含日期进度数字**）；
+> [`AGENTS.md`](file:///D:/Projects/PT-Project/opencd2others/AGENTS.md) = 规范与教训索引（集成 153 条 `ERR-*` 规则表）；
 > **`counts.json` = 会动的量的真值**（自检项数、库条数、各阶段周期、白名单…全部自动采集）。
 > ★ **会动的数字一律不进散文** —— 它就住在 `counts.json` 里，由 `python tools/gen_counts.py` 生成。
-> 这条纪律的由来见 `ERRATA.md` 的 `ERR-META-03`（"投影重抄了事实源的口径"）。
+> 这条纪律的由来见 `AGENTS.md` 的 `ERR-META-03`（"投影重抄了事实源的口径"）。
 
 ---
 
@@ -97,7 +97,7 @@ opencd2others/                      # NAS 部署目录（compose 就放这里，
 └─ counts.json                      # ★自动生成：会动的量的真值（不上生产，**永不手改**）
 ```
 
-> ★ **生产端不收源码 / `tools/` / `Dockerfile` / `ERRATA.md` / `SESSION-NOTES.md` /
+> ★ **生产端不收源码 / `tools/` / `Dockerfile` /
 > `counts.json` / 探测脚本** —— 那些只在本机。哪些会进镜像由 `Dockerfile` 的 `COPY` 行决定；
 > `tools/build-preflight.sh` 在构建前反查它（见「构建与部署」）。
 > ★ **生产端不是 git 仓库**（`.git` 只在本机），别在生产端跑 git。
@@ -136,7 +136,7 @@ opencd2others/                      # NAS 部署目录（compose 就放这里，
 机器上拿不到 commit 信息，就 WARN 一句。
 ⇒ **处置：接受它。** 它不是错误、不影响构建结果（构建成功、镜像生成、容器运行都正常），
 后果仅止于"镜像里少几条 commit 标签"这类元数据。**别再为它改代码或加开关。**
-（教训见 `ERRATA.md` 的 `ERR-DOCKER-07`。★ 这条比那行 WARN 更值钱的是**过程**：
+（教训见 `AGENTS.md` 的 `ERR-DOCKER-07`。★ 这条比那行 WARN 更值钱的是**过程**：
 "读起来很像原因"的东西被当成了原因，写进了三处注释和文档 —— `ERR-META-01` 那一族，
 **判据要拿已知样本校验一次**。）
 
@@ -722,6 +722,11 @@ docker compose --profile tools run --rm tools \
 没有这条防呆，**一条永远失败的记录就能把 daemon 变成每 60 秒敲一次站点**，
 比定时轮询还糟。
 
+**5. 交棒调度（Handoff）退避防霸占与优先级流转。**
+发种器（3010 实例）仅作为 SSD 临时缓冲区。出种 ≥ 3 人或做种满 3 天后交棒至 HDD 音乐库（music1:3220 或 music2:3240）并清理 3010 缓存。
+若处于 PENDING 的条目尚未达标（如做种未满 3 天且未达 3 人），调度器会计算预计达标时间写回 
+ext_check_at（至少退避 1 小时），杜绝未达标种子霸占每轮前 N 个候选配额；调度优先推进在途校验态（HANDOFF_ADDED/HANDOFF_RECHECK）与就绪态，保证流水线持续畅通。
+
 ---
 
 ## 改完代码怎么测（Docker）
@@ -936,7 +941,7 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
   索引里本来就是 LF，所以这一步**不产生 commit**。未跟踪的 `.env` / `data.db` 不受影响。
 - **2026-09-14 文档机制建成**：`README`（操作手册）+ `ERRATA.md`（`ERR-*` 教训表）。
   ★ **2026-09-22 重构**：原 `SUMMARY.md`（DEBUG 层）/ `ENVIRONMENT.md`（检索层）**已删除** ——
-  它们的维护成本全在「同一事实抄好几份且互不联动」（见 `ERRATA.md` 的 `ERR-META-03`）。
+  它们的维护成本全在「同一事实抄好几份且互不联动」（见 `AGENTS.md` 的 `ERR-META-03`）。
   现在：**会动的数字 → `counts.json`**（`python tools/gen_counts.py` 生成，**永不手改**）；
   **教训 → `ERRATA.md`**；**操作事实 → 本文件**。同一事实仍然只在一处维护。
 - **2026-09-14 `tools/doc-audit/` 只读投影建成**（headings / refs / terms / probes + 基线快照）。
@@ -962,7 +967,7 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
 - **2026-09-14 调度改动已上生产**（见「有变更就连续跑」）。
 - **2026-09-14 `publish` 已关闭**（NAS `.env` 的 `ENABLE_PUBLISH=false`，`18:55` 生效），
   止住「权限抖动时每 30 分钟一轮无效 POST」。三个时刻与复核判据见
-  **`ERRATA.md` 的 `ERR-SITE-01`**。
+  **`AGENTS.md` 的 `ERR-SITE-01`**。
 - **✅ 2026-09-24 `publish` 已恢复（自动发布首次真正跑起来）** —— 上面那条「已关闭」
   **是历史**，不是现状。当天做了三件事，顺序**不可颠倒**（次序本身是一条纪律）：
   1. **上代码**（`deploy.sh --apply`）：`publish.py` 加第二把钥匙 + `daemon.py` 改传 `--auto`；
@@ -986,7 +991,7 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
    上线并重建镜像。
    ★ ~~但**功能尚未启用**：`ENABLE_PUBLISH=false` 还没恢复 ⇒ 这个退避语义
    **要等 publish 重新启用才真正起作用**~~ ⇒ **2026-09-24 已启用，本措辞作废**
-   （见上面那笔）。完整归因见 **`ERRATA.md` 的 `ERR-SITE-01`**（已同步订正）。
+   （见上面那笔）。完整归因见 **`AGENTS.md` 的 `ERR-SITE-01`**（已同步订正）。
 2. **★ 把提交前的凭据扫描落成 `tools/` 里的脚本。**
    同一个扫描**已经手写过两次**，2026-09-14 那次还被 `ERR-OS-01`（GBK 控制台编不出某些字符）
    当场打断。本项目对这类东西有现成原则：**不做会各自漂的拷贝**
@@ -1006,7 +1011,7 @@ docker compose --profile tools run --rm tools python update_metadata.py 14611 --
      ```
    ★ 那句「先确认站方权限确实通了，否则会白等一轮退避」**已由本轮实测兑付**：
    3 条实发全成功（见本节末那笔），站方权限当时是通的。
-   恢复条件见 **`ERRATA.md` 的 `ERR-SITE-01`**。
+   恢复条件见 **`AGENTS.md` 的 `ERR-SITE-01`**。
 4. **✅ 已了结（2026-09-19）：NAS 上的 `README.md` 已对齐。**
    原条目写的是「`deploy.sh` **不带**它（白名单 = `Dockerfile` 的 `COPY` 行）」——
    ★ **这句是错的**：实测 `deploy.sh` 的 `FILES` 白名单里**有** `README.md` 与

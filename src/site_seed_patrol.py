@@ -29,7 +29,7 @@ C 类"页面 0 做种"的根因（`#36`/`#43`/`#44` 实测钉死，见 `.scratch
   ★ 名字同理：只作旁证，不作命中（同专辑多版本共享 `info.name`，`#136` 的形态）。
 
 ═══════════════════════════════════════════════════════════════════════════
-★★ 三态（"查不到" ≠ "没在做种"，`ERR-META-14` 的形状）
+★★ 三态（"查不到" ≠ "没在做种"， 的形状）
 ═══════════════════════════════════════════════════════════════════════════
     · `NO_SITE_TORRENT` —— 有没有 B 都没**定论**：缺 `torrent_id` / 下载失败 / 站点壳页。
                              ★ **不是** MISSING（绝不许把"不知道"记成"丢了"）。
@@ -149,14 +149,16 @@ def _find_in_qb(qb, b_ih, info_name, *, own_categories=None, qb_list=None):
 
 
 def patrol_row(row, *, download=None, qb_3020=None, qb_3040=None,
-               own_categories=None, qb_list=None, site_verify_mod=sv):
+               own_categories=None, qb_list=None, site_verify_mod=sv, qb_extra=None,
+               qb_publish=None):
     """巡检**一条** `site_publish`(EXISTS) 行。只读。返回结果 dict（**不抛**）。
 
     :param row: dict，至少含 `site`/`info_hash`/`torrent_id`/`db_name`（见 `iter_exists_rows`）。
     :param download: `callable(torrent_id) -> bytes|None` —— 从站点下 B 的字节。
       ★ 自检传假件；生产由 `tools/check_site_seeding.py` 传对应站点客户端的 `download_torrent`。
       ★ 为 `None` ⇒ 直接 `NO_SITE_TORRENT`（没 B 可查）。
-    :param qb_3020, qb_3040: 两个 qB 连接（任一可 `None`）。
+    :param qb_3020: 皇后原种库客户端（3020/music3）。
+    :param qb_publish / qb_3040: 发种实例客户端（目标做种端，生产实值 = 3010）。
     :param own_categories: 本项目分类白名单；`None` ⇒ `config.HANDOFF_OWN_CATEGORIES`。
       ★ 只有 `None`（**未显式传集合**）时才 import config —— 自检显式传 ⇒ 不碰 `.env`。
     :param qb_list: `callable(qb) -> list` —— 取某 qB 的全表种（**默认 `qb.torrents_info()`**）。
@@ -213,12 +215,15 @@ def patrol_row(row, *, download=None, qb_3020=None, qb_3040=None,
         return res
     res["b_ih"] = b_ih
 
-    # ③ 在两个 qB 里找"本项目名下的 B"
+    # ③ 在 qB 里找"本项目名下的 B"
+    #    ★ 统一做种端：qb_publish 为生产发种目标实例（3010），qb_3020 为原种库。
     if own_categories is None:
         import config
         own_categories = getattr(config, "HANDOFF_OWN_CATEGORIES", None)
+    target_pub = qb_publish if qb_publish is not None else qb_3040
+    clients = [("3020", qb_3020), ("3010", target_pub)] + list(qb_extra or [])
     hits = []                      # [(which, torrent, how)]
-    for which, qb in (("3020", qb_3020), ("3040", qb_3040)):
+    for which, qb in clients:
         if qb is None:
             continue
         try:
@@ -226,6 +231,12 @@ def patrol_row(row, *, download=None, qb_3020=None, qb_3040=None,
                                   qb_list=qb_list)
         except Exception as e:                                # noqa: BLE001
             # ★ qB 连不上 ⇒ **抛**（环境问题），绝不折成行判定（否则假报 MISSING/NO_SITE_TORRENT）
+            # ★ 扩展实例（`qb_extra`）除外：它是**加严**而非基线，连不上时只跳过该实例，
+            #   不能因为一个可选实例挂了就把整轮巡检作废。
+            if which not in ("3020", "3010", "3040"):
+                res["note"] = (res.get("note") or "") + \
+                    f" [扩展实例 {which} 查询失败，已跳过: {type(e).__name__}]"
+                continue
             raise RuntimeError(f"查 {which} 的种列表失败：{type(e).__name__}: {e}") from e
         for t in ms:
             hits.append((which, t, how))
@@ -439,7 +450,7 @@ def _selftest():
                    qb_3040=_FakeQB([_FakeT("Album X")]),
                    own_categories={"Musopia"})
     chk("⑨ 3020+3040 各一条 ⇒ AMBIGUOUS", r["verdict"], AMBIGUOUS)
-    chk("⑨ found_in 两站", r["found_in"], ["3020", "3040"])
+    chk("⑨ found_in 两站", r["found_in"], ["3020", "3010"])
 
     # ── ⑩ 旁证：hash 命中但分类是"外分类" ⇒ how 标出来（提示分类被人改过）──
     qb10 = _FakeQB([_FakeT("Album X", category="SomeOther")])

@@ -1,28 +1,11 @@
-"""
-OpenCD（皇后）详情页 HTML 脱敏 —— 让页面样本可以安全进仓库。
+"""HTML 详情页脱敏工具。
 
-为什么需要它（2026-09-19 实测，不是推断）：
-    从皇后「另存为」下来的**详情页 HTML 里带真凭据**。实测两份样本各有：
-      · 2 处 passkey（`download.php?id=…&passkey=<32位十六进制>`）—— ★ 与 .env 同级的泄露面
-      · 登录用户名（会员态横幅 + 感谢按钮）
-      · 会员隐私读数（分享率 / 上传量 / 下载量 / 魔力值 / 邀请 / H&R）
-    `opencdhtml/` 因此在 `.gitignore` 里默认忽略，只有**脱敏后**的样本才进仓库
-    （`opencdhtml/sanitized/`，那是反忽略的例外）。纪律同 README「安全」。
+用于清除抓取的原始 HTML 页面中的敏感凭据与隐私数据，包括：
+  - 下载链接与请求参数中的 passkey（32 位十六进制字符串）；
+  - 登录用户名与用户 ID 链接；
+  - 会员个人读数（分享率、上传量、下载量、魔力值、邀请数、H&R 计数等）。
 
-用法:
-    python opencd_sanitize.py                  # 脱敏 opencdhtml/*.html → opencdhtml/sanitized/
-    python opencd_sanitize.py --check          # 只检查：报告每个文件还有几处敏感串（不改文件）
-    python opencd_sanitize.py --in X --out Y   # 单文件
-
-★ 设计纪律（两条，都来自本项目的既有教训）：
-  1. **按值的形状抹，不只按键名。** 抄 `tools/doc-audit/audit.py`（原 `04_probes.py`）的 `redact()` ——
-     按 key 名匹配会漏掉「嵌在 URL / 文本里的」凭据（passkey 就是这样：它出现在
-     `download.php` 的 query 里，不在任何叫 passkey 的字段里）。
-  2. **脱敏必须可验证，且要验两个方向。** 一个「永远说没问题」的检查器比没有更危险
-     （`ERRATA.md` 的 `ERR-META-01`）。所以：
-       · `--check` 与脱敏后自检**共用同一份模式表**（不重抄一份会漂的）；
-       · 另配 `--selftest`，**先拿一个确知含凭据的样本证明它抓得到**，
-         再拿脱敏结果证明它抓不到 —— 两个方向都验过才算数。
+支持按形状模式脱敏、静态合规检查（--check）以及双向离线自检（--selftest）。
 """
 import argparse
 import os
@@ -31,19 +14,13 @@ import sys
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-# ★ 2026-10-06：源码已移进 `src/`，但 `opencdhtml/`（资产）仍在**仓库根**。
-#   故不能直接用 `dirname(__file__)` 当资产根：`<此目录>/opencdhtml` 在就用它
-#   （容器内 /app 平铺），否则取上一级（本机 `src/` → 仓库根）。
+# 解析样本目录路径：优先检查当前目录，否则回退到父目录
 _HERE = os.path.dirname(os.path.abspath(__file__))
 HERE = _HERE if os.path.isdir(os.path.join(_HERE, "opencdhtml")) else os.path.dirname(_HERE)
 DEFAULT_IN = os.path.join(HERE, "opencdhtml")
 DEFAULT_OUT = os.path.join(DEFAULT_IN, "sanitized")
 
-# ★ 样本改名表：原名是「另存为」时浏览器给的，又长又含种子信息、还不能当稳定引用。
-#   改成**语义名** —— 名字本身就把「验收判据」写出来了（第 1、2 步要用）：
-#     sample-zhuanzai-jinyong.html   → 轉載規則 = 禁止轉載 ⇒ 裁决必须 DENY
-#     sample-zhuanzai-huanying.html  → 轉載規則 = 歡迎轉載 ⇒ 裁决必须 ALLOW
-#   ★ 新增样本时在这里加一行，别改已入库的名字（否则 --selftest 与文档的引用会断）。
+# 原始页面文件名到标准化样本文件名的映射表
 RENAME_MAP = {
     "OpenCD __ 種子詳情 _郭凤女、何华栈 - 魂断乌江（粤曲对唱） 2000 - WAV 整軌 - alin13788_.html":
         "sample-zhuanzai-jinyong.html",
