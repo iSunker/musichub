@@ -273,7 +273,7 @@ def iter_exists_rows(conn, *, site=None, torrent_id=None, info_hash=None, limit=
     ★ 与 `#38`/`verify_hosted_edition` 同口径：`status='EXISTS' AND torrent_id 非空`。
     """
     import db
-    sites = [site] if site else [db.SITE_MUSOPIA, db.SITE_CRABPT]
+    sites = [site] if site else [db.SITE_MUSOPIA, db.SITE_CRABPT, db.SITE_XINGWAN]
     out = []
     for st in sites:
         sql = (

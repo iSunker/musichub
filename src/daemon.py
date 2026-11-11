@@ -126,6 +126,19 @@ def build_stages():
             "interval": env_int("PTER_INTERVAL", 1800),
         })
 
+    # 星湾（xingwan.cc）：第四发布站点，仅每天 00:00-10:00 参与发种
+    if env_bool("ENABLE_PUBLISH_XINGWAN", False):
+        cmd = (["python", "publish.py", "--site", "xingwan"]
+               + apply_flag("--yes", "--auto"))
+        n = env_int("XINGWAN_MAX_PER_CYCLE", 1)
+        if n:
+            cmd += ["--limit", str(n)]
+        stages.append({
+            "name": "publish_xingwan",
+            "cmd": cmd,
+            "interval": env_int("XINGWAN_INTERVAL", 1800),
+        })
+
     # 3) 回填 site_torrent_id。编辑的前置条件，频率可以很低。
     if env_bool("ENABLE_SYNC", True):
         stages.append({
@@ -166,6 +179,25 @@ def build_stages():
             # 探针调度：有待办时使用 cooldown 间隔快速重跑，清零后恢复常规周期
             "pending": db.count_stale,
             "cooldown": env_int("EDIT_COOLDOWN", 60),
+        })
+
+    # 5b) 星湾页面编辑（独立站点、独立 cookie；默认关闭）
+    if env_bool("ENABLE_EDIT_XINGWAN", False):
+        cmd = (["python", "update_metadata.py", "--site", "xingwan", "--stale-only"]
+               + apply_flag("--apply", "--yes"))
+        n = env_int("EDIT_XINGWAN_MAX_PER_CYCLE", 100)
+        if n:
+            cmd += ["--limit", str(n)]
+        if env_bool("EDIT_VERIFY", True):
+            cmd.append("--verify")
+        cmd += ["--interval", str(env_int("EDIT_REQUEST_INTERVAL", 2))]
+        rate = env_int("EDIT_RATE_PER_MIN", 10)
+        if rate > 0:
+            cmd += ["--rate", str(rate)]
+        stages.append({
+            "name": "edit_xingwan",
+            "cmd": cmd,
+            "interval": env_int("EDIT_XINGWAN_INTERVAL", 21600),
         })
 
     # 6) VT 回填：从外部数据库按 infohash 同步详情页 ID（tasks.opencd_tid）
@@ -321,6 +353,9 @@ ENV_SNAPSHOT_KEYS = (
     "EDIT_INTERVAL", "VTID_INTERVAL", "RSS_TID_INTERVAL", "CRAWL_INTERVAL",
     "ENABLE_PUBLISH_CRABPT", "CRABPT_INTERVAL", "CRABPT_MAX_PER_CYCLE",
     "ENABLE_PUBLISH_PTER", "PTER_INTERVAL", "PTER_MAX_PER_CYCLE",
+    "ENABLE_PUBLISH_XINGWAN", "XINGWAN_INTERVAL", "XINGWAN_MAX_PER_CYCLE",
+    "XINGWAN_PUBLISH_WINDOW", "XINGWAN_URL",
+    "ENABLE_EDIT_XINGWAN", "EDIT_XINGWAN_INTERVAL", "EDIT_XINGWAN_MAX_PER_CYCLE",
 )
 
 
@@ -438,18 +473,31 @@ def _parse_publish_window(spec):
         return None
 
 
-def in_publish_window(now=None):
-    """当前是否处于 `PUBLISH_WINDOW` 允许发种的时段内。缺省/非法 ⇒ 永远 True。"""
-    win = _parse_publish_window(os.getenv("PUBLISH_WINDOW"))
-    if win is None:
-        return True
-    start, end = win
+def in_publish_window(now=None, extra_spec=None):
+    """当前是否处于允许发种的时段内。缺省/非法 ⇒ 永远 True。
+
+    全局 `PUBLISH_WINDOW` 生效后，再叠加 `extra_spec`（如星湾的 00:00-10:00）——
+    两者都放行才放行；`extra_spec` 为 None 时行为与旧版完全一致。
+    """
+    specs = [os.getenv("PUBLISH_WINDOW")]
+    if extra_spec is not None:
+        specs.append(extra_spec)
+
     dt = datetime.fromtimestamp(now if now is not None else time.time())
     cur = dt.hour * 60 + dt.minute
-    if start <= end:
-        return start <= cur < end
-    # 跨零点：如 22:00-06:00
-    return cur >= start or cur < end
+    for spec in specs:
+        win = _parse_publish_window(spec)
+        if win is None:
+            continue
+        start, end = win
+        if start <= end:
+            ok = start <= cur < end
+        else:
+            # 跨零点：如 22:00-06:00
+            ok = cur >= start or cur < end
+        if not ok:
+            return False
+    return True
 
 
 def _wait_seconds(stage, st, n_fail, max_backoff, pending_now):
@@ -717,6 +765,7 @@ def _drain_pending_readds():
                 save_path=it.get("save_path") or "",
                 is_paused=False,
                 category=it.get("category") or "",
+                tags=it.get("tags") or None,
             )
             done.append(it)
             log(f"✅ [readd] 延迟到点，已回加 qB（{note}）")
@@ -956,6 +1005,7 @@ def _seed_patrol_build_clients():
     from musopia import MusopiaClient
     from crabpt_site import CrabptClient
     from pter_site import PterClient
+    from xingwan_site import XingwanClient
     cfg3020 = types.SimpleNamespace(
         QB_HOST=HANDOFF_HOST_3020,
         QB_USER=getattr(config, "QB_USER", "admin"),
@@ -965,11 +1015,14 @@ def _seed_patrol_build_clients():
     )
     qb_3020 = qb_client.build(cfg3020)
     qb_3040 = qb_client.build(config)
-    sites = {db.SITE_MUSOPIA: MusopiaClient(), db.SITE_CRABPT: CrabptClient(), db.SITE_PTER: PterClient()}
+    sites = {db.SITE_MUSOPIA: MusopiaClient(), db.SITE_CRABPT: CrabptClient(),
+             db.SITE_PTER: PterClient(), db.SITE_XINGWAN: XingwanClient()}
     cats = {db.SITE_MUSOPIA: getattr(config, "PUBLISH_CATEGORY", None),
             db.SITE_CRABPT: getattr(config, "CRABPT_PUBLISH_CATEGORY", None),
-            db.SITE_PTER: getattr(config, "PTER_PUBLISH_CATEGORY", None)}
-    return qb_3020, qb_3040, sites, cats
+            db.SITE_PTER: getattr(config, "PTER_PUBLISH_CATEGORY", None),
+            db.SITE_XINGWAN: None}          # ★ 星湾不建分类，只打标签（见 tags）
+    tags = {db.SITE_XINGWAN: getattr(config, "XINGWAN_PUBLISH_TAG", None)}
+    return qb_3020, qb_3040, sites, cats, tags
 
 
 def _seed_patrol_retry(fn, *, tries=3, delay=2):
@@ -1027,7 +1080,7 @@ def _drain_seed_patrol():
         return
 
     try:
-        qb_3020, qb_3040, sites, cats = _seed_patrol_build_clients()
+        qb_3020, qb_3040, sites, cats, tags = _seed_patrol_build_clients()
     except Exception as e:                                          # noqa: BLE001
         log(f"⚠️  [patrol] build 客户端失败，跳过本轮: {type(e).__name__}: {e}")
         return
@@ -1162,10 +1215,12 @@ def _drain_seed_patrol():
 
         # 3) 核对无误后入队，带上完整 src_path 与 album
         cat = cats.get(r["site"]) or ""
+        site_tag = tags.get(r["site"]) or ""
         try:
             readd_queue.enqueue(r["_raw"], config.PUBLISH_SAVE_ROOT, cat, 1,
                                 note=f"patrol 加回 {r['site']} id={r['torrent_id']}",
-                                src_path=src_path, album=album)
+                                src_path=src_path, album=album,
+                                tags=[site_tag] if site_tag else None)
             enq += 1
         except Exception as e:                                      # noqa: BLE001
             log(f"  ⚠️ [patrol] 入队失败 {note}: {type(e).__name__}: {e}")
@@ -1368,9 +1423,20 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
             last = st.get("last_run", 0) or 0
 
             # 发种时间窗口拦截：仅对发布阶段生效，窗口外不更新 last_run
-            if name in ("publish", "publish_crabpt", "publish_pter") and not in_publish_window(now):
+            # ★ 星湾额外叠加自己的 XINGWAN_PUBLISH_WINDOW（默认 00:00-10:00），
+            #   其它三站不受影响 —— 全局 PUBLISH_WINDOW 仍照旧叠加。
+            _win_kw = {}
+            if name == "publish_xingwan":
+                _win_kw["extra_spec"] = getattr(config, "XINGWAN_PUBLISH_WINDOW", "00:00-10:00")
+            if name in ("publish", "publish_crabpt", "publish_pter", "publish_xingwan") \
+                    and not in_publish_window(now, **_win_kw):
                 st["last_skip_at"] = datetime.now().isoformat(timespec="seconds")
-                st["skip_reason"] = f"窗口外：PUBLISH_WINDOW={os.getenv('PUBLISH_WINDOW')}"
+                if name == "publish_xingwan":
+                    st["skip_reason"] = (
+                        f"窗口外：XINGWAN_PUBLISH_WINDOW="
+                        f"{getattr(config, 'XINGWAN_PUBLISH_WINDOW', '00:00-10:00')}")
+                else:
+                    st["skip_reason"] = f"窗口外：PUBLISH_WINDOW={os.getenv('PUBLISH_WINDOW')}"
                 skipped = True
                 continue
 

@@ -74,10 +74,11 @@ SITE_PUBLISH_TABLE = "site_publish"
 SITE_MUSOPIA = "musopia"
 SITE_CRABPT = "crabpt"
 SITE_PTER = "pter"
+SITE_XINGWAN = "xingwan"
 
 SITE_PUBLISH_COLUMNS = [
     ("info_hash", "TEXT NOT NULL"),
-    ("site", "TEXT NOT NULL"),          # SITE_MUSOPIA / SITE_CRABPT / SITE_PTER
+    ("site", "TEXT NOT NULL"),          # SITE_MUSOPIA / SITE_CRABPT / SITE_PTER / SITE_XINGWAN
     ("torrent_id", "TEXT"),             # 对应站点的种子详情页 ID
     ("status", "TEXT"),                 # 'EXISTS' / 'FAILED' 等
     ("cover_url", "TEXT"),              # 各站点独立的封面 URL
@@ -1080,6 +1081,12 @@ PTER_DIRECT_WHERE = (
     " AND status = 'SUCCESS'"
 )
 
+# 星湾直发队列条件：允许转载且排除失败状态（与蟹黄堡同口径，不强制 log）
+XINGWAN_DIRECT_WHERE = (
+    "transfer_rule = 'ALLOW'"
+    " AND (status IS NULL OR status != 'FAILED')"
+)
+
 
 def is_direct_publishable_to(info_hash, site=SITE_CRABPT):
     """★ **直发判据**：这条能不能**直接**发到 `site`（不经源站）。
@@ -1382,3 +1389,79 @@ def count_pending_pter_direct(site=SITE_PTER):
     ).fetchone()[0]
     conn.close()
     return n
+
+
+def pending_xingwan_direct(site=SITE_XINGWAN):
+    """★ 星湾直发队列：过闸门④（`ALLOW`）∧ 未被标 `FAILED` ∧ 星湾没有。
+
+    口径与蟹黄堡一致（不强制 log），排序同样 `updated_at` 升序。
+    """
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT {TASK_FIELDS} FROM tasks "
+        f" WHERE {XINGWAN_DIRECT_WHERE} "
+        f"   AND info_hash NOT IN "
+        f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?) "
+        f" ORDER BY updated_at",
+        (str(site),),
+    )
+    rows = _rows_to_dicts(cur)
+    conn.close()
+    return rows
+
+
+def count_pending_xingwan_direct(site=SITE_XINGWAN):
+    """★ 星湾直发队列计数。必须与 `pending_xingwan_direct()` 用同一个 WHERE。"""
+    conn = connect()
+    n = conn.execute(
+        f"SELECT COUNT(*) FROM tasks "
+        f" WHERE {XINGWAN_DIRECT_WHERE} "
+        f"   AND info_hash NOT IN "
+        f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?)",
+        (str(site),),
+    ).fetchone()[0]
+    conn.close()
+    return n
+
+
+def get_published_for_site(site, *, only_stale=False, require_allow=True, limit=0,
+                           torrent_id=None):
+    """按站点读取 `site_publish` 中仍为 EXISTS 的已发布种子（编辑链路用）。
+
+    返回的每行带 `site_torrent_id`（该站点的种子 ID）与 `sp_synced_at`。
+    `only_stale=True` 时只返回从未同步过、或源任务在同步后又被更新过的行。
+    """
+    where = [
+        "sp.site = ?",
+        "sp.status = 'EXISTS'",
+        "sp.torrent_id IS NOT NULL",
+        "sp.torrent_id != ''",
+    ]
+    params = [str(site)]
+    if require_allow:
+        where.append("t.transfer_rule = 'ALLOW'")
+    if torrent_id is not None:
+        where.append("sp.torrent_id = ?")
+        params.append(str(torrent_id))
+    if only_stale:
+        where.append(
+            "(sp.synced_at IS NULL OR t.updated_at IS NULL OR t.updated_at > sp.synced_at)"
+        )
+    sql = (
+        f"SELECT t.*, sp.torrent_id AS sp_torrent_id, sp.synced_at AS sp_synced_at "
+        f"  FROM tasks t JOIN {SITE_PUBLISH_TABLE} sp ON sp.info_hash = t.info_hash "
+        f" WHERE {' AND '.join(where)} "
+        f" ORDER BY t.updated_at"
+    )
+    if limit and limit > 0:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    rows = _rows_to_dicts(cur)
+    conn.close()
+    for row in rows:
+        row["site_torrent_id"] = row.get("sp_torrent_id")
+    return rows

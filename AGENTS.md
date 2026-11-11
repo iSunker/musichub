@@ -17,10 +17,10 @@
 - **本机仓库**：`D:\Projects\PT-Project\opencd2others`（Git 只在本机）。
   - 源码在 **`src/`**（全部 `.py` 模块）；`Dockerfile` 用 `COPY src/*.py ./` 保持**镜像内 `/app` 平铺**。
 - **生产端（NAS）**：`\\iSunker-DS423\docker_ssd\opencd2others`（SMB 路径）= NAS 上的 `/volume2/docker_ssd/opencd2others`。
-- **★★ 生产端顶层白名单（严格遵循全局 §0.2 / §0.6 收敛基线，根层仅允许 2 项，多一个都算违规）**：
+- **★★ 生产端顶层白名单（严格遵循顶层 AGENTS.md §2 全局硬约束，根层仅允许 2 项，多一个都算违规）**：
   `docker-compose.yml` / `data/`。（环境变量在 `data/.env`，说明文档在 `data/README.md`）。
   - **严禁**在生产端留任何 `.bak-*` / 备份 / `.py` / `tools/` / 测试文件 / 工作草稿。
-  - **交付分级规范（依据顶层 agents.md §0.3）**：
+  - **交付分级规范（依据顶层 AGENTS.md §2.3 镜像发版需授权）**：
     - **小版本**（单文件修复、参数微调、文案日志改动）：允许通过 SSH（或 SMB）将变更的工作文件直传 NAS 对应容器/路径并重启生效，无需镜像流转。
     - **大版本**（结构性变更、依赖变更、多文件重构）：打包为 Docker 镜像并推送 Docker Hub 前，**必须获得用户明确允许和确认，不得自行推送**。
   - 全部运行时状态与产物统一收拢在 `data/` 子目录（`data.db` / `daemon_state.json` / `daemon_heartbeat` / `daemon_env.json` / `readd_queue.json` / `lsky_token.json` / `output_torrents/` / `covers/` / `raw_html/`）。
@@ -36,7 +36,7 @@
   - **绝不打印、绝不进日志、绝不进 `daemon_env.json` 快照**（`daemon.ENV_SNAPSHOT_KEYS` 是白名单，凭据键不在其中）。
   - `.env` **不在镜像里**（`.dockerignore` 排 `.env*`）⇒ 改了 `.env.example` 里的新键，必须手工补到 NAS 那份 `.env`。
 - `data.db` 是**只读**（`PRAGMA query_only=1`）；**不要** `cp` 生产库到本机当事实源。
-- 单容器启动：NAS 上执行 `docker compose up -d musopia`（**不带 `--build`**，镜像从 Docker Hub 拉）。
+- 单容器启动：NAS 上执行 `docker compose up -d musopia`（**不带 `--build`**，镜像由本机构建推送后由 NAS 拉取，或本机直传后 `docker load`）。
 
 ---
 
@@ -52,14 +52,18 @@
    ```
 2. **本机构建与推送（大版本，须用户明确授权）**：
    **严禁未经确认自行推送**。在获得用户明确允许后，运行 `bash build-push.sh`（执行 `tools/build-preflight.sh` 预检后构建并推送到 Docker Hub `isunker/opencd2others:latest` + `:<git-sha>`）。若为小版本单文件调整，走 SSH 直传 NAS 对应路径，无需构建镜像。
-3. **NAS 拉取与生效**：
-   ```bash
-   ssh -p 36688 -i C:/Users/艾森克/.ssh/id_ed25519 iSunker@192.168.0.7 \
-     "cd /volume2/docker_ssd/opencd2others && /usr/local/bin/docker compose pull && \
-      /usr/local/bin/docker compose up -d --remove-orphans musopia"
-   ```
+3. **NAS 拉取与生效（NAS 可拉镜像，禁止由 NAS 向外推送/连 GitHub）**：
+   - **边界**：NAS **允许** `docker compose pull` 从 Docker Hub 拉取镜像；但**严禁**在 NAS 上执行 `docker push`、`git clone/fetch/push`、上传 GitHub release/附件等任何**向外**动作。构建与推送镜像、GitHub 相关操作一律在本机完成（C8 的本意：镜像**构建与推送**必须在本机，NAS 唯一允许的外网动作是**拉取镜像**）。
+   - **标准路径**：
+     ```bash
+     ssh -p 36688 -i C:/Users/艾森克/.ssh/id_ed25519 iSunker@192.168.0.7 \
+       "cd /volume2/docker_ssd/opencd2others && /usr/local/bin/docker compose pull && \
+        /usr/local/bin/docker compose up -d --force-recreate musopia"
+     ```
+   - **直传兜底**（拉取失败 / 远端没有该 tag 时）：本机 `docker save -o img.tar <tag>` → 以二进制方式送入 NAS（`ssh "cat > /tmp/img.tar"`，勿用 PowerShell 文本管道）→ NAS `docker load -i /tmp/img.tar` → `up -d --force-recreate musopia`。`PULL_POLICY=missing` 下 NAS 本地已有该 tag 时不会再拉取。
+   - 回滚：记下原 `image:` tag 即可，**不要在生产端留 `.bak-*` 备份**（§1 目录铁律）。
 4. **验证新镜像生效**：
-   对比 `docker inspect opencd2musopia --format '{{.Image}}'` 与 Docker Hub 的 digest。
+   对比 `docker inspect opencd2musopia --format '{{.Image}}'` 与 Docker Hub 的 digest；并 `docker exec ... md5sum` 核对本次改动文件的 MD5 与本地一致，再跑一次对应模块自检。
 
 ---
 
@@ -149,6 +153,26 @@
 15. **编辑权限与 Stale 队列防护纪律 (2026-11-09)**：
     - Musopia 乌托邦的页面编辑接口（`takeedit`）严格受限于发布者身份（`uploader_id` 匹配）；
     - 非本账号发布的历史存量种子无编辑权限，必须维护好时间戳对齐，避免 `update_metadata.py --stale-only` 产生无权限空转重试。
+
+16. **三站标题/副标题统一口径 (2026-11-11)**：
+    - **单点实现**：主标题 `descr.normalize_music_title()`、副标题 `descr.build_music_small_descr()` 是三站唯一实现；`pter_site.normalize_pter_title/build_pter_small_descr` 仅为薄封装，`crabpt_site.build_fields()` 直接调用。严禁任何站点再写第二份（`ERR-META-03`）。
+    - **主标题格式**：`艺术家 - 专辑 年份 - 格式 位深 采样率 [- 制作组]`；必须剥离「分轨/整轨/分軌/整軌」与非白名单压制组后缀；群星（VA/群星）归一为 `Various Artists`。
+    - **副标题格式**：`艺术家 - 专辑 | 发行类别 | [厂牌 目录号] 介质 / 规格 / Log / Cue / 版本`；版本信息（首版/德国版/2CD/Deluxe 等）保留，但严禁把皇后脏副标题原样拼接。
+    - **取词口径**：`text_corpus` 必须包含 `small_descr`（`24bit/48kHz` 常只写在皇后 smalltitle）；`cat_corpus` 只看 `tags/source/formatted_title/track_type`，禁止含 descr（防「LIVE CD」误判现场）；Cue 判定须同时识别简体与繁体 `分轨/整轨`。
+
+17. **存量标题回改工具与权限边界 (2026-11-11)**：
+    - `tools/reapply_site_titles.py`：先读站点 `edit.php` 现表单当基线，只覆盖 `name`/`small_descr`，无变化跳过；默认只处理 `transfer_rule='ALLOW'` 或空；参数 `--site musopia|crabpt|all`、`--apply`、`--limit`、`--id`、`--interval`、`--verify`、`--include-deny`、`--yes`。容器内运行必须带 `PYTHONPATH=/app`。
+    - **权限边界**：Musopia 的 `takeedit` 仅上传者本人可用。2026-11-10 存量回改 musopia 325 行（280 成功 / 1 已合规 / 44 失败）、crabpt 290 行（286 / 2 / 2）；2026-11-11 重试 musopia 319 行，仍有 **38 行（37 个 id，12069 两行）无编辑权限**（2621, 4862, 4963, 5075, 5272, 5274, 5997, 5998, 6007, 6057, 6264, 6728, 10074, 10109, 10293, 10490, 10499, 10500, 10501, 10502, 10532, 11403, 11405, 12068, 12069, 12242, 17337, 17996, 18020, 18431, 18493, 18516, 18648, 18771, 19388, 19392, 21259）。
+    - 这批页面 `details.php` 正常但无 `takeedit` 表单，重试与时间戳对齐都无法绕过；只能换上传者本人或管理组账号，不要反复空跑。
+
+18. **假 `EXISTS` 撤回口径与去重真源 (2026-11-11)**：
+    - `tools/retract_missing_pages.py`：页面确认不存在时置 `torrent_id=''` + `status='UNKNOWN'`，**不删行、不碰 `cover_url`/`synced_at`**，单事务提交并回读校验。`UNKNOWN` 表达"已知站上已无"；置 `''` 会被 `db.site_publish_get()` 当成"记录坏了"。
+    - **撤回不会触发重发**：转种/直发队列是按 `site_publish` 里**有没有该站的行**去重（`NOT IN (SELECT info_hash FROM site_publish WHERE site=?)`），不是按 `status='EXISTS'`；`is_*_publishable_to` 对"有记录但 id 为空"明确返回 False；全库不存在 `DELETE FROM site_publish`。⇒ 撤回后无需改 `transfer_rule`。
+    - 2026-11-11 已撤回 musopia 9 行、crabpt 5 行（`torrent_id=''` / `status='UNKNOWN'`，回读 9/9、5/5）。
+
+19. **当前生产镜像固化状态 (2026-11-11)**：
+    - `descr.py` / `pter_site.py` / `crabpt_site.py` / `tools/reapply_site_titles.py` 已固化进 `isunker/opencd2others:43c3902-dirty`（digest `sha256:5a1ee6c1…`），容器 healthy，`descr.py --selftest` 44/44。
+    - 回滚：把 compose 的 `image:` 改回旧 tag `43c3902` 再 `--force-recreate`（该镜像仍在 NAS 本地）。容器内文件 MD5 已与本地逐一核对一致。
 
 
 ---
@@ -983,3 +1007,8 @@
 | 教训 | 根因 |
 |---|---|
 | **向 PTerClub（猫站）发种必须严格遵循其官方《上传规则》：主标题剥离分轨/整轨与多碟盘数标记并补齐采样规格；副标题禁止拼接原站未清洗脏字段、严格保持标准三段式；正文出处声明必须置顶** | 早期猫站发种逻辑直接透传了 OpenCD 原站标题与副标题，导致主标题残留「分轨/整轨」、个人压制者后缀及 `(2 CD)` 等干扰项，且未标明采样规格（如 `FLAC 16bit 44.1kHz`）；副标题则将原站带有广告语与方括号的原始 `small_descr`（如 `摇滚诗人...豪华版[ FALC-BD]`）盲目追加在末尾，破坏了猫站三段式（`艺术家 - 专辑 \| 发行类别 \| 介质规格`）规范；同时原正文将封面图置顶于转载引用之上，违反了猫站转载声明置顶的要求。已修正 `pter_site.py` 中 `normalize_pter_title()` 自动剥离盘数与音轨后缀并补充采样参数，`build_pter_small_descr()` 严禁拼接原站尾随脏数据，并批量回写修复线上 9 个历史种子。 |
+
+### ERR-PUBLISH-28 (2026-11-10 乌托邦/蟹黄堡转载引用块静默缺失)
+| 教训 | 根因 |
+|---|---|
+| **强制要求的页面元素（转载引用块、声明）绝不允许用「可选参数 + 空值静默跳过」承载 —— 默认空串 + `if source_link:` 的写法，会让任何一个忘了传参的调用方静默丢块，且没有任何报错** | 乌托邦（`descr.build_form_fields()`）与蟹黄堡（`crabpt_site.build_fields()`）调用 `descr.build_descr()` 时**从未传 `source_link`**，该参数默认 `""`，渲染层 `if source_link and ...: blocks.append(...)` 直接跳过 ⇒ 两站数百个已发布页面**全都没有转载引用块**，而猫站（当时要求置顶引用）却因自己传了值而正常 —— 同一强制要求，四个调用方四个样，差异完全不可见。★ 这是 `ERR-META` 一族「失效方向 = 静默」的典型：**可选参数的默认值就是它的失效值**，对强制元素而言默认空 = 默认错。⇒ 判据：① 新增任何**强制**页面元素时，必须同时改齐**全部站点渲染入口**（当前四处：`descr.build_form_fields`（乌托邦）、`crabpt_site.build_fields`、`pter_site.build_fields`、`xingwan_site.build_fields`），少一处就是一次静默缺失；② 强制元素的事实来源必须收敛为**单一函数**（本次新增 `descr.build_source_link(task)` 四站共用），禁止各站复制文案导致漂移；③ 自检必须断言「真实提交路径产出的 descr 首块是引用块」（本次自检 ⑪a–⑪d），不能只测渲染层而漏了调用层忘传参；④ 改完后对已上站存量**回刷验证**（本次乌托邦 319 条：280 提交 / 38 无编辑权限 / 1 护栏拒改；蟹黄堡 288 条：285 提交 / 3 护栏拒改），抽查页面 `kdescr` 首块确认 `<fieldset><legend>引用</legend>转自OpenCD:` 在前。★ 附带：`update_metadata.py` 现已支持 `--site crabpt`（复用 `MusopiaClient` 换基址 Cookie + `crabpt_site.build_fields`），批量回刷用 `--site musopia --only-exists --fields descr --apply --yes`，且网络层异常已加重试不再整批崩。 |

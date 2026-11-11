@@ -60,6 +60,9 @@ def _build_site_client(site):
     if site == db.SITE_CRABPT:
         from crabpt_site import CrabptClient
         return CrabptClient()
+    if site == db.SITE_XINGWAN:
+        from xingwan_site import XingwanClient
+        return XingwanClient()
     raise SystemExit(f"未知站点 {site!r}")
 
 
@@ -110,8 +113,8 @@ def main(argv=None):
     import db
     ap = argparse.ArgumentParser(
         description="★ 只读：巡检 site_publish(EXISTS) 行的站点种(B) 是否在做种")
-    ap.add_argument("--site", choices=[db.SITE_MUSOPIA, db.SITE_CRABPT],
-                    help="只巡一个站（默认两站）")
+    ap.add_argument("--site", choices=[db.SITE_MUSOPIA, db.SITE_CRABPT, db.SITE_XINGWAN],
+                    help="只巡一个站（默认乌托邦/蟹黄堡/星湾）")
     ap.add_argument("--id", dest="torrent_id", help="只巡这个站点页面 id")
     ap.add_argument("--info-hash", help="只巡这个 info_hash（前缀匹配，指 DB 的 A）")
     ap.add_argument("--limit", type=int, default=0, help="只巡前 N 条（0=全部）")

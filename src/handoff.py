@@ -84,7 +84,7 @@ def record_missing_data(info_hash, album, site, reason):
 
 
 def enqueue(info_hash, name, save_path, target_save_path, note="", state="PENDING",
-            category="", target_category="", src_path="", album=""):
+            category="", target_category="", target_tags=None, src_path="", album=""):
     """把一条待交棒的种写进队列。**幂等**（同 infohash 已在 ⇒ 直接返回 True）。
 
     ★ 本步**不复制数据** —— 复制是发种前的事（见 `copy_to_publish_area`），
@@ -101,6 +101,7 @@ def enqueue(info_hash, name, save_path, target_save_path, note="", state="PENDIN
         "target_save_path": target_save_path,  # 3020 上的路径（HDD 原文件）
         "category": category,                   # ★ 3040 上的分类（隔离判据）
         "target_category": target_category,     # ★ 3020 上要打的分类（白名单之一）
+        "target_tags": list(target_tags or []), # ★ 3020 上要打的标签（星湾等不建分类的站点）
         "src_path": src_path,                   # ★ HDD 源（复核 SSD 副本用）
         "album": album,                         # ★ 专辑名（复核 SSD 副本用）
         "note": note,
@@ -153,20 +154,26 @@ def items_by_state(*states):
 
 # ==================== ★★★ 隔离闸门：只有"本项目音乐种"才可交棒/清盘 ====================
 
-def is_own_project(category, own_categories=None):
-    """这条种是不是"本项目管的"？判据 = **分类命中白名单**。
+def is_own_project(category, own_categories=None, tags=None, own_tags=None):
+    """这条种是不是"本项目管的"？判据 = **分类或标签命中白名单**。
 
     ★★ 用户 2026-10-07 指令：「**仅限本项目的音乐种子**才移动到 3040 交接做种，
        这个 3020qb 我可能还要发其他种子的」⇒ 本流程**绝不许误碰**非本项目种。
     ★ 判据（用户已拍板）= **3040 上的分类** ∈ `config.HANDOFF_OWN_CATEGORIES`
-      （默认 `{Musopia, CrabPT}`）。理由：3040 是**本项目专用的发种实例**，分类即来源。
+      （默认 `{Musopia, CrabPT, PTer}`），**或**该种的标签 ∩
+      `config.HANDOFF_OWN_TAGS`（默认 `{Xingwan}` —— 星湾不建分类，只打标签）。
     ★★ 阴性对照（本函数**必须能"说不"**）：
-      · `category=""`（未分类 —— 用户手加的种常见）⇒ **False**。
-      · `category="SomeOther"` ⇒ **False**。
+      · `category=""` 且无标签（用户手加的种常见）⇒ **False**。
+      · `category="SomeOther"` 且标签不命中 ⇒ **False**。
       · `category="Musopia"` / `"CrabPT"` ⇒ **True**。
+      · 标签含 `"Xingwan"`（分类为空）⇒ **True**。
     """
     own = config.HANDOFF_OWN_CATEGORIES if own_categories is None else own_categories
-    return str(category or "").strip() in set(own)
+    if str(category or "").strip() in set(own):
+        return True
+    own_t = getattr(config, "HANDOFF_OWN_TAGS", []) if own_tags is None else own_tags
+    have = {str(t).strip() for t in (tags or []) if str(t or "").strip()}
+    return bool(have & {str(t).strip() for t in (own_t or []) if str(t or "").strip()})
 
 
 # ==================== 复制成品 HDD→SSD（步①）====================
@@ -490,7 +497,7 @@ def verify_publish_area_complete(src_path, album_name, *, torrent_file=None):
 
 def begin_handoff_for_task(src_path, album_name, info_hash, task=None,
                            source_category="", target_category="",
-                           dry_run=None):
+                           target_tags=None, dry_run=None):
     """★ 发种流程的**接线点**：复制成品到 3040 发种区 + 入队（供之后交棒）。
 
     这一步把用户要的「数据复制要由本项目代码自动化完成」接进发布流：
@@ -531,14 +538,17 @@ def begin_handoff_for_task(src_path, album_name, info_hash, task=None,
         return False, f"发种区数据未就位，拒绝回加: {why_copy}"
     # ★ 目标 save_path = 3020 的父目录（HDD 原文件所在）= config.HANDOFF_TARGET_SAVE_ROOT
     target_save = config.HANDOFF_TARGET_SAVE_ROOT
-    # ★ 目标分类：默认沿用来源分类（乌托邦→Musopia / 蟹黄堡→CrabPT），须在白名单内。
-    tcat = target_category or source_category or config.PUBLISH_CATEGORY
+    # ★ 目标身份：标签优先（星湾等不建分类）；否则沿用来源分类（乌托邦→Musopia / 蟹黄堡→CrabPT）。
+    ttags = [str(t).strip() for t in (target_tags or []) if str(t or "").strip()]
+    tcat = "" if ttags else (target_category or source_category or config.PUBLISH_CATEGORY)
     name = (task or {}).get("formatted_title") or album_name
     ok = enqueue(info_hash, name, ssd_dir, target_save,
                  note="auto from publish", category=source_category,
-                 target_category=tcat, src_path=src_path, album=album_name)
+                 target_category=tcat, target_tags=ttags,
+                 src_path=src_path, album=album_name)
     return ok, (f"已复制到 {ssd_dir} 并**逐字节核对通过**并入队"
-                f"（3040分类={source_category or '∅'}→3020分类={tcat}）")
+                f"（3040分类={source_category or '∅'}→3020身份="
+                f"{('tags:' + ','.join(ttags)) if ttags else ('分类:' + tcat)}）")
 
 
 # ==================== 交棒判据（步③ 的触发）====================
@@ -736,7 +746,7 @@ def export_torrent_bytes(qb, info_hash):
 
 
 def handoff_to_3020(qb_src, qb_dst, info_hash, target_save_path, dry_run=True,
-                   target_category=None, own_categories=None, name=None,
+                   target_category=None, target_tags=None, own_categories=None, name=None,
                    src_path=None, album=None, dst_host=None):
     """把种的任务从 3010 交棒到常规做种实例（如 3220/3240）。
 
@@ -757,13 +767,20 @@ def handoff_to_3020(qb_src, qb_dst, info_hash, target_save_path, dry_run=True,
             real_hash = str(_torrent_field(_t, "hash", "") or info_hash)
     except Exception:                                             # noqa: BLE001
         _how = ""
-    if not is_own_project(cat, own_categories):
-        return False, (f"拒交棒：3040 分类 {cat!r} 不在本项目白名单 "
-                       f"{config.HANDOFF_OWN_CATEGORIES}（疑似非本项目种，不碰）")
-    # ---- 目标分类只能是白名单之一（否则污染 3020 的分类体系）----
-    tcat = target_category if target_category else (cat or config.PUBLISH_CATEGORY)
-    if not is_own_project(tcat, own_categories):
-        return False, f"拒交棒：目标分类 {tcat!r} 不在本项目白名单"
+    if not is_own_project(cat, own_categories,
+                          tags=_source_tags(qb_src, info_hash, name=name)):
+        return False, (f"拒交棒：3040 分类 {cat!r} 与标签都不在本项目白名单 "
+                       f"（分类 {config.HANDOFF_OWN_CATEGORIES} / 标签 {config.HANDOFF_OWN_TAGS}）"
+                       f"（疑似非本项目种，不碰）")
+    # ---- 目标身份：优先标签（星湾不建分类）；否则沿用来源分类且必须是白名单之一 ----
+    if target_tags:
+        tcat = ""
+        ttags = [str(t).strip() for t in target_tags if str(t or "").strip()]
+    else:
+        ttags = []
+        tcat = target_category if target_category else (cat or config.PUBLISH_CATEGORY)
+        if not is_own_project(tcat, own_categories):
+            return False, f"拒交棒：目标分类 {tcat!r} 不在本项目白名单"
 
     # ---- 零开销硬链接建立（HDD music3 -> 目标 HDD music1/music2）----
     if dst_host:
@@ -792,7 +809,8 @@ def handoff_to_3020(qb_src, qb_dst, info_hash, target_save_path, dry_run=True,
 
     if dry_run:
         print(f"🅿️  [handoff][dry-run] 将交棒 {real_hash[:12]}… → 目标实例 "
-              f"save_path={target_save_path} category={tcat}（3040分类={cat}）")
+              f"save_path={target_save_path} category={tcat or '∅'}"
+              f" tags={ttags or '∅'}（3040分类={cat or '∅'}）")
         return True, "dry-run"
     try:
         content = export_torrent_bytes(qb_src, real_hash)
@@ -807,6 +825,7 @@ def handoff_to_3020(qb_src, qb_dst, info_hash, target_save_path, dry_run=True,
             save_path=target_save_path,
             is_paused=False,
             category=tcat,
+            tags=ttags or None,
         )
         qb_dst.torrents_recheck(torrent_hashes=real_hash)
     except Exception as e:                                        # noqa: BLE001
@@ -816,7 +835,8 @@ def handoff_to_3020(qb_src, qb_dst, info_hash, target_save_path, dry_run=True,
             print(f"ℹ️  [handoff] 目标做种实例已有该种（409）= 视为已交棒: {real_hash[:12]}…")
             return True, "409 已存在"
         return False, f"add 目标实例失败: {name_e}: {e}"
-    print(f"✅ [handoff] 已交棒到目标做种实例（待校验）: {real_hash[:12]}… category={tcat}")
+    print(f"✅ 已交棒到目标做种实例（待校验）: {real_hash[:12]}… "
+          f"category={tcat or '∅'} tags={ttags or '∅'}")
     return True, "added+recheck"
 
 
@@ -842,6 +862,27 @@ def _source_category(qb_src, info_hash, dry_run=False, name=None):
     if t is None:
         return "", f"3040 上找不到该种 {info_hash[:12]}…（已删？）⇒ 不交棒"
     return str(_torrent_field(t, "category", "") or ""), ""
+
+
+def _source_tags(qb_src, info_hash, name=None):
+    """查 3040 上该种的 `tags`（列表）。**只读**，查不到/出错一律返回 `[]`。
+
+    ★ 星湾等"不建分类、只打标签"的站点靠它命中 `config.HANDOFF_OWN_TAGS`。
+    ★ 与 `_source_category` 分开：分类闸门仍按"查不到就拒"处理，标签只是**加宽**命中面
+      （标签查不到 = 没命中，不改变分类闸门的结论）。
+    """
+    if qb_src is None:
+        return []
+    try:
+        t, _how = _find_on_3040(qb_src, info_hash, name=name)
+        if t is None:
+            return []
+        raw = _torrent_field(t, "tags", []) or []
+        if isinstance(raw, str):
+            raw = [x for x in raw.split(",") if x.strip()]
+        return [str(x).strip() for x in raw if str(x or "").strip()]
+    except Exception:                                             # noqa: BLE001
+        return []
 
 
 def verify_3020_seeding(qb_dst, info_hash, name=None):
@@ -945,9 +986,11 @@ def finalize_source(qb_src, info_hash, ssd_dir, dry_run=True, own_categories=Non
         # 不直接拒 —— 但若原因不是"找不到"（例如连不上），保守拒删。
         if "找不到该种" not in gate_err:
             return False
-    elif not is_own_project(cat, own_categories):
-        print(f"❌ [handoff] 拒清盘：3040 分类 {cat!r} 不在本项目白名单 "
-              f"{config.HANDOFF_OWN_CATEGORIES}（疑似非本项目种，不碰）")
+    elif not is_own_project(cat, own_categories,
+                            tags=_source_tags(qb_src, info_hash, name=name)):
+        print(f"❌ [handoff] 拒清盘：3040 分类 {cat!r} 与标签都不在本项目白名单 "
+              f"（分类 {config.HANDOFF_OWN_CATEGORIES} / 标签 {config.HANDOFF_OWN_TAGS}）"
+              f"（疑似非本项目种，不碰）")
         return False
     if dry_run:
         print(f"🅿️  [handoff][dry-run] 将删 3040 任务 {del_hash[:12]}… + SSD 副本 {ssd_dir}")
@@ -1092,6 +1135,7 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None, dst_host=None):
                             item, f"发种区副本不在位，拒交棒: {ssd_why}")
             ok, why = handoff_to_3020(qb_src, qb_dst, info_hash, target, dry_run=dry_run,
                                      target_category=target_cat or None,
+                                     target_tags=item.get("target_tags") or None,
                                      name=item.get("name") or item.get("album"),
                                      src_path=item.get("src_path"),
                                      album=item.get("album"),

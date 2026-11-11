@@ -440,6 +440,335 @@ def build_small_descr_for_task(task):
     )
 
 
+# ==================== 主/副标题：猫站（PTerClub）口径 ====================
+#
+#   ★★ 这一节是**唯一**的标题/副标题口径实现。猫站、乌托邦、蟹黄堡三个发布
+#      适配层都调这里（`pter_site.build_fields` / `build_form_fields` /
+#      `crabpt_site.build_fields`）。三条链路各写一份 = 三个口径，漂了不报错。
+#   ★ 为什么放在本模块而不是 `pter_site`：`descr` **只依赖 stdlib**，
+#     三个适配层都能直接 import，不会把站点 client 依赖带进来，也不会成环。
+RECOGNIZED_GROUPS = {
+    "PTerMUSIC", "PTerWEB", "PTerMV", "PTerTV", "PTer",
+    "CHDBits", "HDSky", "OurBits", "HDHome", "WiKi", "MTeam",
+    "CHD", "CMCT", "FRDS", "beAst", "ADE", "PTH", "RedBits",
+}
+
+# 版本信息判据：只保留"这一版是什么"的描述（首版/德版/Deluxe…），
+# 不把格式、日志、抓轨者这些**已经在主/副标题规格段里**的脏数据再拼一遍。
+_VERSION_HINT = re.compile(
+    r"(?:首版|版|Deluxe|Edition|Remaster(?:ed)?|Limited|Special|Anniversary|"
+    r"Collector|Expanded|Complete|Box|Digipak|Digipack|\d+\s*(?:CD|Disc|碟))",
+    re.I,
+)
+
+# 计算版本信息前先剥掉的"格式噪声"：这些不是版本，重复拼进去只会让副标题变脏。
+_VERSION_NOISE = re.compile(
+    r"(?:\[?\s*\d{1,2}\s*[Bb]it\s*[-/ ]?\s*\d+(?:\.\d+)?\s*k?[Hh]z\s*\]?"
+    r"|\[?\s*\d+(?:\.\d+)?\s*k?[Hh]z\s*\]?"
+    r"|\b(?:WEB(?:-DL)?|FLAC|WAV|APE|ALAC|DSD|DSF|DFF|MP3|AAC|Lossless|"
+    r"Hi-?Res|Log\s*\d*%?|Self-?rip|CD|Cue)\b)",
+    re.I,
+)
+
+
+def _version_note(raw, artist="", album=""):
+    """从皇后 `<div class="smalltitle">` 原文里抽出版本信息（抽不到就返回 `""`）。
+
+    ★ 保留的是**版本**（「台灣紙盒2CD首版」「德国版」「Deluxe Edition」），
+      不是格式串（「WEB QQ [16Bit-44.1kHz] FLAC」「FLAC / Lossless / CD」）——
+      后者已经在副标题的介质/规格段里，再拼一遍就是重复。
+    ★ 抽不到就**留空，不硬造**（同全项目"取不到不编"的纪律）。
+    """
+    s = re.sub(r"[|｜]+", " / ", str(raw or ""))
+    s = _VERSION_NOISE.sub(" ", s)
+    s = re.sub(r"\s*/\s*(?:/|$)", " ", s)
+    s = re.sub(r"\s+", " ", s).strip(" /-·,，、;；.。")
+    if not s or len(s) > 120:
+        return ""
+    if not _VERSION_HINT.search(s):
+        return ""
+    if artist and s == artist.strip():
+        return ""
+    if album and s == album.strip():
+        return ""
+    return s
+
+
+def _normalize_artist(artist):
+    """合辑统一写法（猫站规则：合辑用 Various Artists 或群星）。"""
+    a = str(artist or "").strip()
+    if a.upper() in ("VA", "V.A.", "VARIOUS ARTIST", "VARIOUS ARTISTS") or a == "群星":
+        return "Various Artists"
+    return a
+
+
+def _split_title(raw_title):
+    """剥掉制作组后缀、分轨/整轨、盘数标记，返回 `(cleaned_title, group_suffix)`。
+
+    ★ 主标题与副标题共用这一份清洗逻辑 —— 否则会出现
+      「主标题把 分轨 剥了、副标题却拿它拼专辑名」这种同页两口径。
+    """
+    group_suffix = ""
+    cleaned_title = raw_title
+    m_grp = re.search(r"-\s*([A-Za-z0-9_@]+)\s*$", raw_title)
+    if m_grp:
+        cand = m_grp.group(1)
+        if cand in RECOGNIZED_GROUPS or cand.startswith("PTer"):
+            group_suffix = f" - {cand}"
+        cleaned_title = raw_title[:m_grp.start()].strip()
+
+    cleaned_title = re.sub(
+        r"[\s\-\_\(\)\[\]]*(?:分[轨軌]|整[轨軌])[\s\-\_\(\)\[\]]*",
+        " ",
+        cleaned_title,
+        flags=re.I,
+    ).strip()
+    cleaned_title = re.sub(r"[\(\[\s]+\d+\s*(?:CD|DISC|DISCS)[\)\]\s]+",
+                           " ", cleaned_title, flags=re.I).strip()
+    return cleaned_title, group_suffix
+
+
+def _parse_artist_album(task, cleaned_title):
+    """取艺术家/专辑：优先库字段，缺失时从清洗后的标题解析。
+
+    ★ 专辑名只剥「末尾独立年份」而不是「第一个年份」——
+      否则 `… BEST OF 2000-2010~ 2010` 会在 2000 处被截断。
+    """
+    artist = _normalize_artist(task.get("artist"))
+    album = str(task.get("album") or "").strip()
+
+    if not (artist and album):
+        parts = [p.strip() for p in cleaned_title.split(" - ") if p.strip()]
+        if len(parts) >= 2:
+            if not artist:
+                artist = _normalize_artist(parts[0])
+            album = parts[1]
+            # 皇后 Raw 标题可能把发行信息塞在标题里（如 milet - Made of Glass
+            # {2026.08.19} {Sony Music…}）：专辑名到第一个 `{` 为止。
+            album = re.split(r"\s*\{", album)[0].strip()
+            album = re.sub(
+                r"\s*-\s*(?:FLAC|WAV|APE|DSD|DSF|DFF|ALAC|MP3|AAC)\b.*$",
+                "", album, flags=re.I).strip()
+            album = re.sub(r"\s+\b(?:19|20)\d{2}\b\s*$", "", album).strip()
+        elif parts:
+            artist = _normalize_artist(parts[0])
+            album = parts[0]
+
+    return artist, album
+
+
+def normalize_music_title(task):
+    """按猫站 PTerClub 官方规范标准化主标题。
+
+    猫站规范（Wiki《上传规则（含标题命名及内容编辑指南）》音乐类）：
+      艺术家英文名 - 专辑英文名 发行年份 - 文件格式 采样位深 采样频率 [- 制作组]
+      示例：
+        JJ Lin - Lost N Found 2011 - FLAC 16bit 44.1kHz - PTerMUSIC
+        齐秦 - 我拿什么爱你 1998 - FLAC 16bit 44.1kHz
+        Various Artists - 说唱巅峰对决2026 第九期 2026 - FLAC 16bit 44.1kHz
+
+    硬性要求：
+      1. 绝不允许带有 分轨/整轨/分軌/整軌；
+      2. 绝不允许带有非官方个人压制者后缀（如 - Yuekui、- alin13788）；
+      3. 必须包含格式与采样规格（如 FLAC 16bit 44.1kHz）；
+      4. 合辑统一使用 Various Artists（或群星）。
+
+    ★ 三站共用：乌托邦/蟹黄堡发布的种子与猫站页面使用**同一串**标题。
+    """
+    raw_title = (task.get("formatted_title") or task.get("torrent_name") or "").strip()
+
+    # 1-2. 剥制作组 / 分轨 / 盘数标记（与副标题共用同一份清洗逻辑）
+    cleaned_title, group_suffix = _split_title(raw_title)
+
+    # 3. 提取音频格式（严格按单词边界匹配，避免 Leaper 误匹配 APE）
+    upper = (str(task.get("format") or "") + " " + raw_title).upper()
+    m_fmt = re.search(r"\b(FLAC|WAV|APE|DSD|DSF|DFF|ALAC|MP3|AAC)\b", upper)
+    fmt = m_fmt.group(1) if m_fmt else "FLAC"
+
+    # 4. 提取或推断采样位深与采样频率
+    #   ★ 把 `small_descr`（皇后 smalltitle，如「WEB 网易 [24Bit-48kHz] FLAC」）
+    #     也纳入语料：24bit/48kHz 这类事实常常**只**写在副标题里，不纳入就会
+    #     把 Hi-Res 误标成 16bit 44.1kHz（三站页面还会因此不一致）。
+    text_corpus = " ".join(
+        str(task.get(k) or "")
+        for k in ("formatted_title", "torrent_name", "small_descr", "descr", "log_content")
+    )
+    m_bit = re.search(r"(\d{1,2})\s*bit", text_corpus, re.I)
+    m_hz = re.search(r"(\d+(?:\.\d+)?)\s*k?Hz", text_corpus, re.I)
+    m_log_hz = re.search(r"Sample rate\s*:\s*(\d+(?:\.\d+)?)", task.get("log_content") or "", re.I)
+    m_log_bit = re.search(r"Bits per sample\s*:\s*(\d+)", task.get("log_content") or "", re.I)
+
+    if m_log_hz:
+        val = float(m_log_hz.group(1))
+        if val in (44100, 44.1):
+            sample_rate = "44.1kHz"
+        elif val in (48000, 48):
+            sample_rate = "48kHz"
+        elif val in (88200, 88.2):
+            sample_rate = "88.2kHz"
+        elif val in (96000, 96):
+            sample_rate = "96kHz"
+        elif val in (192000, 192):
+            sample_rate = "192kHz"
+        else:
+            sample_rate = f"{val}kHz"
+    elif m_hz:
+        hz_val = m_hz.group(1)
+        try:
+            f_val = float(hz_val)
+            if f_val in (44100.0, 44.1):
+                sample_rate = "44.1kHz"
+            elif f_val in (48000.0, 48.0):
+                sample_rate = "48kHz"
+            elif f_val in (88200.0, 88.2):
+                sample_rate = "88.2kHz"
+            elif f_val in (96000.0, 96.0):
+                sample_rate = "96kHz"
+            elif f_val in (192000.0, 192.0):
+                sample_rate = "192kHz"
+            else:
+                sample_rate = f"{hz_val}kHz" if not hz_val.lower().endswith("khz") else hz_val
+        except ValueError:
+            sample_rate = f"{hz_val}kHz" if not hz_val.lower().endswith("khz") else hz_val
+    else:
+        sample_rate = "44.1kHz"
+
+    if m_log_bit:
+        bit_depth = f"{m_log_bit.group(1)}bit"
+    elif m_bit:
+        bit_depth = f"{m_bit.group(1)}bit"
+    elif re.search(r"24bit|24-bit|Hi-Res|HI-RES|SACD", text_corpus, re.I):
+        bit_depth = "24bit"
+        if sample_rate == "44.1kHz":
+            sample_rate = "96kHz"
+    else:
+        bit_depth = "16bit"
+
+    specs = f"{fmt} {bit_depth} {sample_rate}"
+
+    # 5. 年份提取（标题里可能有 2000-2010 这类区间，取最后一个年份）
+    year = ""
+    raw_year = str(task.get("year") or "")
+    m_y = re.search(r"\b((?:19|20)\d{2})\b", raw_year)
+    if not m_y:
+        all_years = re.findall(r"\b((?:19|20)\d{2})\b", cleaned_title)
+        if all_years:
+            year = all_years[-1]
+    if m_y:
+        year = m_y.group(1)
+
+    # 6. 核心艺术家与专辑（与副标题共用同一份解析逻辑）
+    artist, album = _parse_artist_album(task, cleaned_title)
+
+    if artist and album:
+        core = f"{artist} - {album}"
+        if year and not re.search(r"\b" + year + r"\b", core):
+            core = f"{core} {year}"
+    else:
+        core = re.sub(r"-\s*(?:FLAC|WAV|APE|DSD|ALAC|MP3)\b.*$", "", cleaned_title, flags=re.I).strip()
+        if year and not re.search(r"\b" + year + r"\b", core):
+            core = f"{core} {year}"
+
+    final_title = f"{core} - {specs}{group_suffix}"
+    final_title = re.sub(r"\s+", " ", final_title).strip()
+    final_title = re.sub(r"\s+-\s+", " - ", final_title)
+    return final_title
+
+
+def build_music_small_descr(task):
+    """按猫站规范组装合规副标题（必填字段）。
+
+    猫站规范：
+      艺术家本国名 - 专辑本国名 | 发行类别 | [厂牌 目录号] 介质 / 规格 [/ Log] [/ Cue] [/ 版本]
+      示例：
+        林俊杰 - 学不会 | 专辑 | Warner Music CD / Lossless / Log (100%) / Cue
+        Taylor Swift - Lover | 专辑 | Republic Records / 602577928222 / Deluxe Edition
+
+    ★ 三段式结构严格保留；版本信息（如「台灣紙盒2CD首版」）按用户要求
+      追加在第三段末尾，且只保留版本语义、不拼格式噪声。
+    ★ 三站共用：乌托邦/蟹黄堡与猫站使用同一串副标题。
+    """
+    raw = (task.get("formatted_title") or task.get("torrent_name") or "").strip()
+    cleaned_title, _ = _split_title(raw)
+    artist, album = _parse_artist_album(task, cleaned_title)
+    if not artist:
+        artist = "华语音乐"
+    if not album:
+        album = "经典专辑"
+
+    # 发行类别只看**标题/标签**这类短字段；简介与皇后 smalltitle 里的
+    # “Live / 现场”常是版本描述（如「Blu-ray + LIVE CD [2Discs]」），
+    # 把它们算进来会把录音室专辑误判成现场专辑。
+    cat_corpus = " ".join(
+        str(task.get(k) or "")
+        for k in ("tags", "source", "formatted_title", "track_type")
+    )
+    corpus = " ".join(
+        str(task.get(k) or "")
+        for k in ("tags", "source", "formatted_title", "small_descr", "descr")
+    )
+
+    if re.search(r"原声|OST|Soundtrack", cat_corpus, re.I):
+        cat = "原声"
+    elif re.search(r"单曲|Single", cat_corpus, re.I):
+        cat = "单曲"
+    elif re.search(r"\bEP\b", cat_corpus, re.I):
+        cat = "EP"
+    elif re.search(r"精选|Best|Greatest Hits|Collection", cat_corpus, re.I):
+        cat = "精选"
+    elif re.search(r"演唱会|Live|现场", cat_corpus, re.I):
+        cat = "现场"
+    elif re.search(r"戏剧|戏曲|相声", cat_corpus, re.I):
+        cat = "戏曲"
+    else:
+        cat = "专辑"
+
+    med = "CD"
+    if re.search(r"SACD", corpus, re.I):
+        med = "SACD"
+    elif re.search(r"WEB|Web-DL|Digital", corpus, re.I):
+        med = "WEB"
+    elif re.search(r"Vinyl|黑胶", corpus, re.I):
+        med = "Vinyl"
+
+    qual = "Hi-Res" if re.search(r"24bit|Hi-Res|HI-RES", corpus, re.I) else "Lossless"
+
+    extras = [f"{med} / {qual}"]
+
+    log_content = task.get("log_content") or ""
+    if log_content or task.get("logs_json"):
+        if "100%" in str(task.get("small_descr") or "") or "100%" in log_content:
+            extras.append("Log (100%)")
+        else:
+            extras.append("Log")
+
+    track_type = str(task.get("track_type") or "")
+    if ("cue" in corpus.lower() or re.search(r"分[轨軌]|整[轨軌]", corpus)
+            or re.search(r"分[轨軌]|整[轨軌]", track_type)):
+        extras.append("Cue")
+
+    # 尝试从简介中提取唱片公司与编号（如 PolyGram 846 789-2）
+    m_lbl = re.search(r'(?:唱片公司|厂牌|廠牌)[：:\s]+([A-Za-z0-9_\u4e00-\u9fa5]+)', corpus)
+    m_catno = re.search(r'(?:唱片编号|目录号|目錄號|Cat(?:alog)?(?:[.\s]No)?)[：:\s]+([A-Za-z0-9\s\-]+)',
+                        corpus, re.I)
+    label_prefix = ""
+    if m_lbl or m_catno:
+        lbl_parts = []
+        if m_lbl:
+            lbl_parts.append(m_lbl.group(1).strip())
+        if m_catno:
+            lbl_parts.append(m_catno.group(1).strip())
+        label_prefix = " ".join(lbl_parts) + " "
+
+    extras[0] = f"{label_prefix}{extras[0]}"
+
+    note = _version_note(task.get("small_descr"), artist=artist, album=album)
+    if note:
+        extras.append(note)
+
+    return f"{artist} - {album} | {cat} | {' / '.join(extras)}"
+
+
 # ==================== BBCode 简介 ====================
 
 def extract_cover_url(descr_text):
@@ -484,6 +813,11 @@ def markdown_to_bbcode(text: str) -> str:
 
     # 3. 标题（行首 1-6 个 #）
     s = re.sub(r"(?m)^#{1,6}\s+(.+?)\s*$", r"[b]\1[/b]", s)
+    # 3b. 裸标题记号（只有 #、后面没有文字的行）——它不是合法 Markdown 标题，
+    #     上面的转换接不住，会原样漏到页面上变成一个孤立的「#」
+    #     （实测 908393 妹妹哼情歌：皇后正文里有一条孤立的 `#` 行，
+    #     站点审核口径是「Markdown 改为 bbcode」⇒ 裸 # 同样算残留，整行删除）。
+    s = re.sub(r"(?m)^#{1,6}\s*$\n?", "", s)
 
     # 4. 加粗与斜体
     s = re.sub(r"\*\*(.+?)\*\*", r"[b]\1[/b]", s)
@@ -507,19 +841,41 @@ def markdown_to_bbcode(text: str) -> str:
     return s
 
 
+def build_source_link(task):
+    """转载来源声明（**四站共用**同一份文案，作为简介第一块 `[quote]`）。
+
+    ★★ 为什么抽成公共函数（2026-11-10）：文案原先在 `pter_site` / `xingwan_site`
+      各写一份，而 `descr.build_form_fields()`（乌托邦）与
+      `crabpt_site.build_fields()`（蟹黄堡）**根本没传** `source_link`
+      ⇒ 这两站页面上**没有**转载引用块，且不会报任何错。
+      用户指出「需要转载引用块的呀」⇒ 补齐，并把文案收敛到一处，
+      避免下次再加站点又漏一份。
+    ★ 优先带 OpenCD 种子 id（可点回原页）；没有 id 时退回种子名，
+      两者都没有也至少给出「转自OpenCD」，**绝不返回空**（空 = 又静默丢引用）。
+    """
+    tid = (task or {}).get("opencd_tid")
+    if tid:
+        return f"转自OpenCD: https://open.cd/details.php?id={tid}"
+    name = (task or {}).get("torrent_name") or (task or {}).get("formatted_title") or ""
+    return f"转自OpenCD: {name}" if name else "转自OpenCD"
+
+
 def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
                 logs=None, extra_note=None, opencd_descr="", site=None,
                 source_link=""):
     """
     生成种子页面 BBCode 简介。
 
-    ★★ 结构（2026-09-26 改，用户拍板「B 并存」）：
+    ★★ 结构（2026-09-26 改，用户拍板「B 并存」；2026-11-10 改「来源声明置顶」）：
+        ①a 资源来源引用   —— ★★ **置顶**（`source_link`，[quote]转自OpenCD...[/quote]）
         ① 封面图          —— **我们的**（`cover_url`，图链）
-        ①b 资源来源引用   —— ★ 猫站要求（`source_link`，[quote]转自OpenCD...[/quote]）
         ② 皇后简介正文    —— 皇后 `divdescr` 原文（`opencd_descr`，**已剥图**）
         ③ 曲目列表        —— ★ **皇后原版**优先，退回我们的
         ④ 抓轨日志（折叠）—— **保留**，多碟每碟一块（★ 蟹黄堡不要，猫站用 [hide=Log]）
     末尾不追加任何程序署名兜底（旧版会写"由自动化发布程序生成。"）。
+
+    ★★ `source_link` 的位置（2026-11-10 用户拍板：「简介里面的引用应改置顶」）：
+      四站**一律**排在最前（在封面图之上）。原先只有猫站置顶、其余站点在封面下方。
 
     ── `site` 参数（2026-09-27 加，用户拍板）─────────────────────────────
     ★★ **蟹黄堡不要 ④ 那个折叠日志块**。用户原话：「折叠代码也不需要」。
@@ -577,17 +933,20 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
 
     blocks = []
 
-    # ★ 猫站规则（置顶）：转载声明必须绝对置顶（排在最前面，在封面图之上）
-    if site == "pter" and source_link and str(source_link).strip():
+    # ①a 资源来源声明 —— ★★ **一律置顶**（2026-11-10 用户拍板）
+    #   起因：用户看过星湾页面后要求「简介里面的引用应改置顶」。
+    #   原先只有猫站置顶（其规则要求声明排在最前），其余站点（星湾等）
+    #   贴在封面图**下方**。⇒ 现四站统一：只要 `source_link` 非空就排第一块，
+    #   在封面图之上。⇒ 不再有 ①b 那个"封面下方的引用"分支。
+    #   ★ 为什么改成无条件而不是"再加一个站点白名单"：来源声明是**转载合规**信息，
+    #     位置"越显眼越好"这个诉求对所有站点都成立，没有站点要求它靠后
+    #     ⇒ 站点白名单只会变成下一个"漏加一站就静默错位"的地方。
+    if source_link and str(source_link).strip():
         blocks.append(f"[quote]{source_link.strip()}[/quote]")
 
     # ① 封面图 —— **我们的**图链（皇后正文里的图已在解析层剥掉）
     if cover_url and str(cover_url).strip():
         blocks.append(f"[center][img]{cover_url.strip()}[/img][/center]")
-
-    # ①b 非猫站站点的资源来源声明（保留在封面下方，与既有老站页面一致）
-    if site != "pter" and source_link and str(source_link).strip():
-        blocks.append(f"[quote]{source_link.strip()}[/quote]")
 
     # ② 皇后简介正文 —— 原文贴入（猫站经 markdown_to_bbcode 清洗保真）
     if opencd_descr and str(opencd_descr).strip():
@@ -646,7 +1005,10 @@ def build_form_fields(task, *, anonymous=True, autodetect=True):
     则不输出 `uplver` 字段。
     """
 
-    title = task.get("formatted_title") or task.get("torrent_name") or ""
+    # 主标题：三站统一按猫站口径（`normalize_music_title`）。
+    #   原先是把 `formatted_title`（皇后原文，带「分轨」和个人压制者后缀）
+    #   原样提交 ⇒ 乌托邦页面标题又长又脏，与猫站页面不一致。
+    title = normalize_music_title(task)
     raw = task.get("torrent_name") or ""
 
     # 多碟日志存在 logs_json 里（run.py 写入）。解析失败就退回单条 log_content。
@@ -662,29 +1024,11 @@ def build_form_fields(task, *, anonymous=True, autodetect=True):
 
     tracklist = task.get("tracklist") or ""
 
-    # 副标题渲染时重算：已发布的老记录当初存的是「歌手-专辑(年)|格式」这种和主标题
-    # 重复的旧值，只有在这里重算才能在下一次编辑时刷新成「全 N 曲 / DCD」。
-    # 数不出曲目（老分轨记录 tracklist 为空）就退回库里旧值，不硬造。
-    #    · 皇后转载路（有 `opencd_tid`）→ `opencd_small_descr(task["small_descr"])`
-    #      = 解析层从皇后页面 `<div class="smalltitle">` 读到的**原文**。
-    #      ★ `task["small_descr"]` 就是它，**别再拿主标题顶替**（我犯过这个错）。
-    #      ★ 皇后本来就没写副标题时（实测「齐秦」那条）→ 空串，**留空不硬造**。
-    #    · qB 本地抓轨路 → 维持 `derive_small_descr()`「全 N 曲」不变。
-    is_opencd = bool(task.get("opencd_tid"))
-    if is_opencd:
-        small = opencd_small_descr(task.get("small_descr"))
-    else:
-        small = derive_small_descr(
-            tracklist,
-            disc_count=len(logs) if logs else None,
-            fallback=task.get("small_descr") or "",
-        )
-    #    这里**刻意保留原写法**而不是直接调那个函数，因为两者有一个**真实差异**：
-    #    本函数外面已经算过 `logs`（多碟日志，用于后面拼简介），复用它**省一次 json 解析**；
-    #    而 `build_small_descr_for_task()` 面向"只想拿副标题"的调用方（如蟹黄堡适配层），
-    #    自己没有 logs。
-    #    ★ 两条路的**结果必须一致** —— 若哪天有人只改了这里，就成了两个口径。
-    #    已用一条断言把它钉住（见本函数末尾的 selftest，或 tests 里的对照）。
+    # 副标题：三站统一按猫站口径（`build_music_small_descr`）——三段式
+    #   「艺术家 - 专辑 | 发行类别 | 介质 / 规格 / Log / Cue / 版本」。
+    #   原先是皇后 smalltitle 原文（「WEB QQ [16Bit-44.1kHz] FLAC」之类）
+    #   或「全 N 曲」，两种都不是猫站的三段式规范。
+    small = build_music_small_descr(task)
 
     descr = build_descr(
         cover_url=task.get("cover_url") or "",
@@ -709,6 +1053,10 @@ def build_form_fields(task, *, anonymous=True, autodetect=True):
         #      那条"零项目内依赖"是同一个纪律）。`db` 那个常量本身就等于
         #     两处各写一份要么共用、要么被判据钉住）。
         site="musopia",
+        #   ★★ 2026-11-10 用户指出「乌托邦/蟹黄堡没有引用块」的**根因就在这行缺失**：
+        #     `source_link` 默认空串 ⇒ `build_descr` 静默跳过引用块（不报错）。
+        #     四站必须都传；文案统一由 `build_source_link()` 生成。
+        source_link=build_source_link(task),
     )
 
     #    真实表单 —— 用户提供的 `opencdhtml/音乐乌托邦 __ 发布 - Powered by NexusPHP.html`，
@@ -1094,6 +1442,16 @@ def _check():
         "[quote]转自OpenCD: https://open.cd/details.php?id=12345[/quote]" in _pter)
     chk("⑨j 猫站：来源声明必须置顶（首行优先于封面图）",
         _pter.startswith("[quote]转自OpenCD: https://open.cd/details.php?id=12345[/quote]"))
+    # ★★ 2026-11-10 用户拍板：「简介里面的引用应改置顶」⇒ **非猫站也要置顶**。
+    #   阴性对照：无 `source_link` 时首块仍是封面图（不能凭空造引用块）。
+    _xw = build_descr(cover_url=_COVER, tracklist=_TL, log_content=_LOG,
+                      site="xingwan", source_link="转自OpenCD: https://open.cd/details.php?id=12345")
+    chk("⑨l 星湾：来源声明同样置顶（首行优先于封面图）",
+        _xw.startswith("[quote]转自OpenCD: https://open.cd/details.php?id=12345[/quote]")
+        and _xw.index("[img]") > _xw.index("[quote]"))
+    _nosrc = build_descr(cover_url=_COVER, tracklist=_TL, log_content=_LOG, site="xingwan")
+    chk("⑨m 星湾：无 source_link 时首块仍是封面图（不凭空造引用）",
+        _nosrc.startswith("[center][img]") and "[quote]转自OpenCD" not in _nosrc)
     _md_test = build_descr(opencd_descr="### 简介标题\n**歌手**：测试\n> 引用说明", site="pter")
     chk("⑨k 猫站：Markdown 标题与加粗转为 BBCode",
         "[b]简介标题[/b]" in _md_test and "[b]歌手[/b]" in _md_test and "###" not in _md_test)
@@ -1111,6 +1469,31 @@ def _check():
     _fields_named = build_form_fields(_sample_task, anonymous=False)
     chk("⑩c 显式传 anonymous=False 时不含 uplver 键（供 update_metadata 保留现状）",
         "uplver" not in _fields_named)
+
+    # ══════════════════════════════════════════════════════════════════
+    # ⑪ 转载引用块：四站都必须有，且置顶（2026-11-10 用户指出的回归）
+    #   根因：`build_form_fields`（乌托邦）与 `crabpt_site.build_fields`（蟹黄堡）
+    #   原先**没传** `source_link` ⇒ `build_descr` 静默跳过引用块。
+    #   这里直接断言**真实字段产出**，而不是只测 `build_descr`。
+    # ══════════════════════════════════════════════════════════════════
+    _quote_task = {"formatted_title": "Test Title", "torrent_name": "Test Torrent",
+                   "opencd_tid": 12345}
+    _mus_fields = build_form_fields(_quote_task)
+    chk("⑪a 乌托邦：真实提交的 descr 首块是转载引用",
+        _mus_fields["descr"].startswith(
+            "[quote]转自OpenCD: https://open.cd/details.php?id=12345[/quote]"),
+        f"实得首 60 字：{_mus_fields['descr'][:60]!r}")
+    chk("⑪b 引用块在封面图之上",
+        _mus_fields["descr"].find("[img]") == -1
+        or _mus_fields["descr"].index("[quote]") < _mus_fields["descr"].index("[img]"))
+    _mus_noid = build_form_fields({"formatted_title": "Test Title"})
+    chk("⑪c 乌托邦：无 opencd_tid 时用种子名兜底，仍不丢引用",
+        _mus_noid["descr"].startswith("[quote]转自OpenCD: Test Title[/quote]"),
+        f"实得首 60 字：{_mus_noid['descr'][:60]!r}")
+    _crab = build_descr(cover_url=_COVER, tracklist=_TL, log_content=_LOG,
+                        site="crabpt", source_link="转自OpenCD: https://open.cd/details.php?id=12345")
+    chk("⑪d 蟹黄堡：引用块置顶且不含 LOG（原有站点差异保留）",
+        _crab.startswith("[quote]") and "[spoiler=LOG]" not in _crab)
 
     return ok, fails
 

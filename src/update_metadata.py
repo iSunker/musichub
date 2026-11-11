@@ -28,8 +28,10 @@ import time
 
 import config
 
+import crabpt_site
 import db
 import descr
+import xingwan_site
 from musopia import LoginExpired, MusopiaClient, SiteError
 
 #   两处各写一份折空白/NFC 的逻辑，迟早会漂，而这里漂的后果是"版本不符"报错/漏报。
@@ -46,6 +48,8 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("torrent_id", nargs="?", help="只处理这一个站点种子 ID")
+    ap.add_argument("--site", choices=("musopia", "crabpt", "xingwan"), default="musopia",
+                    help="编辑目标站点（musopia/crabpt/xingwan，默认 musopia）")
     ap.add_argument("--apply", action="store_true",
                     help="真正提交修改（不加此参数只预览，默认安全）")
     ap.add_argument("--limit", type=int, default=0, help="最多处理多少条，0 表示不限")
@@ -53,6 +57,10 @@ def parse_args():
                     help="只处理本地已有封面 URL 的记录")
     ap.add_argument("--stale-only", action="store_true",
                     help="只处理未同步过或本地有更新的记录（定时任务用，避免每轮空转）")
+    ap.add_argument("--only-exists", action="store_true",
+                    help="按 site_publish 里 EXISTS 的记录选行（站点上确实还在的），"
+                         "而不是 tasks.site_torrent_id 那份历史值 —— 回刷旧页面时用，"
+                         "免得把站点已删除的页面也算进来")
 
     ap.add_argument("--no-autodetect", action="store_true",
                     help="不自动推断 载体/编码 下拉项，保留站点现值")
@@ -109,6 +117,25 @@ def select_fields(full_fields, whitelist):
         return full_fields
     keep = {f.strip() for f in whitelist.split(",") if f.strip()}
     return {k: v for k, v in full_fields.items() if k in keep}
+
+
+def retry_net(fn, *, tries=3, delay=10.0):
+    """只对**网络层**异常重试（超时/连接重置）；`SiteError` 立刻抛（那不是抖动）。
+
+    ★ 为什么要有：2026-11-10 回刷时站点单页要 10~25s，偶尔 >30s 触发读超时，
+      而未处理时会直接把整批（300+ 条）带走。重试一次通常就过去了。
+    ★ 不重试 `SiteError`：它表示"站点明确说了不行"（页面被删/没权限/字段改名），
+      重试只会让失败慢三倍，且掩盖真实原因。
+    """
+    for n in range(tries):
+        try:
+            return fn()
+        except SiteError:
+            raise
+        except Exception:                                # noqa: BLE001
+            if n + 1 >= tries:
+                raise
+            time.sleep(delay * (n + 1))
 
 
 def describe(task):
@@ -205,15 +232,26 @@ def main():
     #   真值来自真跑一次 `build_form_fields()`，不是手抄清单
     #   （手抄的那份正是这次订正掉的错误来源）。
     if args.list_fields:
-        tasks = db.get_published()
+        if args.site == "xingwan":
+            tasks = db.get_published_for_site(db.SITE_XINGWAN, require_allow=True)
+        elif args.site == "crabpt":
+            tasks = db.get_published_for_site(db.SITE_CRABPT, require_allow=True)
+        else:
+            tasks = db.get_published()
         if not tasks:
             sys.exit("❌ 库里没有已发布的记录，无法取样本渲染字段名。")
         sample = tasks[0]
         import publish as _pub
         _pub.merge_mapped(sample)
-        full = descr.build_form_fields(sample, anonymous=args.anonymous,
-                                       autodetect=not args.no_autodetect)
-        full.pop("type", None)   # 编辑路永远不发这个（见下面 describe 之后的注释）
+        if args.site == "xingwan":
+            full, _ = xingwan_site.build_edit_fields(sample, anonymous=args.anonymous)
+        elif args.site == "crabpt":
+            full, _ = crabpt_site.build_fields(sample, anonymous=args.anonymous)
+            full.pop("type", None)   # 编辑路不改分类（同乌托邦那条注释）
+        else:
+            full = descr.build_form_fields(sample, anonymous=args.anonymous,
+                                           autodetect=not args.no_autodetect)
+            full.pop("type", None)   # 编辑路永远不发这个（见下面 describe 之后的注释）
         print(f"\n📋 --fields 可用的键名（样本 id={sample.get('site_torrent_id')}，"
               f"共 {len(full)} 个）：\n")
         for k in sorted(full):
@@ -233,11 +271,22 @@ def main():
         #   正是最容易在不知情时敲到 DENY 行的那条路（人只看到一个 sid）。
         #   ★ 真要改某个 DENY 行的页面，**先把它标成 ALLOW**（这是一次有记录的动作），
         #     而不是在这里开一个静默的例外。
-        tasks = db.get_published(torrent_id=args.torrent_id, require_allow=True)
+        if args.site == "xingwan":
+            tasks = db.get_published_for_site(
+                db.SITE_XINGWAN, require_allow=True, torrent_id=args.torrent_id)
+            _raw = db.get_published_for_site(
+                db.SITE_XINGWAN, require_allow=False, torrent_id=args.torrent_id)
+        elif args.site == "crabpt":
+            tasks = db.get_published_for_site(
+                db.SITE_CRABPT, require_allow=True, torrent_id=args.torrent_id)
+            _raw = db.get_published_for_site(
+                db.SITE_CRABPT, require_allow=False, torrent_id=args.torrent_id)
+        else:
+            tasks = db.get_published(torrent_id=args.torrent_id, require_allow=True)
+            _raw = db.get_published(torrent_id=args.torrent_id)
         if not tasks:
             #   列出多个原因却不给分辨法，读的人只能猜，而猜错要花好几轮去追）。
             #   这里能分辨：库里查得到、但被闸门④ 拦住 ⇒ 与"库里根本没有"不同。
-            _raw = db.get_published(torrent_id=args.torrent_id)
             if _raw:
                 _r = _raw[0].get("transfer_rule")
                 sys.exit(
@@ -253,12 +302,31 @@ def main():
         # ★★★ `require_allow=True` —— 本路**会把内容写到站点上**，必须过闸门④。
         #   ★ 探针 `db.count_stale()` 也必须带同一条闸门，否则会出现
         #     "探针说有活 → edit 选不出来 → 探针还说有活" 的高频空转。
-        tasks = db.get_published(only_with_cover=args.only_cover,
-                                 only_stale=args.stale_only,
-                                 require_allow=True)
+        if args.site == "xingwan":
+            tasks = db.get_published_for_site(
+                db.SITE_XINGWAN, only_stale=args.stale_only, require_allow=True)
+            if args.only_cover:
+                tasks = [t for t in tasks if (t.get("cover_url") or "").strip()]
+        elif args.site == "crabpt":
+            tasks = db.get_published_for_site(
+                db.SITE_CRABPT, only_stale=args.stale_only, require_allow=True)
+            if args.only_cover:
+                tasks = [t for t in tasks if (t.get("cover_url") or "").strip()]
+        else:
+            if args.only_exists:
+                # ★ 回刷历史页面用：以 `site_publish` 的 EXISTS 为准（站点上真在的），
+                #   而不是 `tasks.site_torrent_id`（含已被站点删除/换 id 的历史值）。
+                tasks = db.get_published_for_site(
+                    db.SITE_MUSOPIA, only_stale=args.stale_only, require_allow=True)
+                if args.only_cover:
+                    tasks = [t for t in tasks if (t.get("cover_url") or "").strip()]
+            else:
+                tasks = db.get_published(only_with_cover=args.only_cover,
+                                         only_stale=args.stale_only,
+                                         require_allow=True)
 
     st = db.stats()
-    if st["no_site_id"]:
+    if args.site == "musopia" and st["no_site_id"]:
         print(f"⚠️  有 {st['no_site_id']} 条 EXISTS 记录还缺 site_torrent_id，"
               f"这次会被跳过。补齐请先跑: python sync_site.py --apply")
 
@@ -284,12 +352,52 @@ def main():
             print("🚫 已取消，未向站点提交任何数据。")
             return
 
-    client = MusopiaClient(request_interval=args.interval)
+    if args.site == "xingwan":
+        client = xingwan_site.XingwanClient(request_interval=args.interval)
+
+        def _build_full(task):
+            return xingwan_site.build_edit_fields(task, anonymous=args.anonymous)[0]
+
+        def _mark_synced(info_hash):
+            db.site_publish_set(info_hash, db.SITE_XINGWAN, synced=True)
+    elif args.site == "crabpt":
+        # ★ 蟹黄堡的编辑走 NexusPHP 通用的 `takeedit.php`：字段基线 + 覆盖。
+        #   `CrabptClient` 只实现了发布（见其类头注释：编辑路必须拿基线，
+        #   那时没有这条路径）。这里复用乌托邦那份**通用**的 takeedit 实现
+        #   （`fetch_edit_form` / `edit_torrent` / `fetch_details`），
+        #   只把连接换成蟹黄堡 —— 不改 `MusopiaClient` 本身（主发布线不受影响）。
+        client = MusopiaClient(
+            base_url=config.CRABPT_URL,
+            cookie=config.CRABPT_COOKIE,
+            request_interval=args.interval,
+        )
+
+        def _build_full(task):
+            full, _audit = crabpt_site.build_fields(task, anonymous=args.anonymous)
+            full.pop("type", None)
+            return full
+
+        def _mark_synced(info_hash):
+            db.site_publish_set(info_hash, db.SITE_CRABPT, synced=True)
+    else:
+        client = MusopiaClient(request_interval=args.interval)
+
+        def _build_full(task):
+            full = descr.build_form_fields(
+                task, anonymous=args.anonymous,
+                autodetect=not args.no_autodetect)
+            full.pop("type", None)
+            return full
+
+        _mark_synced = db.mark_synced
+
     try:
         uid = client.check_login()
-        print(f"\n✅ Cookie 有效，user_id = {uid}\n")
+        print(f"\n✅ {args.site} Cookie 有效，user_id = {uid or '未知'}\n")
     except SiteError as e:
         sys.exit(f"❌ {e}")
+    except Exception as e:                               # noqa: BLE001
+        sys.exit(f"❌ 连接 {args.site} 失败（{type(e).__name__}: {e}）⇒ 未提交任何数据")
 
     ok = failed = skipped = warnings = refused = 0
     failures = []
@@ -327,20 +435,28 @@ def main():
         #   ★ 放在**最前**（读表单/回收封面之前）：拒改是本地判据，不该先敲站点。
         #   ★ dry-run 也要拦：dry-run 打印的"将要改什么"若基于错页就是误导。
         _local_name = ""
+        import site_verify as _sv
         try:
             _tf = task.get("torrent_file") or ""
             if _tf and os.path.exists(_tf):
-                import site_verify as _sv
                 _local_name, _ = _sv.extract_info_name(open(_tf, "rb").read())
         except Exception:                                # noqa: BLE001 —— 取不到名 ⇒ 交由护栏拒改
             _local_name = ""
         try:
-            _tb = client.download_torrent(tid)
+            _tb = retry_net(lambda: client.download_torrent(tid))
             _hosted_name, _ = (_sv.extract_info_name(_tb) if _tb else (None, ""))
         except SiteError as e:
             print(f"    ❌ 取站侧 .torrent 失败 ⇒ 拒改：{e}")
             refused += 1
             refused_rows.append((tid, str(e)))
+            continue
+        except Exception as e:                           # noqa: BLE001
+            #    ★ 网络超时/连接被重置不该让**整批**（300+ 条）崩掉：
+            #      2026-11-10 实测两条并行回刷时，站点限速 ⇒ ReadTimeout ⇒
+            #      未捕获的 requests 异常直接把进程带走，前面做的全白费。
+            print(f"    ❌ 取站侧 .torrent 网络异常 ⇒ 跳过：{type(e).__name__}: {e}")
+            failed += 1
+            failures.append((tid, f"{type(e).__name__}: {e}"))
             continue
         _ok, _why = _sv.edit_target_ok(_local_name, _hosted_name)
         if not _ok:
@@ -357,13 +473,18 @@ def main():
         prefetched = None
         if not (task.get("cover_url") or "").strip():
             try:
-                prefetched = client.fetch_edit_form(tid)
+                prefetched = retry_net(lambda: client.fetch_edit_form(tid))
             except LoginExpired as e:
                 sys.exit(f"❌ {e}")
             except SiteError as e:
                 print(f"    ❌ {e}")
                 failed += 1
                 failures.append((tid, str(e)))
+                continue
+            except Exception as e:                       # noqa: BLE001 —— 网络超时不停整批
+                print(f"    ❌ 读编辑表单网络异常 ⇒ 跳过：{type(e).__name__}: {e}")
+                failed += 1
+                failures.append((tid, f"{type(e).__name__}: {e}"))
                 continue
             site_cover = descr.extract_cover_url(prefetched[0].get("descr") or "")
             if site_cover:
@@ -386,26 +507,26 @@ def main():
         import publish as _pub
         _pub.merge_mapped(task)
 
-        full = descr.build_form_fields(
-            task,
-            anonymous=args.anonymous,
-            autodetect=not args.no_autodetect,
-        )
+        full = _build_full(task)
 
-        full.pop("type", None)
         overrides = select_fields(full, args.fields)
 
         try:
-            success, msg = client.edit_torrent(
+            success, msg = retry_net(lambda: client.edit_torrent(
                 tid, overrides, dry_run=not args.apply, verbose=True,
                 prefetched=prefetched,
-            )
+            ))
         except LoginExpired as e:
             sys.exit(f"❌ {e}")
         except SiteError as e:
             print(f"    ❌ {e}")
             failed += 1
             failures.append((tid, str(e)))
+            continue
+        except Exception as e:                           # noqa: BLE001 —— 网络超时不停整批
+            print(f"    ❌ 提交编辑网络异常 ⇒ 跳过：{type(e).__name__}: {e}")
+            failed += 1
+            failures.append((tid, f"{type(e).__name__}: {e}"))
             continue
 
         if success:
@@ -417,12 +538,12 @@ def main():
                 # 拉一次 edit.php 做对比——254 条里绝大多数最终都是"无需修改"，
                 # 不标记就等于每小时把整站页面重新爬一遍。
                 if args.apply:
-                    db.mark_synced(task["info_hash"])
+                    _mark_synced(task["info_hash"])
             else:
                 ok += 1
                 print(f"    ✅ {msg}")
                 if args.apply:
-                    db.mark_synced(task["info_hash"])
+                    _mark_synced(task["info_hash"])
 
                 if args.apply and args.verify:
                     try:

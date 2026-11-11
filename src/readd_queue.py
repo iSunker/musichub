@@ -51,16 +51,17 @@ def save_queue(q):
 
 
 def enqueue(torrent_bytes, save_path, category, delay_min, note="",
-            src_path="", album=""):
+            src_path="", album="", tags=None):
     """将一条待回加任务存入延迟队列。
 
     :param torrent_bytes: .torrent 文件二进制数据。
     :param save_path: 做种目标目录。
-    :param category: qB 分类标签。
+    :param category: qB 分类标签（空串 = 不打分类）。
     :param delay_min: 延迟等待时长（分钟）。
     :param note: 任务备注信息。
     :param src_path: 原始媒体文件路径。
     :param album: 专辑名称。
+    :param tags: qB 标签列表（星湾等"不建分类、只打标签"的站点用）。
     :returns: 入队是否成功。
     """
     if delay_min <= 0:
@@ -83,6 +84,7 @@ def enqueue(torrent_bytes, save_path, category, delay_min, note="",
         "enqueued_at": _now(),
         "save_path": save_path,
         "category": category,
+        "tags": [str(t).strip() for t in (tags or []) if str(t or "").strip()],
         "note": note,
         "torrent_b64": b64,
         "src_path": src_path,
@@ -101,7 +103,8 @@ def enqueue(torrent_bytes, save_path, category, delay_min, note="",
     q["items"].append(item)
     ok = save_queue(q)
     if ok:
-        print(f"    ⏳ 已排入延迟队列：{delay_min} 分钟后回加 qB（{note}；用途: {save_path}；cat: {category}）")
+        print(f"    ⏳ 已排入延迟队列：{delay_min} 分钟后回加 qB（{note}；用途: {save_path}；"
+              f"cat: {category or '∅'}；tags: {','.join(item['tags']) or '∅'}）")
     return ok
 
 

@@ -14,6 +14,7 @@ import time
 import config
 import crabpt_site
 import pter_site
+import xingwan_site
 import db
 import descr
 import readd_queue
@@ -35,8 +36,8 @@ def parse_args():
                     help="具名发布（覆盖默认匿名）")
     ap.add_argument("--auto", action="store_true",
                     help="无人值守自动发布模式，需验证 PUBLISH_I_AM_HERE 口令")
-    ap.add_argument("--site", choices=("musopia", "crabpt", "pter"), default="musopia",
-                    help="发布目标站点（musopia/crabpt/pter，默认 musopia）")
+    ap.add_argument("--site", choices=("musopia", "crabpt", "pter", "xingwan"), default="musopia",
+                    help="发布目标站点（musopia/crabpt/pter/xingwan，默认 musopia）")
     ap.add_argument("--selftest", action="store_true",
                     help="执行离线自检逻辑，不发起网络请求且不修改数据库")
     return ap.parse_args()
@@ -240,13 +241,27 @@ def _resolve_opencd_content_path(info_hash, *, return_reason=False):
             print(f"    ⚠️  handoff：{msg}")
             return _out("", msg)
 
-        #  兜底（）：若 opencd 实例原种已被清理出客户端，但本地 tasks 库已记录 content_path 且物理存在
+        #  兜底（）：若 opencd 实例原种已被清理出客户端，但本地 tasks 库已记录 content_path。
+        #    ★ 原种常已被 handoff 挪到 music1/2/3，DB 里仍是容器路径 `/downloads/<专辑>`；
+        #      必须按 HANDOFF_DIR_MAP 的物理根逐个探测，命中后再返回真实目录。
         try:
             import db
-            cp_db = db.get_content_path(info_hash)
-            if cp_db and os.path.exists(cp_db):
-                print(f"    ℹ️  {host} 无原种任务，但命中本地库 tasks.content_path 且物理存在: {cp_db}")
-                return _out(cp_db, "")
+            cp_db = str(db.get_content_path(info_hash) or "")
+            if cp_db:
+                rel = ""
+                if cp_db.startswith("/downloads/"):
+                    rel = cp_db[len("/downloads/"):]
+                elif cp_db.startswith("/downloads"):
+                    rel = cp_db[len("/downloads"):].lstrip("/")
+                cands = []
+                if rel:
+                    for _root in (getattr(config, "HANDOFF_DIR_MAP", {}) or {}).values():
+                        cands.append(os.path.join(str(_root), rel))
+                cands.append(cp_db)
+                for cand in cands:
+                    if cand and os.path.exists(cand):
+                        print(f"    ℹ️  {host} 无原种任务，但本地磁盘命中成品目录: {cand}")
+                        return _out(cand, "")
         except Exception as _e_cp:
             pass
 
@@ -743,6 +758,98 @@ def readd_to_qb_pter(qb, client, info_hash, torrent_id):
         except Exception as e:
             print(f"    ⚠️  回加复核失败（不影响发布本身）: {type(e).__name__}: {e}")
     except Exception as e:
+        print(f"    ❌ 回加 qB 出错: {e}")
+
+
+def readd_to_qb_xingwan(qb, client, info_hash, torrent_id):
+    """把星湾上的新种子下载回来加进 qB 做种。
+
+    ★ 星湾不建 qB 分类：统一打**标签** `config.XINGWAN_PUBLISH_TAG`（默认 `Xingwan`），
+      交棒/巡检/清盘都按标签识别本项目种（见 `handoff.is_own_project`）。
+    """
+    tag = getattr(config, "XINGWAN_PUBLISH_TAG", "Xingwan")
+    if qb is None:
+        print("    ⚠️  回加跳过：本次没有可用的 qB 连接")
+        return
+    try:
+        content = client.download_torrent(torrent_id)
+        if not content:
+            print("    ❌ 从星湾下载种子文件失败，跳过回加")
+            return
+
+        _handoff_on = str(getattr(config, "ENABLE_HANDOFF", "false")).strip().lower() in (
+            "1", "true", "yes", "y", "on")
+        _h_src = ""
+        _h_album = ""
+        if _handoff_on:
+            save_path = config.PUBLISH_SAVE_ROOT
+            try:
+                import handoff
+                src, _src_why = _resolve_opencd_content_path(info_hash, return_reason=True)
+                album = os.path.basename(str(src).rstrip("/\\")) if src else ""
+                _h_src, _h_album = src, album
+                if src and album:
+                    _ok, _why = handoff.begin_handoff_for_task(
+                        src, album, info_hash, task=None,
+                        source_category="", target_category="",
+                        target_tags=[tag],
+                        dry_run=(config.HANDOFF_DRY_RUN == "true"))
+                    print(f"    🔀 handoff 复制: {_why}")
+                    if not _ok:
+                        print(f"    ❌ handoff 未就位 ⇒ **跳过回加 3010**（避免变成下载）：{_why}")
+                        handoff.record_missing_data(info_hash, album, "xingwan", _why)
+                        return
+                else:
+                    print("    ⚠️  handoff：拿不到 opencd 原种 content_path，跳过复制")
+                    print("    ❌ 无法定位源成品 ⇒ **跳过回加 3010**（避免变成下载）")
+                    handoff.record_missing_data(info_hash, album, "xingwan",
+                                                _src_why or "拿不到 opencd content_path")
+                    return
+            except Exception as _e:                          # noqa: BLE001
+                print(f"    ❌ handoff 复制/核对异常 ⇒ **跳过回加 3010**（避免变成下载）: "
+                      f"{type(_e).__name__}: {_e}")
+                handoff.record_missing_data(info_hash, album, "xingwan",
+                                            f"{type(_e).__name__}: {_e}")
+                return
+        else:
+            orig = qb.torrents_info(torrent_hashes=info_hash)
+            if not orig:
+                print(f"    ⚠️  回加跳过：qB 里找不到原种 {info_hash[:12]}…（无法确定保存路径）")
+                return
+            save_path = orig[0].save_path
+
+        if config.SEED_DELAY_MIN > 0:
+            readd_queue.enqueue(
+                content, save_path, "", config.SEED_DELAY_MIN,
+                note=f"星湾 {info_hash[:12]}…",
+                src_path=_h_src, album=_h_album, tags=[tag],
+            )
+            return
+
+        qb.torrents_add(
+            torrent_files=content,
+            save_path=save_path,
+            is_paused=False,
+            tags=[tag],
+        )
+        print(f"    ✅ 已提交回加至 qB（做种路径: {save_path}，标签: {tag}）")
+        try:
+            new_hash = torf.Torrent.read_stream(io.BytesIO(content)).infohash
+            got = qb.torrents_info(torrent_hashes=new_hash)
+            if not got:
+                print(f"    ⚠️  回加复核：此刻 qB 里查不到 {new_hash[:12]}…（异步入库中）")
+            else:
+                t = got[0]
+                _dl_states = {"stalledDL", "downloading", "metaDL", "stoppedDL",
+                              "pausedDL", "allocating", "checkingDL", "forcedDL",
+                              "queuedDL", "missingFiles", "error", "unknown"}
+                prog = float(getattr(t, "progress", 0) or 0)
+                ok = (t.state not in _dl_states) and prog >= 1.0
+                mark = "✅" if ok else "★★"
+                print(f"    {mark} 回加复核：state={t.state} progress={prog:.3f} content_path={t.content_path!r}")
+        except Exception as e:                              # noqa: BLE001
+            print(f"    ⚠️  回加复核失败（不影响发布本身）: {type(e).__name__}: {e}")
+    except Exception as e:                                  # noqa: BLE001
         print(f"    ❌ 回加 qB 出错: {e}")
 
 
@@ -1348,6 +1455,24 @@ def _pter_cover(task, *, dry_run=False):
             return src, f"猫站图床未配置或上传未成功，回退复用已有公网图床封面：{src}"
         raise CoverItemError(f"图床上传失败（本地图 {local}）")
     return url, f"新传封面：{local} ⇒ {url}"
+
+
+def _xingwan_cover(task, *, dry_run=False):
+    """星湾封面：复用已落库的星湾封面或现有 PicGo 公网图链，不新增图床依赖。
+
+    星湾允许外链图床，因此这里不做上传；`dry_run` 同样只验证来源可用。
+    """
+    h = task["info_hash"]
+    have = db.site_cover_url_of(h, db.SITE_XINGWAN)
+    if have:
+        return have, f"已有星湾专用封面（site_publish）⇒ 复用：{have}"
+
+    src = (task.get("cover_url") or "").strip()
+    if not src:
+        raise CoverItemError("库里连 cover_url 都没有 ⇒ 无源可用")
+    if not (src.startswith("http://") or src.startswith("https://")):
+        raise CoverItemError(f"cover_url 不是公网图片地址，星湾无法外链：{src}")
+    return src, f"复用 PicGo 公网图链（星湾支持外链）：{src}"
 
 
 def _crabpt_fields(task, anonymous):
@@ -3150,6 +3275,311 @@ def run_pter(args):
     return
 
 
+def run_xingwan(args):
+    """星湾（xingwan.cc）发布路径。与乌托邦、蟹黄堡、猫站路径并列独立运行。
+
+    ★ 该路径只在每天 00:00-10:00 由 daemon 触发（窗口判断在 daemon，不在这里）。
+    """
+    print("=" * 60)
+    print("🌐 站点 = 星湾（xingwan.cc）★ 独立发布路径")
+    print("=" * 60)
+
+    if args.dry_run:
+        print("\n★ 显式 dry-run：不会向站点提交任何数据。")
+    elif not args.auto:
+        print("\n★★ 真发模式（没有 --dry-run，也没声明 --auto）：")
+        print("   请确认你确实要往**星湾**提交 —— 发布**不可逆**、无批量撤销。")
+
+    tasks = db.pending_xingwan_direct(db.SITE_XINGWAN)
+    if not tasks:
+        print("💡 当前没有可发的种（过闸门④ `ALLOW` ∧ 星湾没有 ∧ 不是 FAILED）——"
+              f"判据 = `db.XINGWAN_DIRECT_WHERE` = `{db.XINGWAN_DIRECT_WHERE}` ")
+        return
+
+    if args.only:
+        want = tuple(s.strip().lower() for s in args.only.split(",") if s.strip())
+        if not want:
+            sys.exit("❌ --only 给了但解析出 0 个 hash")
+        hit = [t for t in tasks if any((t.get("info_hash") or "").lower().startswith(w) for w in want)]
+        in_queue = {(t.get("info_hash") or "").lower() for t in tasks}
+        absent = [w for w in want if not any(h.startswith(w) for h in in_queue)]
+        print()
+        print("=" * 60)
+        print(f"★ --only：点名 {len(want)} 个 ⇒ 命中队列 {len(hit)} 条")
+        print("=" * 60)
+        for t in hit:
+            print(f"   ✅ {(t.get('info_hash') or '')[:12]}  {t.get('formatted_title')}")
+        for w in absent:
+            print(f"   ❌ {w} 不在星湾待发布队列里（被闸门拦截或 hash 错误）")
+        if absent:
+            print("\n   ★ 逐条查为什么没进队列：")
+            for w in absent:
+                ok_q, why_q = db.is_direct_publishable_to(w, db.SITE_XINGWAN)
+                print(f"      {w}: {'可发' if ok_q else why_q}")
+        if not hit:
+            sys.exit("❌ --only 与队列**零交集** ⇒ 拒绝执行")
+        tasks = hit
+
+    print("\n" + "=" * 60)
+    print(f"📋 发现 {len(tasks)} 条星湾待发布任务，预检清单：")
+    print("=" * 60)
+
+    valid, blocked = [], []
+    for t in tasks:
+        reason = None
+        tfile = t.get("torrent_file")
+        if not tfile or not os.path.exists(tfile):
+            reason = f"种子文件缺失 ({tfile})"
+        elif not ((t.get("cover_url") or "").strip()
+                  or db.site_cover_url_of(t.get("info_hash"), db.SITE_XINGWAN)):
+            reason = "缺少 cover_url（站内也没有历史封面）"
+
+        ih = (t.get("info_hash") or "")[:12]
+        title = t.get("formatted_title") or t.get("torrent_name") or ""
+        if reason:
+            blocked.append((t, reason))
+            print(f"   ❌ {ih}  {title} ⇒ {reason}")
+        else:
+            valid.append(t)
+            print(f"   ✅ {ih}  {title}")
+
+    if blocked:
+        print(f"\n⚠️  预检拦下 {len(blocked)} 条，有效 {len(valid)} 条")
+    if not valid:
+        print("💡 没有通过预检的任务，本次退出。")
+        return
+
+    if not args.dry_run and args.auto:
+        ok_key, why, _ = guard_auto_key()
+        if not ok_key:
+            print(f"\n🛑 发布被拒绝（第二把钥匙校验失败）：{why}")
+            sys.exit(3)
+
+    client = xingwan_site.XingwanClient()
+    qb = None
+    form_info = None
+
+    if not args.dry_run:
+        if not client.have_cookie():
+            sys.exit("❌ XINGWAN_COOKIE 是空的 ⇒ 拒绝提交。\n"
+                     "   请在 .env 中配置 XINGWAN_COOKIE。")
+        try:
+            uid = client.check_login()
+            print(f"\n✅ 星湾 Cookie 有效（uid={uid or '未知'}）")
+        except SiteError as e:
+            sys.exit(f"❌ 星湾登录态失败: {e}")
+
+        try:
+            form_info = client.fetch_upload_form()
+            print("✅ 星湾发布页预检成功（表单就绪）")
+        except SiteError as e:
+            sys.exit(f"❌ 星湾发布页预检失败: {e}")
+
+        try:
+            import qb_client
+            qb = qb_client.build()
+            print("✅ qBittorrent 连接就绪")
+        except Exception as e:                              # noqa: BLE001
+            print(f"⚠️  qB 连接失败（发布后无法立即回加做种，但仍可发布）: {e}")
+            qb = None
+
+    max_publish = args.limit if args.limit is not None else int(
+        getattr(config, "XINGWAN_MAX_PER_CYCLE", 1) or 1)
+    if max_publish <= 0:
+        max_publish = len(valid)
+
+    print(f"\n🚀 开始处理（计划成功上限 {max_publish} 条，候选池 {len(valid)} 条）...")
+
+    ok = fail = rejected = skipped = 0
+    scanned = 0
+    dup_existing = 0
+    site_down = False
+
+    for t in valid:
+        scanned += 1
+        ih = t["info_hash"]
+        title = t.get("formatted_title") or t.get("torrent_name") or ""
+        print(f"\n[{scanned}/{len(valid)}] 处理: {ih[:12]}  {title}")
+
+        if config.VERSION_GATE_BEFORE_PUBLISH:
+            vg_ok, vg_reason = _version_consistency_gate(t)
+            if not vg_ok:
+                print(f"🛑 版本闸门拦截: {vg_reason}")
+                fail += 1
+                rejected += 1
+                if not args.dry_run:
+                    db.save_task(info_hash=ih, status="FAILED", reason=f"version_gate:{vg_reason}")
+                continue
+
+        try:
+            cover, cover_why = _xingwan_cover(t, dry_run=args.dry_run)
+            print(f"   · 封面 ← {cover_why}")
+        except CoverItemError as ce:
+            print(f"   · 封面不可用（跳过本条）: {ce}")
+            skipped += 1
+            continue
+
+        if not cover:
+            print("🛑 星湾封面准备失败 ⇒ 停止本轮")
+            site_down = True
+            break
+
+        if config.DEDUP_BEFORE_PUBLISH:
+            local_nm = _local_info_name(t)
+            try:
+                hit_tid = _dedup_lookup(client, search_name=t.get("formatted_title"),
+                                        local_name=local_nm, site_label="星湾")
+                if hit_tid:
+                    print(f"   ℹ️  星湾已存在同版本 (id={hit_tid}) ⇒ 关联并跳过发布")
+                    dup_existing += 1
+                    if not args.dry_run:
+                        # ★ 只写**星湾自己的** site_publish，不改全局 status / site_synced_at：
+                        #   星湾是第二落点，改了会把同一条从乌托邦/猫站队列里挤掉。
+                        db.site_publish_set(ih, db.SITE_XINGWAN, hit_tid,
+                                            status="EXISTS", cover_url=cover, synced=True)
+                    continue
+            except SiteError as se:
+                print(f"   ❌ 星湾查重请求异常: {se}")
+                site_down = True
+                break
+
+            _sn = _same_name_precheck(client, search_name=t.get("formatted_title"),
+                                      local_name=local_nm, site_label="星湾")
+            if _sn:
+                _why = (f"同名冲突：星湾上已有 info.name 逐字相同的条目 "
+                        f"{'、'.join(tid for tid, _ in _sn[:3])} ⇒ 提交会被静默吞掉。")
+                print(f"    🛑 同名闸门拦截（{_why}）⇒ 拒绝提交，星湾侧标 FAILED 出队")
+                db.site_publish_set(ih, db.SITE_XINGWAN, status="FAILED")
+                fail += 1
+                rejected += 1
+                continue
+
+        t_copy = dict(t)
+        t_copy["cover_url"] = cover
+        fields, audit = xingwan_site.build_fields(t_copy, anonymous=args.anonymous)
+        for line in audit:
+            print(f"      · {line}")
+
+        xw_name = fields.get("name") or ""
+        xw_descr = fields.get("descr") or ""
+        if any(w in xw_name for w in ("分轨", "整轨", "分軌", "整軌")):
+            print(f"🛑 星湾标题规范门禁拦截：主标题含中文音轨标记: {xw_name}")
+            fail += 1
+            rejected += 1
+            # ★ 本地门禁失败不写全局 FAILED：否则会把这条从其它站点队列里一起挤掉。
+            continue
+
+        if "转自OpenCD" not in xw_descr:
+            print("🛑 星湾正文门禁拦截：简介缺少转载来源声明")
+            fail += 1
+            rejected += 1
+            continue
+
+        if args.dry_run:
+            print("   ℹ️  dry-run 模式：跳过实际提交")
+            ok += 1
+            if ok >= max_publish:
+                break
+            continue
+
+        tfile = t.get("torrent_file")
+        try:
+            tid, msg = client.upload_torrent(tfile, fields, form_info=form_info)
+            if tid:
+                print(f"   🎉 发布成功！星湾 id={tid}")
+                ok += 1
+                # ★ 只记星湾站内状态；全局 status 保持 SUCCESS，
+                #   让乌托邦/猫站队列仍能看到这条（星湾不是唯一落点）。
+                db.site_publish_set(ih, db.SITE_XINGWAN, tid, status="EXISTS",
+                                    cover_url=cover, synced=True)
+                if not args.no_readd:
+                    readd_to_qb_xingwan(qb, client, ih, tid)
+            elif "REJECT" in msg:
+                print(f"   ❌ 站点拒绝: {msg}")
+                fail += 1
+                rejected += 1
+                # ★ 星湾侧失败只记 site_publish，不写全局 FAILED（避免牵连其它站点）。
+                db.site_publish_set(ih, db.SITE_XINGWAN, status="FAILED")
+            else:
+                print(f"   ⚠️  未知返回状态: {msg}")
+                site_down = True
+                break
+        except SiteError as se:
+            print(f"   ❌ 提交异常: {se}")
+            site_down = True
+            break
+
+        if ok >= max_publish:
+            print(f"\n★ 本轮已达发种上限 {ok} 条 ⇒ 结束本轮")
+            break
+
+    if dup_existing:
+        print(f"ℹ️  另有 {dup_existing} 条**查重命中**（星湾已有同版本）⇒ "
+              f"已关联到已有页、未重复提交（退出码 0）。")
+    if site_down:
+        sys.exit(1)
+    if fail:
+        print(f"↩️  以非 0 退出：有 {fail} 条失败，让 daemon 的退避生效")
+        sys.exit(1)
+    if rejected and ok == 0:
+        print(f"↩️  以非 0 退出：{rejected} 条被拒、无一成功")
+        sys.exit(1)
+    return
+
+
+def selftest_xingwan_isolation(verbose=True):
+    """星湾发布路径的**结构性**自检：必须是独立路径、写自己的 site_publish。
+
+    阴性对照思路：把 `db.SITE_XINGWAN` 换成 `db.SITE_PTER`、或把队列换成
+    `pending_pter_direct`，本自检必须报红。
+    """
+    import inspect
+    print("=" * 60)
+    print("①-b 星湾发布路径隔离自检")
+    print("=" * 60)
+    fails = []
+
+    src = inspect.getsource(run_xingwan)
+    tree = _ast.parse(src)
+    calls = [n for n in _ast.walk(tree) if isinstance(n, _ast.Call)]
+
+    def _attr_name(node):
+        f = node.func
+        if isinstance(f, _ast.Attribute):
+            return f"{getattr(f.value, 'id', '')}.{f.attr}"
+        return getattr(f, "id", "")
+
+    names = [_attr_name(c) for c in calls]
+
+    checks = [
+        ("队列使用 pending_xingwan_direct", "db.pending_xingwan_direct" in names),
+        ("字段渲染走 xingwan_site.build_fields", "xingwan_site.build_fields" in names),
+        ("落库写 db.SITE_XINGWAN", any(
+            isinstance(n, _ast.Attribute) and n.attr == "SITE_XINGWAN"
+            for n in _ast.walk(tree))),
+        ("封面走 _xingwan_cover", "_xingwan_cover" in names),
+        ("提交走 client.upload_torrent", "client.upload_torrent" in names),
+        ("回加走 readd_to_qb_xingwan", "readd_to_qb_xingwan" in names),
+        ("不写 SITE_PTER", not any(
+            isinstance(n, _ast.Attribute) and n.attr == "SITE_PTER"
+            for n in _ast.walk(tree))),
+        ("不使用 pending_pter_direct", "db.pending_pter_direct" not in names),
+    ]
+    for name, ok in checks:
+        if ok:
+            if verbose:
+                print(f"  ✅ {name}")
+        else:
+            if verbose:
+                print(f"  ❌ {name}")
+            fails.append(name)
+
+    if verbose:
+        print("=" * 60)
+        print("✅ 通过" if not fails else f"❌ {len(fails)} 项失败")
+    return (not fails), fails
+
+
 # ----  自检（#13）：发布前查重的**结构性判据** + 判据的**运行时**验证 ----
 #
 #  为什么需要它（#13 / #11 的核心，）：
@@ -3914,8 +4344,10 @@ def main():
         #    ：接上 ok10（无 log 制种不许改 status）。
         #    ：接上 ok11（猫站隔离自检）。
         ok11, _ = selftest_pter_isolation()
+        #  第 12 条：星湾发布路径隔离自检（独立队列/独立 site_publish/独立查重）。
+        ok12, _ = selftest_xingwan_isolation()
         ok = (ok1 and ok2 and ok3 and ok4 and ok5 and ok6 and ok7
-              and ok8 and ok9 and ok10 and ok11)
+              and ok8 and ok9 and ok10 and ok11 and ok12)
         #  必须 `sys.exit`，**不能 `return`** —— `main()` 是被
         #   `if __name__ == "__main__": main()` 调的，那个写法的返回值**会被丢掉**
         #   ⇒ 退出码恒为 0 ⇒ **自检报红也没人看得见**（阴性对照实测踩到这一条）。
@@ -3929,6 +4361,8 @@ def main():
         return run_crabpt(args)
     if args.site == "pter":
         return run_pter(args)
+    if args.site == "xingwan":
+        return run_xingwan(args)
 
     config.print_runtime_info()
     db.init_db()

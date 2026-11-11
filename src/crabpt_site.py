@@ -332,16 +332,15 @@ def build_fields(task, *, anonymous=True):
     audit = []
 
     #
-    # ★ 蟹黄堡页面自带提示：「若不填将使用种子文件名」⇒ ★ **留空也是合法选项**。
-    #   但我们的库里 `formatted_title` 已经是渲染好的标题 ⇒ 填它，
-    #   **不做任何加后缀/改组名**（那是用户明确否掉的）。
-    title = task.get("formatted_title") or task.get("torrent_name") or ""
-    audit.append(f"name（标题）← task.formatted_title 原样，未加任何后缀")
+    # ★ 标题：三站统一按猫站口径（`descr.normalize_music_title`）。
+    #   原先是 `formatted_title`（皇后原文）原样提交 ⇒ 带「分轨」和个人压制者
+    #   后缀的脏标题直接上了蟹黄堡页面，与猫站页面不一致。
+    title = descr.normalize_music_title(task)
+    audit.append(f"name（标题）← 猫站口径归一化：{title}")
 
-    # ---- 副标题：★ 复用 descr 里那份**唯一**的口径
-    #      ★ 不在这里自己算 —— 副标题是**两站提交的同一个字段**，
-    #        各算一份就可能两站不一样，且不会报错。
-    small_descr = descr.build_small_descr_for_task(task)
+    # ---- 副标题：★ 复用 descr 里那份**唯一**的口径（三站同一个值）
+    small_descr = descr.build_music_small_descr(task)
+    audit.append(f"small_descr（副标题）← 猫站口径组装：{small_descr}")
 
     # ---- 简介：复用 descr.build_descr()（★ 它本身就是 **BBCode**，
     #     而蟹黄堡 `descr` 实测也是 BBCode ⇒ **格式同构，可直接复用**）
@@ -378,6 +377,9 @@ def build_fields(task, *, anonymous=True):
         #   ★ 用法是 `db.SITE_CRABPT` 常量而不是字面量 `"crabpt"` ——
         #     本文件也**只**用常量（见文件头"站点名"那条）。
         site=db.SITE_CRABPT,
+        #   ★★ 2026-11-10：蟹黄堡原先**没传** `source_link` ⇒ 页面没有转载引用块
+        #     （`build_descr` 会静默跳过，不报错）。用户要求补上，文案与其余三站共用。
+        source_link=descr.build_source_link(task),
     )
     audit.append("descr（简介）← descr.build_descr()（BBCode，两站同构）")
 

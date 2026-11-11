@@ -345,238 +345,20 @@ def _as_list(v):
 
 
 # ==================== 猫站命名规范与制作组白名单 ====================
-RECOGNIZED_GROUPS = {
-    "PTerMUSIC", "PTerWEB", "PTerMV", "PTerTV", "PTer",
-    "CHDBits", "HDSky", "OurBits", "HDHome", "WiKi", "MTeam",
-    "CHD", "CMCT", "FRDS", "beAst", "ADE", "PTH", "RedBits",
-}
+#
+# ★ 口径实现已统一到 `descr.normalize_music_title` / `descr.build_music_small_descr`
+#   （三站共用一份；本文件只保留薄封装，避免两个口径各自漂移）。
+RECOGNIZED_GROUPS = descr.RECOGNIZED_GROUPS
 
 
 def normalize_pter_title(task):
-    """根据猫站 PTerClub 官方规范标准化主标题。
-
-    猫站规范（见 Wiki《上传规则（含标题命名及内容编辑指南）》音乐类）：
-      艺术家英文名 - 专辑英文名 发行年份 - 文件格式 采样位深 采样频率 [- 制作组]
-      注：主副标题的英文名和本国名可以交换（即直接在主标题中填写中文等），但仍强烈推荐主标题填写英文名。
-      示例：
-        JJ Lin - Lost N Found 2011 - FLAC 16bit 44.1kHz - PTerMUSIC
-        Taylor Swift - Lover 2019 - WAV 16bit 44.1kHz
-        齐秦 - 我拿什么爱你 1998 - FLAC 16bit 44.1kHz
-        Various Artists - 说唱巅峰对决2026 第九期 2026 - FLAC 16bit 44.1kHz
-
-    硬性要求：
-      1. 绝不允许带有 分轨/整轨/分軌/整軌；
-      2. 绝不允许带有非官方个人压制者后缀（如 - Yuekui、- alin13788）；
-      3. 必须包含格式与采样规格：文件格式 采样位深 采样频率（如 FLAC 16bit 44.1kHz）；
-      4. 合辑统一使用 Various Artists（或群星）。
-    """
-    raw_title = (task.get("formatted_title") or task.get("torrent_name") or "").strip()
-
-    # 1. 提取或剥除末尾制作组 / 发布者
-    group_suffix = ""
-    cleaned_title = raw_title
-    m_grp = re.search(r"-\s*([A-Za-z0-9_@]+)\s*$", raw_title)
-    if m_grp:
-        cand = m_grp.group(1)
-        if cand in RECOGNIZED_GROUPS or cand.startswith("PTer"):
-            group_suffix = f" - {cand}"
-        cleaned_title = raw_title[:m_grp.start()].strip()
-
-    # 2. 剥除中文音轨标记（分轨、整轨、分軌、整軌等）与常见多碟标记（(2 CD)、[Disc 1] 等）
-    cleaned_title = re.sub(
-        r"[\s\-\_\(\)\[\]]*(?:分[轨軌]|整[轨軌]|分[轨軌]\s*/\s*整[轨軌]|整[轨軌]\s*/\s*分[轨軌])[\s\-\_\(\)\[\]]*",
-        " ",
-        cleaned_title,
-        flags=re.I,
-    ).strip()
-    # 剥离多余盘数标记，如 (2 CD), [2CD], (3CD) 等，规范主标题
-    cleaned_title = re.sub(r"[\(\[\s]+\d+\s*(?:CD|DISC|DISCS)[\)\]\s]+", " ", cleaned_title, flags=re.I).strip()
-
-    # 3. 提取音频格式（严格按单词边界匹配，避免 Leaper 误匹配 APE）
-    upper = (str(task.get("format") or "") + " " + raw_title).upper()
-    m_fmt = re.search(r"\b(FLAC|WAV|APE|DSD|DSF|DFF|ALAC|MP3|AAC)\b", upper)
-    if m_fmt:
-        fmt = m_fmt.group(1)
-    else:
-        fmt = "FLAC"
-
-    # 4. 提取或推断采样位深与采样频率
-    text_corpus = " ".join(
-        str(task.get(k) or "")
-        for k in ("formatted_title", "torrent_name", "descr", "log_content")
-    )
-    m_bit = re.search(r"(\d{1,2})\s*bit", text_corpus, re.I)
-    m_hz = re.search(r"(\d+(?:\.\d+)?)\s*k?Hz", text_corpus, re.I)
-    m_log_hz = re.search(r"Sample rate\s*:\s*(\d+(?:\.\d+)?)", task.get("log_content") or "", re.I)
-    m_log_bit = re.search(r"Bits per sample\s*:\s*(\d+)", task.get("log_content") or "", re.I)
-
-    if m_log_hz:
-        val = float(m_log_hz.group(1))
-        if val == 44100 or val == 44.1:
-            sample_rate = "44.1kHz"
-        elif val == 48000 or val == 48:
-            sample_rate = "48kHz"
-        elif val == 88200 or val == 88.2:
-            sample_rate = "88.2kHz"
-        elif val == 96000 or val == 96:
-            sample_rate = "96kHz"
-        elif val == 192000 or val == 192:
-            sample_rate = "192kHz"
-        else:
-            sample_rate = f"{val}kHz"
-    elif m_hz:
-        hz_val = m_hz.group(1)
-        try:
-            f_val = float(hz_val)
-            if f_val in (44100.0, 44.1):
-                sample_rate = "44.1kHz"
-            elif f_val in (48000.0, 48.0):
-                sample_rate = "48kHz"
-            elif f_val in (88200.0, 88.2):
-                sample_rate = "88.2kHz"
-            elif f_val in (96000.0, 96.0):
-                sample_rate = "96kHz"
-            elif f_val in (192000.0, 192.0):
-                sample_rate = "192kHz"
-            else:
-                sample_rate = f"{hz_val}kHz" if not hz_val.lower().endswith("khz") else hz_val
-        except ValueError:
-            sample_rate = f"{hz_val}kHz" if not hz_val.lower().endswith("khz") else hz_val
-    else:
-        sample_rate = "44.1kHz"
-
-    if m_log_bit:
-        bit_depth = f"{m_log_bit.group(1)}bit"
-    elif m_bit:
-        bit_depth = f"{m_bit.group(1)}bit"
-    elif re.search(r"24bit|24-bit|Hi-Res|HI-RES|SACD", text_corpus, re.I):
-        bit_depth = "24bit"
-        if sample_rate == "44.1kHz":
-            sample_rate = "96kHz"
-    else:
-        bit_depth = "16bit"
-
-    specs = f"{fmt} {bit_depth} {sample_rate}"
-
-    # 5. 年份提取
-    year = ""
-    raw_year = str(task.get("year") or "")
-    m_y = re.search(r"\b((?:19|20)\d{2})\b", raw_year) or re.search(r"\b((?:19|20)\d{2})\b", cleaned_title)
-    if m_y:
-        year = m_y.group(1)
-
-    # 6. 核心艺术家与专辑
-    artist = (task.get("artist") or "").strip()
-    album = (task.get("album") or "").strip()
-
-    if not (artist and album):
-        parts = [p.strip() for p in cleaned_title.split(" - ") if p.strip()]
-        if len(parts) >= 2:
-            if not artist:
-                artist = parts[0]
-            album = parts[1]
-            album = re.sub(r"\b(?:19|20)\d{2}\b.*$", "", album).strip()
-
-    if artist.upper() in ("VA", "V.A.", "VARIOUS ARTIST", "VARIOUS ARTISTS") or artist == "群星":
-        artist = "Various Artists"
-
-    if artist and album:
-        core = f"{artist} - {album}"
-        if year and not re.search(r"\b" + year + r"\b", core):
-            core = f"{core} {year}"
-    else:
-        # 从 cleaned_title 剥离格式词
-        core = re.sub(r"-\s*(?:FLAC|WAV|APE|DSD|ALAC|MP3)\b.*$", "", cleaned_title, flags=re.I).strip()
-        if year and not re.search(r"\b" + year + r"\b", core):
-            core = f"{core} {year}"
-
-    final_title = f"{core} - {specs}{group_suffix}"
-    final_title = re.sub(r"\s+", " ", final_title).strip()
-    final_title = re.sub(r"\s+-\s+", " - ", final_title)
-    return final_title
+    """按猫站规范标准化主标题 —— 实现见 `descr.normalize_music_title`。"""
+    return descr.normalize_music_title(task)
 
 
 def build_pter_small_descr(task):
-    """根据猫站规范组装合规副标题（必填字段）。
-
-    猫站规范：
-      艺术家本国名 - 专辑本国名 | 发行类别 | 厂牌（可选） 目录号（可选） 版本等其他信息（可选） | 转载信息（可选）
-      示例：
-        林俊杰 - 学不会 | 专辑 | Warner Music CD / Lossless / Log (100%) / Cue
-        Taylor Swift - Lover | 专辑 | Republic Records / 602577928222 / Deluxe Edition
-        群星 - 晚九朝五 | 原声 | 滾石唱片 4710149608246 CD / Lossless / Log (80%) / Cue
-    """
-    artist = (task.get("artist") or "").strip()
-    album = (task.get("album") or "").strip()
-
-    if not (artist and album):
-        raw = (task.get("formatted_title") or task.get("torrent_name") or "").strip()
-        parts = [p.strip() for p in raw.split(" - ") if p.strip()]
-        if len(parts) >= 2:
-            artist, album = parts[0], parts[1]
-            album = re.sub(r"\(?(?:19|20)\d{2}\)?|\b(?:FLAC|WAV|APE|DSD)\b.*$", "", album, flags=re.I).strip()
-        elif parts:
-            artist, album = parts[0], parts[0]
-        else:
-            artist, album = "华语音乐", "经典专辑"
-
-    corpus = " ".join(str(task.get(k) or "") for k in ("tags", "source", "formatted_title", "small_descr", "descr"))
-
-    if re.search(r"原声|OST|Soundtrack", corpus, re.I):
-        cat = "原声"
-    elif re.search(r"单曲|Single", corpus, re.I):
-        cat = "单曲"
-    elif re.search(r"\bEP\b", corpus, re.I):
-        cat = "EP"
-    elif re.search(r"精选|Best|Greatest Hits|Collection", corpus, re.I):
-        cat = "精选"
-    elif re.search(r"演唱会|Live|现场", corpus, re.I):
-        cat = "现场"
-    elif re.search(r"戏剧|戏曲|相声", corpus, re.I):
-        cat = "戏曲"
-    else:
-        cat = "专辑"
-
-    med = "CD"
-    if re.search(r"SACD", corpus, re.I):
-        med = "SACD"
-    elif re.search(r"WEB|Web-DL|Digital", corpus, re.I):
-        med = "WEB"
-    elif re.search(r"Vinyl|黑胶", corpus, re.I):
-        med = "Vinyl"
-
-    qual = "Hi-Res" if re.search(r"24bit|Hi-Res|HI-RES", corpus, re.I) else "Lossless"
-
-    extras = [f"{med} / {qual}"]
-
-    log_content = task.get("log_content") or ""
-    if log_content or task.get("logs_json"):
-        if "100%" in str(task.get("small_descr") or "") or "100%" in log_content:
-            extras.append("Log (100%)")
-        else:
-            extras.append("Log")
-
-    track_type = str(task.get("track_type") or "")
-    if "cue" in corpus.lower() or "分轨" in corpus or "整轨" in corpus or "分轨" in track_type or "整轨" in track_type:
-        extras.append("Cue")
-
-    # 尝试从简介中提取唱片公司与编号（如 PolyGram 846 789-2）
-    m_lbl = re.search(r'(?:唱片公司|厂牌|廠牌)[：:\s]+([A-Za-z0-9_\u4e00-\u9fa5]+)', corpus)
-    m_catno = re.search(r'(?:唱片编号|目录号|目錄號|Cat(?:alog)?(?:[.\s]No)?)[：:\s]+([A-Za-z0-9\s\-]+)', corpus, re.I)
-    label_prefix = ""
-    if m_lbl or m_catno:
-        lbl_parts = []
-        if m_lbl:
-            lbl_parts.append(m_lbl.group(1).strip())
-        if m_catno:
-            lbl_parts.append(m_catno.group(1).strip())
-        label_prefix = " ".join(lbl_parts) + " "
-
-    extras[0] = f"{label_prefix}{extras[0]}"
-    spec_str = " / ".join(extras)
-
-    # 严禁将原站未清洗的 small_descr 脏数据直接拼到末尾（防破坏三段式规范）
-    return f"{artist} - {album} | {cat} | {spec_str}"
+    """按猫站规范组装合规副标题 —— 实现见 `descr.build_music_small_descr`。"""
+    return descr.build_music_small_descr(task)
 
 
 def build_fields(task, *, anonymous=True):
@@ -596,14 +378,8 @@ def build_fields(task, *, anonymous=True):
     small_descr = build_pter_small_descr(task)
     audit.append(f"small_descr（副标题·合规组装）← {small_descr}")
 
-    # 3. 来源声明（猫站强制要求 quote 出处，且必须绝对置顶）
-    opencd_tid = task.get("opencd_tid")
-    source_link = ""
-    if opencd_tid:
-        source_link = f"转自OpenCD: https://open.cd/details.php?id={opencd_tid}"
-    else:
-        raw_nm = task.get("torrent_name") or task.get("formatted_title") or ""
-        source_link = f"转自OpenCD: {raw_nm}" if raw_nm else "转自OpenCD"
+    # 3. 来源声明（转载引用块，四站统一文案 —— 均由 `descr.build_source_link` 生成）
+    source_link = descr.build_source_link(task)
     audit.append(f"source_link（出处置顶引用）← {source_link}")
 
     # 4. 简介正文

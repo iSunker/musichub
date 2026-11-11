@@ -78,6 +78,17 @@ PTER_PUBLISH_CATEGORY = os.getenv("PTER_PUBLISH_CATEGORY", "PTer")
 PTER_IMG_URL = os.getenv("PTER_IMG_URL", "https://img.pterclub.net/api/1/upload")
 PTER_IMG_API_KEY = os.getenv("PTER_IMG_API_KEY", "")
 
+# ==================== 星湾（xingwan.cc）====================
+XINGWAN_URL = os.getenv("XINGWAN_URL", "https://xingwan.cc")
+XINGWAN_COOKIE = os.getenv("XINGWAN_COOKIE", "")
+XINGWAN_MUSIC_CATEGORY = os.getenv("XINGWAN_MUSIC_CATEGORY", "408")
+# 回加 qB 时打的**标签**（不是分类：星湾不建分类，用标签识别本项目种）
+XINGWAN_PUBLISH_TAG = os.getenv("XINGWAN_PUBLISH_TAG", "Xingwan")
+# 每轮最多成功发布几条
+XINGWAN_MAX_PER_CYCLE = int(os.getenv("XINGWAN_MAX_PER_CYCLE", "1") or "1")
+# ★ 仅星湾生效的发种窗口（每天 00:00-10:00）；其它站点仍按各自周期全天发布
+XINGWAN_PUBLISH_WINDOW = os.getenv("XINGWAN_PUBLISH_WINDOW", "00:00-10:00")
+
 # 延迟回加 qB 设定（分钟，0 表示发布后立即回加）
 SEED_DELAY_MIN = int(os.getenv("SEED_DELAY_MIN", "0") or "0")
 
@@ -119,7 +130,7 @@ HANDOFF_DIR_MAP = {
     "http://127.0.0.1:3260": os.getenv("HANDOFF_DIR_3260", "/volume1/video/download/music/music3"),
 }
 
-# 受管分类白名单
+# 受管分类白名单（乌托邦/蟹黄堡/猫站 —— 按分类识别）
 HANDOFF_OWN_CATEGORIES = [
     c.strip() for c in os.getenv(
         "HANDOFF_OWN_CATEGORIES",
@@ -127,6 +138,14 @@ HANDOFF_OWN_CATEGORIES = [
         f"{os.getenv('CRABPT_PUBLISH_CATEGORY', 'CrabPT')},"
         f"{os.getenv('PTER_PUBLISH_CATEGORY', 'PTer')}",
     ).split(",") if c.strip()
+]
+
+# 受管标签白名单（星湾等"不建分类、只打标签"的站点 —— 按标签识别）
+HANDOFF_OWN_TAGS = [
+    t.strip() for t in os.getenv(
+        "HANDOFF_OWN_TAGS",
+        f"{os.getenv('XINGWAN_PUBLISH_TAG', 'Xingwan')}",
+    ).split(",") if t.strip()
 ]
 
 # 交棒触发阈值：做种人数 (除去发布者自身) 或 做种达标天数
@@ -162,4 +181,5 @@ def print_runtime_info():
     print(f"🔀 交棒目标 save_path   = {HANDOFF_TARGET_SAVE_ROOT}")
     print(f"🔀 交棒常规做种实例     = {HANDOFF_MUSIC_HOSTS}")
     print(f"🔀 本项目种白名单(分类) = {HANDOFF_OWN_CATEGORIES}")
+    print(f"🔀 本项目种白名单(标签) = {HANDOFF_OWN_TAGS}")
     print("=" * 50)
