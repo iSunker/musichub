@@ -15,6 +15,7 @@ import config
 import crabpt_site
 import pter_site
 import xingwan_site
+import hdkylin_site
 import db
 import descr
 import readd_queue
@@ -36,8 +37,9 @@ def parse_args():
                     help="具名发布（覆盖默认匿名）")
     ap.add_argument("--auto", action="store_true",
                     help="无人值守自动发布模式，需验证 PUBLISH_I_AM_HERE 口令")
-    ap.add_argument("--site", choices=("musopia", "crabpt", "pter", "xingwan"), default="musopia",
-                    help="发布目标站点（musopia/crabpt/pter/xingwan，默认 musopia）")
+    ap.add_argument("--site", choices=("musopia", "crabpt", "pter", "xingwan", "hdkylin"),
+                    default="musopia",
+                    help="发布目标站点（musopia/crabpt/pter/xingwan/hdkylin，默认 musopia）")
     ap.add_argument("--selftest", action="store_true",
                     help="执行离线自检逻辑，不发起网络请求且不修改数据库")
     return ap.parse_args()
@@ -741,6 +743,93 @@ def readd_to_qb_pter(qb, client, info_hash, torrent_id):
             category=config.PTER_PUBLISH_CATEGORY,
         )
         print(f"    ✅ 已提交回加至 qB（做种路径: {save_path}，分类: {config.PTER_PUBLISH_CATEGORY}）")
+        try:
+            new_hash = torf.Torrent.read_stream(io.BytesIO(content)).infohash
+            got = qb.torrents_info(torrent_hashes=new_hash)
+            if not got:
+                print(f"    ⚠️  回加复核：此刻 qB 里查不到 {new_hash[:12]}…（异步入库中）")
+            else:
+                t = got[0]
+                _dl_states = {"stalledDL", "downloading", "metaDL", "stoppedDL",
+                              "pausedDL", "allocating", "checkingDL", "forcedDL",
+                              "queuedDL", "missingFiles", "error", "unknown"}
+                prog = float(getattr(t, "progress", 0) or 0)
+                ok = (t.state not in _dl_states) and prog >= 1.0
+                mark = "✅" if ok else "★★"
+                print(f"    {mark} 回加复核：state={t.state} progress={prog:.3f} content_path={t.content_path!r}")
+        except Exception as e:
+            print(f"    ⚠️  回加复核失败（不影响发布本身）: {type(e).__name__}: {e}")
+    except Exception as e:
+        print(f"    ❌ 回加 qB 出错: {e}")
+
+
+def readd_to_qb_hdkylin(qb, client, info_hash, torrent_id):
+    """把麒麟上的新种子下载回来加进 qB 做种。分类用 HDKYLIN_PUBLISH_CATEGORY。"""
+    if qb is None:
+        print("    ⚠️  回加跳过：本次没有可用的 qB 连接")
+        return
+    try:
+        content = client.download_torrent(torrent_id)
+        if not content:
+            print("    ❌ 从麒麟下载种子文件失败，跳过回加")
+            return
+
+        _handoff_on = str(getattr(config, "ENABLE_HANDOFF", "false")).strip().lower() in (
+            "1", "true", "yes", "y", "on")
+        _h_src = ""
+        _h_album = ""
+        if _handoff_on:
+            save_path = config.PUBLISH_SAVE_ROOT
+            try:
+                import handoff
+                src, _src_why = _resolve_opencd_content_path(info_hash, return_reason=True)
+                album = os.path.basename(str(src).rstrip("/\\")) if src else ""
+                _h_src, _h_album = src, album
+                if src and album:
+                    _ok, _why = handoff.begin_handoff_for_task(
+                        src, album, info_hash, task=None,
+                        source_category=config.HDKYLIN_PUBLISH_CATEGORY,
+                        target_category=config.HDKYLIN_PUBLISH_CATEGORY,
+                        dry_run=(config.HANDOFF_DRY_RUN == "true"))
+                    print(f"    🔀 handoff 复制: {_why}")
+                    if not _ok:
+                        print(f"    ❌ handoff 未就位 ⇒ **跳过回加 3010**（避免变成下载）：{_why}")
+                        handoff.record_missing_data(info_hash, album, "hdkylin", _why)
+                        return
+                else:
+                    print("    ⚠️  handoff：拿不到 opencd 原种 content_path，跳过复制")
+                    print("    ❌ 无法定位源成品 ⇒ **跳过回加 3010**（避免变成下载）")
+                    handoff.record_missing_data(info_hash, album, "hdkylin",
+                                                _src_why or "拿不到 opencd content_path")
+                    return
+            except Exception as _e:
+                print(f"    ❌ handoff 复制/核对异常 ⇒ **跳过回加 3010**（避免变成下载）: "
+                      f"{type(_e).__name__}: {_e}")
+                handoff.record_missing_data(info_hash, album, "hdkylin",
+                                            f"{type(_e).__name__}: {_e}")
+                return
+        else:
+            orig = qb.torrents_info(torrent_hashes=info_hash)
+            if not orig:
+                print(f"    ⚠️  回加跳过：qB 里找不到原种 {info_hash[:12]}…（无法确定保存路径）")
+                return
+            save_path = orig[0].save_path
+
+        if config.SEED_DELAY_MIN > 0:
+            readd_queue.enqueue(
+                content, save_path, config.HDKYLIN_PUBLISH_CATEGORY,
+                config.SEED_DELAY_MIN, note=f"麒麟 {info_hash[:12]}…",
+                src_path=_h_src, album=_h_album,
+            )
+            return
+
+        qb.torrents_add(
+            torrent_files=content,
+            save_path=save_path,
+            is_paused=False,
+            category=config.HDKYLIN_PUBLISH_CATEGORY,
+        )
+        print(f"    ✅ 已提交回加至 qB（做种路径: {save_path}，分类: {config.HDKYLIN_PUBLISH_CATEGORY}）")
         try:
             new_hash = torf.Torrent.read_stream(io.BytesIO(content)).infohash
             got = qb.torrents_info(torrent_hashes=new_hash)
@@ -1473,6 +1562,24 @@ def _xingwan_cover(task, *, dry_run=False):
     if not (src.startswith("http://") or src.startswith("https://")):
         raise CoverItemError(f"cover_url 不是公网图片地址，星湾无法外链：{src}")
     return src, f"复用 PicGo 公网图链（星湾支持外链）：{src}"
+
+
+def _hdkylin_cover(task, *, dry_run=False):
+    """麒麟封面：复用已落库的麒麟封面或现有 PicGo 公网图链，不新增图床依赖。
+
+    麒麟允许外链图床（站规对图床无限制），因此这里不做上传；`dry_run` 同样只验证来源可用。
+    """
+    h = task["info_hash"]
+    have = db.site_cover_url_of(h, db.SITE_HDKYLIN)
+    if have:
+        return have, f"已有麒麟专用封面（site_publish）⇒ 复用：{have}"
+
+    src = (task.get("cover_url") or "").strip()
+    if not src:
+        raise CoverItemError("库里连 cover_url 都没有 ⇒ 无源可用")
+    if not (src.startswith("http://") or src.startswith("https://")):
+        raise CoverItemError(f"cover_url 不是公网图片地址，麒麟无法外链：{src}")
+    return src, f"复用 PicGo 公网图链（麒麟支持外链）：{src}"
 
 
 def _crabpt_fields(task, anonymous):
@@ -3527,6 +3634,249 @@ def run_xingwan(args):
     return
 
 
+def run_hdkylin(args):
+    """麒麟（hdkyl.in）发布路径。与乌托邦、蟹黄堡、猫站、星湾路径并列独立运行。"""
+    print("=" * 60)
+    print("🌐 站点 = 麒麟（hdkyl.in）★ 独立发布路径")
+    print("=" * 60)
+
+    if args.dry_run:
+        print("\n★ 显式 dry-run：不会向站点提交任何数据。")
+    elif not args.auto:
+        print("\n★★ 真发模式（没有 --dry-run，也没声明 --auto）：")
+        print("   请确认你确实要往**麒麟**提交 —— 发布**不可逆**、无批量撤销。")
+
+    tasks = db.pending_hdkylin_direct(db.SITE_HDKYLIN)
+    if not tasks:
+        print("💡 当前没有可发的种（过闸门④ `ALLOW` ∧ 麒麟没有 ∧ 不是 FAILED）——"
+              f"判据 = `db.HDKYLIN_DIRECT_WHERE` = `{db.HDKYLIN_DIRECT_WHERE}` ")
+        return
+
+    if args.only:
+        want = tuple(s.strip().lower() for s in args.only.split(",") if s.strip())
+        if not want:
+            sys.exit("❌ --only 给了但解析出 0 个 hash")
+        hit = [t for t in tasks if any((t.get("info_hash") or "").lower().startswith(w) for w in want)]
+        in_queue = {(t.get("info_hash") or "").lower() for t in tasks}
+        absent = [w for w in want if not any(h.startswith(w) for h in in_queue)]
+        print()
+        print("=" * 60)
+        print(f"★ --only：点名 {len(want)} 个 ⇒ 命中队列 {len(hit)} 条")
+        print("=" * 60)
+        for t in hit:
+            print(f"   ✅ {(t.get('info_hash') or '')[:12]}  {t.get('formatted_title')}")
+        for w in absent:
+            print(f"   ❌ {w} 不在麒麟待发布队列里（被闸门拦截或 hash 错误）")
+        if absent:
+            print("\n   ★ 逐条查为什么没进队列：")
+            for w in absent:
+                ok_q, why_q = db.is_direct_publishable_to(w, db.SITE_HDKYLIN)
+                print(f"      {w}: {'可发' if ok_q else why_q}")
+        if not hit:
+            sys.exit("❌ --only 与队列**零交集** ⇒ 拒绝执行")
+        tasks = hit
+
+    print("\n" + "=" * 60)
+    print(f"📋 发现 {len(tasks)} 条麒麟待发布任务，预检清单：")
+    print("=" * 60)
+
+    valid, blocked = [], []
+    for t in tasks:
+        reason = None
+        tfile = t.get("torrent_file")
+        if not tfile or not os.path.exists(tfile):
+            reason = f"种子文件缺失 ({tfile})"
+        elif not ((t.get("cover_url") or "").strip()
+                  or db.site_cover_url_of(t.get("info_hash"), db.SITE_HDKYLIN)):
+            reason = "缺少 cover_url（站内也没有历史封面）"
+
+        ih = (t.get("info_hash") or "")[:12]
+        title = t.get("formatted_title") or t.get("torrent_name") or ""
+        if reason:
+            blocked.append((t, reason))
+            print(f"   ❌ {ih}  {title} ⇒ {reason}")
+        else:
+            valid.append(t)
+            print(f"   ✅ {ih}  {title}")
+
+    if blocked:
+        print(f"\n⚠️  预检拦下 {len(blocked)} 条，有效 {len(valid)} 条")
+    if not valid:
+        print("💡 没有通过预检的任务，本次退出。")
+        return
+
+    if not args.dry_run and args.auto:
+        ok_key, why, _ = guard_auto_key()
+        if not ok_key:
+            print(f"\n🛑 发布被拒绝（第二把钥匙校验失败）：{why}")
+            sys.exit(3)
+
+    client = hdkylin_site.HdkylinClient()
+    qb = None
+    form_info = None
+
+    if not args.dry_run:
+        if not client.have_cookie():
+            sys.exit("❌ HDKYLIN_COOKIE 是空的 ⇒ 拒绝提交。\n"
+                     "   请在 .env 中配置 HDKYLIN_COOKIE。")
+        try:
+            uid = client.check_login()
+            print(f"\n✅ 麒麟 Cookie 有效（uid={uid or '未知'}）")
+        except SiteError as e:
+            sys.exit(f"❌ 麒麟登录态失败: {e}")
+
+        try:
+            form_info = client.fetch_upload_form()
+            print("✅ 麒麟发布页预检成功（表单就绪）")
+        except SiteError as e:
+            sys.exit(f"❌ 麒麟发布页预检失败: {e}")
+
+        try:
+            import qb_client
+            qb = qb_client.build()
+            print("✅ qBittorrent 连接就绪")
+        except Exception as e:                              # noqa: BLE001
+            print(f"⚠️  qB 连接失败（发布后无法立即回加做种，但仍可发布）: {e}")
+            qb = None
+
+    max_publish = args.limit if args.limit is not None else int(
+        getattr(config, "HDKYLIN_MAX_PER_CYCLE", 1) or 1)
+    if max_publish <= 0:
+        max_publish = len(valid)
+
+    print(f"\n🚀 开始处理（计划成功上限 {max_publish} 条，候选池 {len(valid)} 条）...")
+
+    ok = fail = rejected = skipped = 0
+    scanned = 0
+    dup_existing = 0
+    site_down = False
+
+    for t in valid:
+        scanned += 1
+        ih = t["info_hash"]
+        title = t.get("formatted_title") or t.get("torrent_name") or ""
+        print(f"\n[{scanned}/{len(valid)}] 处理: {ih[:12]}  {title}")
+
+        if config.VERSION_GATE_BEFORE_PUBLISH:
+            vg_ok, vg_reason = _version_consistency_gate(t)
+            if not vg_ok:
+                print(f"🛑 版本闸门拦截: {vg_reason}")
+                fail += 1
+                rejected += 1
+                if not args.dry_run:
+                    db.save_task(info_hash=ih, status="FAILED", reason=f"version_gate:{vg_reason}")
+                continue
+
+        try:
+            cover, cover_why = _hdkylin_cover(t, dry_run=args.dry_run)
+            print(f"   · 封面 ← {cover_why}")
+        except CoverItemError as ce:
+            print(f"   · 封面不可用（跳过本条）: {ce}")
+            skipped += 1
+            continue
+
+        if not cover:
+            print("🛑 麒麟封面准备失败 ⇒ 停止本轮")
+            site_down = True
+            break
+
+        if config.DEDUP_BEFORE_PUBLISH:
+            local_nm = _local_info_name(t)
+            try:
+                hit_tid = _dedup_lookup(client, search_name=t.get("formatted_title"),
+                                        local_name=local_nm, site_label="麒麟")
+                if hit_tid:
+                    print(f"   ℹ️  麒麟已存在同版本 (id={hit_tid}) ⇒ 关联并跳过发布")
+                    dup_existing += 1
+                    if not args.dry_run:
+                        db.site_publish_set(ih, db.SITE_HDKYLIN, hit_tid,
+                                            status="EXISTS", cover_url=cover, synced=True)
+                    continue
+            except SiteError as se:
+                print(f"   ❌ 麒麟查重请求异常: {se}")
+                site_down = True
+                break
+
+            _sn = _same_name_precheck(client, search_name=t.get("formatted_title"),
+                                      local_name=local_nm, site_label="麒麟")
+            if _sn:
+                _why = (f"同名冲突：麒麟上已有 info.name 逐字相同的条目 "
+                        f"{'、'.join(tid for tid, _ in _sn[:3])} ⇒ 提交会被静默吞掉。")
+                print(f"    🛑 同名闸门拦截（{_why}）⇒ 拒绝提交，麒麟侧标 FAILED 出队")
+                db.site_publish_set(ih, db.SITE_HDKYLIN, status="FAILED")
+                fail += 1
+                rejected += 1
+                continue
+
+        t_copy = dict(t)
+        t_copy["cover_url"] = cover
+        fields, audit = hdkylin_site.build_fields(t_copy, anonymous=args.anonymous)
+        for line in audit:
+            print(f"      · {line}")
+
+        hk_name = fields.get("name") or ""
+        hk_descr = fields.get("descr") or ""
+        if any(w in hk_name for w in ("分轨", "整轨", "分軌", "整軌")):
+            print(f"🛑 麒麟标题规范门禁拦截：主标题含中文音轨标记: {hk_name}")
+            fail += 1
+            rejected += 1
+            continue
+
+        if "转自OpenCD" not in hk_descr:
+            print("🛑 麒麟正文门禁拦截：简介缺少转载来源声明")
+            fail += 1
+            rejected += 1
+            continue
+
+        if args.dry_run:
+            print("   ℹ️  dry-run 模式：跳过实际提交")
+            ok += 1
+            if ok >= max_publish:
+                break
+            continue
+
+        tfile = t.get("torrent_file")
+        try:
+            tid, msg = client.upload_torrent(tfile, fields, form_info=form_info)
+            if tid:
+                print(f"   🎉 发布成功！麒麟 id={tid}")
+                ok += 1
+                db.site_publish_set(ih, db.SITE_HDKYLIN, tid, status="EXISTS",
+                                    cover_url=cover, synced=True)
+                if not args.no_readd:
+                    readd_to_qb_hdkylin(qb, client, ih, tid)
+            elif "REJECT" in msg:
+                print(f"   ❌ 站点拒绝: {msg}")
+                fail += 1
+                rejected += 1
+                db.site_publish_set(ih, db.SITE_HDKYLIN, status="FAILED")
+            else:
+                print(f"   ⚠️  未知返回状态: {msg}")
+                site_down = True
+                break
+        except SiteError as se:
+            print(f"   ❌ 提交异常: {se}")
+            site_down = True
+            break
+
+        if ok >= max_publish:
+            print(f"\n★ 本轮已达发种上限 {ok} 条 ⇒ 结束本轮")
+            break
+
+    if dup_existing:
+        print(f"ℹ️  另有 {dup_existing} 条**查重命中**（麒麟已有同版本）⇒ "
+              f"已关联到已有页、未重复提交（退出码 0）。")
+    if site_down:
+        sys.exit(1)
+    if fail:
+        print(f"↩️  以非 0 退出：有 {fail} 条失败，让 daemon 的退避生效")
+        sys.exit(1)
+    if rejected and ok == 0:
+        print(f"↩️  以非 0 退出：{rejected} 条被拒、无一成功")
+        sys.exit(1)
+    return
+
+
 def selftest_xingwan_isolation(verbose=True):
     """星湾发布路径的**结构性**自检：必须是独立路径、写自己的 site_publish。
 
@@ -4363,6 +4713,8 @@ def main():
         return run_pter(args)
     if args.site == "xingwan":
         return run_xingwan(args)
+    if args.site == "hdkylin":
+        return run_hdkylin(args)
 
     config.print_runtime_info()
     db.init_db()

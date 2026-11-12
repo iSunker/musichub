@@ -675,6 +675,54 @@ def normalize_music_title(task):
     return final_title
 
 
+def build_kylin_title(task):
+    """麒麟（HDKylin）主标题：`艺术家 - 专辑 年份 音频编码[- 发布组][- OpenCD]`。
+
+    麒麟站规音轨标题 = `艺术家名 - 专辑名 [年份] [版本] [发布说明] 音频编码[-发布组名称]`。
+    与猫站口径（`normalize_music_title`）共用同一份清洗/解析（`_split_title` /
+    `_parse_artist_album`），差异只在尾巴：麒麟只要音频编码，**不带**采样位深
+    与采样频率；源标题以 `- OpenCD` 结尾时保留该后缀（转载来源诚实标注，
+    OpenCD 不在 `RECOGNIZED_GROUPS` 里，`_split_title` 会静默剥掉它 ⇒ 这里补回）。
+    OpenCD 源数据没有独立的"中文名"字段（中文专辑标题本身就是中文），
+    不造中文名，宁缺勿错。
+    """
+    raw_title = (task.get("formatted_title") or task.get("torrent_name") or "").strip()
+    kept_opencd = bool(re.search(r"-\s*OpenCD\s*$", raw_title, re.I))
+
+    cleaned_title, group_suffix = _split_title(raw_title)
+
+    upper = (str(task.get("format") or "") + " " + raw_title).upper()
+    m_fmt = re.search(r"\b(FLAC|WAV|APE|DSD|DSF|DFF|ALAC|MP3|AAC)\b", upper)
+    fmt = m_fmt.group(1) if m_fmt else "FLAC"
+
+    year = ""
+    raw_year = str(task.get("year") or "")
+    m_y = re.search(r"\b((?:19|20)\d{2})\b", raw_year)
+    if not m_y:
+        all_years = re.findall(r"\b((?:19|20)\d{2})\b", cleaned_title)
+        if all_years:
+            year = all_years[-1]
+    if m_y:
+        year = m_y.group(1)
+
+    artist, album = _parse_artist_album(task, cleaned_title)
+    if artist and album:
+        core = f"{artist} - {album}"
+    else:
+        core = re.sub(r"-\s*(?:FLAC|WAV|APE|DSD|ALAC|MP3)\b.*$", "",
+                      cleaned_title, flags=re.I).strip()
+    if year and not re.search(r"\b" + year + r"\b", core):
+        core = f"{core} {year}"
+
+    title = f"{core} {fmt}"
+    if kept_opencd:
+        title = f"{title} - OpenCD"
+    elif group_suffix:
+        title = f"{title}{group_suffix}"
+    title = re.sub(r"\s+", " ", title).strip()
+    return title
+
+
 def build_music_small_descr(task):
     """按猫站规范组装合规副标题（必填字段）。
 

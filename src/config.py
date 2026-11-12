@@ -89,6 +89,16 @@ XINGWAN_MAX_PER_CYCLE = int(os.getenv("XINGWAN_MAX_PER_CYCLE", "1") or "1")
 # ★ 仅星湾生效的发种窗口（每天 00:00-10:00）；其它站点仍按各自周期全天发布
 XINGWAN_PUBLISH_WINDOW = os.getenv("XINGWAN_PUBLISH_WINDOW", "00:00-10:00")
 
+# ==================== 麒麟（HDKylin）====================
+HDKYLIN_URL = os.getenv("HDKYLIN_URL", "https://www.hdkyl.in")
+HDKYLIN_COOKIE = os.getenv("HDKYLIN_COOKIE", "")
+HDKYLIN_MUSIC_CATEGORY = os.getenv("HDKYLIN_MUSIC_CATEGORY", "408")
+# 回加 qB 时打的**分类**（与乌托邦/蟹黄堡/猫站分开，便于按站识别本项目种）
+HDKYLIN_PUBLISH_CATEGORY = os.getenv("HDKYLIN_PUBLISH_CATEGORY", "HDKylin")
+# 每轮最多成功发布几条
+HDKYLIN_MAX_PER_CYCLE = int(os.getenv("HDKYLIN_MAX_PER_CYCLE", "1") or "1")
+# ★ 封面走公共图床 PicGo（复用 PICGO_API_KEY / PICGO_UPLOAD_URL），不新增图床依赖。
+
 # 延迟回加 qB 设定（分钟，0 表示发布后立即回加）
 SEED_DELAY_MIN = int(os.getenv("SEED_DELAY_MIN", "0") or "0")
 

@@ -139,6 +139,19 @@ def build_stages():
             "interval": env_int("XINGWAN_INTERVAL", 1800),
         })
 
+    # 麒麟（hdkyl.in）：第五发布站点，全天参与发种（无独立发种窗口，仅受全局 PUBLISH_WINDOW 约束）
+    if env_bool("ENABLE_PUBLISH_HDKYLIN", False):
+        cmd = (["python", "publish.py", "--site", "hdkylin"]
+               + apply_flag("--yes", "--auto"))
+        n = env_int("HDKYLIN_MAX_PER_CYCLE", 1)
+        if n:
+            cmd += ["--limit", str(n)]
+        stages.append({
+            "name": "publish_hdkylin",
+            "cmd": cmd,
+            "interval": env_int("HDKYLIN_INTERVAL", 1800),
+        })
+
     # 3) 回填 site_torrent_id。编辑的前置条件，频率可以很低。
     if env_bool("ENABLE_SYNC", True):
         stages.append({
@@ -356,6 +369,8 @@ ENV_SNAPSHOT_KEYS = (
     "ENABLE_PUBLISH_XINGWAN", "XINGWAN_INTERVAL", "XINGWAN_MAX_PER_CYCLE",
     "XINGWAN_PUBLISH_WINDOW", "XINGWAN_URL",
     "ENABLE_EDIT_XINGWAN", "EDIT_XINGWAN_INTERVAL", "EDIT_XINGWAN_MAX_PER_CYCLE",
+    "ENABLE_PUBLISH_HDKYLIN", "HDKYLIN_INTERVAL", "HDKYLIN_MAX_PER_CYCLE",
+    "HDKYLIN_URL",
 )
 
 
@@ -1424,11 +1439,12 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
 
             # 发种时间窗口拦截：仅对发布阶段生效，窗口外不更新 last_run
             # ★ 星湾额外叠加自己的 XINGWAN_PUBLISH_WINDOW（默认 00:00-10:00），
-            #   其它三站不受影响 —— 全局 PUBLISH_WINDOW 仍照旧叠加。
+            #   其它四站不受影响 —— 全局 PUBLISH_WINDOW 仍照旧叠加。
             _win_kw = {}
             if name == "publish_xingwan":
                 _win_kw["extra_spec"] = getattr(config, "XINGWAN_PUBLISH_WINDOW", "00:00-10:00")
-            if name in ("publish", "publish_crabpt", "publish_pter", "publish_xingwan") \
+            if name in ("publish", "publish_crabpt", "publish_pter", "publish_xingwan",
+                        "publish_hdkylin") \
                     and not in_publish_window(now, **_win_kw):
                 st["last_skip_at"] = datetime.now().isoformat(timespec="seconds")
                 if name == "publish_xingwan":

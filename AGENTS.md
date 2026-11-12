@@ -1012,3 +1012,144 @@
 | 教训 | 根因 |
 |---|---|
 | **强制要求的页面元素（转载引用块、声明）绝不允许用「可选参数 + 空值静默跳过」承载 —— 默认空串 + `if source_link:` 的写法，会让任何一个忘了传参的调用方静默丢块，且没有任何报错** | 乌托邦（`descr.build_form_fields()`）与蟹黄堡（`crabpt_site.build_fields()`）调用 `descr.build_descr()` 时**从未传 `source_link`**，该参数默认 `""`，渲染层 `if source_link and ...: blocks.append(...)` 直接跳过 ⇒ 两站数百个已发布页面**全都没有转载引用块**，而猫站（当时要求置顶引用）却因自己传了值而正常 —— 同一强制要求，四个调用方四个样，差异完全不可见。★ 这是 `ERR-META` 一族「失效方向 = 静默」的典型：**可选参数的默认值就是它的失效值**，对强制元素而言默认空 = 默认错。⇒ 判据：① 新增任何**强制**页面元素时，必须同时改齐**全部站点渲染入口**（当前四处：`descr.build_form_fields`（乌托邦）、`crabpt_site.build_fields`、`pter_site.build_fields`、`xingwan_site.build_fields`），少一处就是一次静默缺失；② 强制元素的事实来源必须收敛为**单一函数**（本次新增 `descr.build_source_link(task)` 四站共用），禁止各站复制文案导致漂移；③ 自检必须断言「真实提交路径产出的 descr 首块是引用块」（本次自检 ⑪a–⑪d），不能只测渲染层而漏了调用层忘传参；④ 改完后对已上站存量**回刷验证**（本次乌托邦 319 条：280 提交 / 38 无编辑权限 / 1 护栏拒改；蟹黄堡 288 条：285 提交 / 3 护栏拒改），抽查页面 `kdescr` 首块确认 `<fieldset><legend>引用</legend>转自OpenCD:` 在前。★ 附带：`update_metadata.py` 现已支持 `--site crabpt`（复用 `MusopiaClient` 换基址 Cookie + `crabpt_site.build_fields`），批量回刷用 `--site musopia --only-exists --fields descr --apply --yes`，且网络层异常已加重试不再整批崩。 |
+
+---
+
+## 7. ★ SKILL：新站音乐转种接入 SOP（2026-11-12 沉淀，麒麟接入实战提炼）
+
+> **用途**：把 OpenCD（皇后）的音频资源每日自动转载到**一个新的 NexusPHP 站**时，按本 SOP 执行。
+> **已落地样本**：Musopia 乌托邦、CrabPT 蟹黄堡、PTerClub 猫站、XingWan 星湾、HDKylin 麒麟。
+> **适用前提**：目标站是 NexusPHP（发布表单 `takeupload.php`），站点有音乐分类。
+> **一句话**：**考察站规/发布页 → 取 Cookie → 写 `xxx_site.py` → 五处接线 → 三道验证闸门 → 部署开开关**。
+
+### SKILL-0 产出物与工作量
+
+- **触发**：用户说「给 X 站配每日自动转音乐种」。
+- **产出**：`src/<站>_site.py`（约 500~600 行）+ 5 个文件各改 5~20 行 + 配置 + 验证 + 部署。
+- **纪律**：整个接入**不改其他站的既有代码路径**，新增独立 `--site <站>` 分支与独立阶段命名。
+
+### SKILL-1 站规与发布页考察（**一条命令自动下载 + 自动解析**）
+
+> ★ 2026-11-12 起本节已自动化：**不用手工另存网页、不用肉眼抄字段**。
+> ★ 实现：`src/site_probe.py`（通用函数）+ `tools/probe_site.py`（CLI）。
+
+**① 运行探针**（仓库根目录，该站 Cookie 需已在 `.env`）：
+
+```bash
+python tools/probe_site.py --site hdkylin
+# 任意站：python tools/probe_site.py --base https://www.hdkyl.in --cookie-env HDKYLIN_COOKIE
+# 规则页找不到时显式指定：--rules-url https://wiki.../上传规则
+```
+
+它会自动：
+- GET `/upload.php` → 按 `<title>` 生成浏览器保存风格的文件名（`A :: B` → `A __ B`、`A | B` → `A _ B`），**存进 `opencdhtml/`**；
+- 从发布页自动发现「上传规则 / 发种教程」链接并一起存档（落在登录页会自动丢弃，不留噪音）；
+- 解析表单全字段：`action` / `enctype` / **每个 `select` 的全部 option** / 全部 `input` 名；
+- 从 `/usercp.php`「密钥」抓 **passkey**（默认脱敏，`--show-passkey` 才明文）。
+
+**② 复核输出**（机器已提取，人只需确认语义）：
+- [ ] 分类 `type` 里哪个是音乐（如 408）
+- [ ] `processing_sel[4]` / `source_sel[4]` / `medium_sel[4]` **各是什么语义**（★ 同名字段在不同站可能相反）
+- [ ] 音频编码编号（**按名字记**，不要搬数字）
+- [ ] 站规：图床是否强制、标题格式、转载规则（能否删原站后缀）、体积/dupe、是否允许编辑
+3. **★★ 逐字段核对语义，绝不假设字段名通用**（本项目最大教训）：
+   | 字段 | 麒麟（HDKylin） | 蟹黄堡（CrabPT） | 必须做的事 |
+   |---|---|---|---|
+   | `processing_sel[4]` | **年代** | 地区 | 各站语义不同，须读 option 文字确认 |
+   | `source_sel[4]` | **地区** | 媒介 | 同上，同名可能完全相反 |
+   | `medium_sel[4]` | 媒介（CD=33） | 无此字段 | 编号各站独立 |
+   | `audiocodec_sel[4]` | 音频编码（FLAC=1） | 音频编码（FLAC=10） | **按名字转，不按编号** |
+4. **读站规，确认 5 件事**：图床是否强制？标题格式？转载规则（能否删原站后缀）？体积/dupe 限制？是否允许编辑？
+5. **记录站点坐标**：域名、发布页、tracker（`announce.php`）、下载页（`download.php?id=`）、详情页（`details.php?id=`）、匿名参数（多为 `uplver`）。
+
+### SKILL-2 凭据准备（CookieCloud + passkey **自动获取**）
+
+- **Cookie**：从 NAS **CookieCloud**（宿主 `192.168.0.7:3050`）取目标站 Cookie，方法见 `README.md`「★ 站点 Cookie 怎么拿」（解密算法 + 结构陷阱 + 服务端解密捷径）。
+- **NexusPHP 登录态五件套**：`c_secure_uid` / `c_secure_pass` / `c_secure_ssl` / `c_secure_tracker_ssl` / `c_secure_login`。
+- **passkey：自动获取，无需手工抄**（2026-11-12 沉淀）：
+  - 通用函数：`site_probe.fetch_passkey(sess, base)`；各站封装：`<站>_site.py` 的 `XxxClient.fetch_passkey()`（如 `HdkylinClient.fetch_passkey()`）。
+  - 抓取位置：用户控制台 `/usercp.php` 的「密钥」单元格（实测麒麟在此；`/my.php` 不存在则跳过）。
+  - ★ 凭据纪律：**只返回、不打印、不落盘、不进日志**；写 `.env` 的是运维手工动作，代码只负责"能取到"。
+  - ★ 注意：本项目**发布 / 回加主链路用不上 passkey**（回加用站点重写后的 `.torrent`），它在"接入期核验"和"将来本地重建 `.torrent`"时才备用 —— 所以像 `HDKYLIN_PASSKEY` 不必进 `.env`。
+- **凭据只进 NAS `.env`**，严禁写进代码 / 文档 / 日志 / `daemon_env.json` 快照（见 §2）。
+
+### SKILL-3 写适配层 `src/<站>_site.py`
+
+照 `xingwan_site.py`（音乐站最简）或 `crabpt_site.py`（字段最全）的结构：
+
+```python
+MUSIC_TYPE = str(config.XXX_MUSIC_CATEGORY)   # 音乐分类 id
+
+def map_year(task): ...        # 年代 → processing_sel[4]（★ 非线性就手写表，别用公式）
+def map_medium(task): ...      # 媒介 → medium_sel[4]（CD/Track/WEB/Other）
+def map_audiocodec(task): ...  # ★ 按名字转（FLAC/WAV/APE…），因为各站编号不同
+def map_region(task): ...      # 地区（粗→细，写明损失；见 SKILL-6-4）
+def map_tags(task): ...        # 白名单；禁转/首发/DIY/官种/驻站一律不勾
+
+def build_fields(task, *, anonymous=True) -> (fields, audit): ...
+def build_edit_fields(task, *, anonymous=False): ...
+
+class XxxClient:               # 只读 + POST takeupload/takeedit，不碰 qB/库
+    check_login() / fetch_upload_form() / upload_torrent() / download_torrent() / find_existing_by_name()
+
+def selftest(): ...            # 纯离线断言，覆盖每个映射 + 提交字段
+```
+
+**★ 复用纪律（§5-16 / §5-9）**：
+- 标题/副标题/简介**必须复用** `descr.normalize_music_title` / `descr.build_music_small_descr` / `descr.build_descr(site=...)`，**严禁**写第二份实现。
+- 匿名发布 `uplver="yes"` **强制**。
+- 固定字段（如 `team_sel[4]`=Other、视频编码=Other）要写明「为什么不冒充官方组 / 为什么留空」。
+- `audit` 逐字段写「这个值从哪来」，让人能肉眼复核。
+
+### SKILL-4 五处接线（缺一不可）
+
+| 文件 | 改动 |
+|---|---|
+| `config.py` | `XXX_URL` / `XXX_COOKIE` / `XXX_MUSIC_CATEGORY` / `XXX_PUBLISH_CATEGORY`(或 TAG) / `XXX_MAX_PER_CYCLE` |
+| `db.py` | `SITE_XXX` 常量 + `XXX_DIRECT_WHERE`（**同口径复用**，别另写 SQL）+ `pending_xxx_direct()` / `count_pending_xxx_direct()` |
+| `publish.py` | `import xxx_site` + `--site` choices 加站名 + `run_xxx()`（照 `run_xingwan`）+ `_xxx_cover()` + `readd_to_qb_xxx()` |
+| `daemon.py` | `publish_xxx` 阶段（`ENABLE_PUBLISH_XXX`）+ `ENV_SNAPSHOT_KEYS` + 发种窗口名单 |
+| `.env.example` | 站点块（URL / COOKIE / 分类 / 开关 / 周期 / 间隔） |
+
+### SKILL-5 验证闸门（每步可独立验收，前 3 步零风险）
+
+```bash
+# ① 语法
+python -m py_compile src/<站>_site.py src/publish.py src/db.py src/config.py src/daemon.py
+# ② 离线自检（dummy env，不发起任何网络）
+python src/<站>_site.py
+# ③ 干跑：打印完整表单，逐字段核对（尤其「语义互换」的字段）
+python src/publish.py --site <站> --dry-run
+# ④ 单条试发（★ 不可逆，点名 hash）+ 详情页回读
+python src/publish.py --site <站> --only <hash> --auto
+# ⑤ 开关
+# NAS .env 填 COOKIE + ENABLE_PUBLISH_XXX=true → docker compose up -d --force-recreate
+```
+
+### SKILL-6 高频坑清单（五站沉淀）
+
+1. ★ **字段语义互换**：`processing_sel[4]` / `source_sel[4]` 在不同站含义可能相反 —— 照抄会**静默填错**（页面能提交、字段错位）。
+2. ★ **编号不通用**：音频编码、媒介、分类 id 各站独立 —— **按名字转，不按数字搬**。
+3. ★ **年代映射可能非线性**：如麒麟 2026→12、2023→1、2016→8、更早→9 —— 手写表逐项核对。
+4. ★ **地区粗→细不可逆**：皇后只有 5 类（大陆/欧美/港台/日韩/其它），外站若更细只能取代表值或落 Other，**必须写进 audit**（参考麒麟方案 B：港台→香港、欧美→欧洲、日韩→日本）。
+5. ★ **音乐标签极少**：语言标签往往只能勾「国语」，宁缺勿错；禁转/首发/DIY 一律不勾。
+6. ★ **图床先读站规**，别默认必须用官方图床（麒麟站规实测无图床条款，可走公共 PicGo）。
+7. ★ **回加用站点重写后的 `.torrent`**：`client.download_torrent(tid)`，本地那份带的是乌托邦 announce、且站点 passkey 在主链路未必用得上。
+8. ★ **标题保留来源后缀**：转载规则禁止删原站后缀 / 改文件名 / 改文件夹结构 ⇒ 保留 `- OpenCD`。
+9. ★ **编辑阶段默认不做**：站规「不得改变管理员修改」时，`build_edit_fields` 仅预留、不启用。
+10. ★ **发布不可逆**：`--dry-run` → 单条试发 → 详情页回读，三步缺一不可。
+
+### SKILL-7 一页 Checklist
+
+- [ ] `python tools/probe_site.py --site <站>` 已跑，发布页/规则页自动落到 `opencdhtml/`
+- [ ] 表单全字段已自动解析，字段语义已逐个核对
+- [ ] passkey 已由 `fetch_passkey()` 自动取得（无需手工抄）
+- [ ] Cookie 已从 CookieCloud 取得（五件套齐全）
+- [ ] `<站>_site.py` 写好，`selftest()` 全过
+- [ ] config / db / publish / daemon / .env.example 五处接线完成
+- [ ] `py_compile` 通过、`import publish` 正常
+- [ ] `--dry-run` 打印的表单逐字段核对无误
+- [ ] 单条试发成功 + 详情页回读字段一致
+- [ ] NAS `.env` 已填 Cookie 与开关
+- [ ] 开 `ENABLE_PUBLISH_XXX=true`，daemon 跑通一轮
+

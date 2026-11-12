@@ -75,6 +75,7 @@ SITE_MUSOPIA = "musopia"
 SITE_CRABPT = "crabpt"
 SITE_PTER = "pter"
 SITE_XINGWAN = "xingwan"
+SITE_HDKYLIN = "hdkylin"
 
 SITE_PUBLISH_COLUMNS = [
     ("info_hash", "TEXT NOT NULL"),
@@ -1087,6 +1088,10 @@ XINGWAN_DIRECT_WHERE = (
     " AND (status IS NULL OR status != 'FAILED')"
 )
 
+# 麒麟直发队列条件：★ 与星湾**同口径**（不强制 log、不强制 status=SUCCESS），
+# 直接复用星湾那份 WHERE —— 避免两站各写一份 SQL 漂移（`ERR-META-03`）。
+HDKYLIN_DIRECT_WHERE = XINGWAN_DIRECT_WHERE
+
 
 def is_direct_publishable_to(info_hash, site=SITE_CRABPT):
     """★ **直发判据**：这条能不能**直接**发到 `site`（不经源站）。
@@ -1417,6 +1422,41 @@ def count_pending_xingwan_direct(site=SITE_XINGWAN):
     n = conn.execute(
         f"SELECT COUNT(*) FROM tasks "
         f" WHERE {XINGWAN_DIRECT_WHERE} "
+        f"   AND info_hash NOT IN "
+        f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?)",
+        (str(site),),
+    ).fetchone()[0]
+    conn.close()
+    return n
+
+
+def pending_hdkylin_direct(site=SITE_HDKYLIN):
+    """★ 麒麟直发队列：过闸门④（`ALLOW`）∧ 未被标 `FAILED` ∧ 麒麟没有。
+
+    口径与星湾一致（`HDKYLIN_DIRECT_WHERE = XINGWAN_DIRECT_WHERE`，不强制 log），
+    排序同样 `updated_at` 升序。
+    """
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT {TASK_FIELDS} FROM tasks "
+        f" WHERE {HDKYLIN_DIRECT_WHERE} "
+        f"   AND info_hash NOT IN "
+        f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?) "
+        f" ORDER BY updated_at",
+        (str(site),),
+    )
+    rows = _rows_to_dicts(cur)
+    conn.close()
+    return rows
+
+
+def count_pending_hdkylin_direct(site=SITE_HDKYLIN):
+    """★ 麒麟直发队列计数。必须与 `pending_hdkylin_direct()` 用同一个 WHERE。"""
+    conn = connect()
+    n = conn.execute(
+        f"SELECT COUNT(*) FROM tasks "
+        f" WHERE {HDKYLIN_DIRECT_WHERE} "
         f"   AND info_hash NOT IN "
         f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?)",
         (str(site),),

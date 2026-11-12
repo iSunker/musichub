@@ -161,6 +161,45 @@ opencd2others/                      # NAS 部署目录（compose 就放这里，
 > 然后填 `.env`：至少 `QB_PASS`、`MUSOPIA_COOKIE`、`MUSOPIA_PASSKEY`、`PICGO_API_KEY`。
 > **这四个缺失时 `config.py` 会直接终止程序**（不留默认值，见「安全」）。
 
+### ★ 站点 Cookie 怎么拿（从 CookieCloud，2026-11-12 补）
+
+`.env` 里的 `MUSOPIA_COOKIE` / `CRABPT_COOKIE` / `PTER_COOKIE` / `XINGWAN_COOKIE` /
+`HDKYLIN_COOKIE` 都是 **PT 站的登录 Cookie**，不要手抄浏览器 F12（容易漏字段、带多余引号、
+过期后难排查）。统一从 NAS 的 **CookieCloud**（容器 `cookiecloud`，宿主 `192.168.0.7:3050`）取：
+
+1. **找数据文件**（SMB 直读）：`//iSunker-DS423/docker_ssd/cookiecloud/data/<UUID>.json`
+   是加密载荷；**同目录** `浏览器端信息.txt` 写「标签行↵值行」：**服务器地址 / 用户 KEY /
+   端对端加密密码**。⚠️ 凭据**运行时读取**，严禁抄进代码、文档、日志或聊天记录。
+2. **解密**（官方 `ext/function.js` 口令模式，★ 不是裸 md5 hex 当 key）：
+
+```python
+import base64, hashlib, json
+from Crypto.Cipher import AES
+
+key16 = hashlib.md5(f"{uuid}-{password}".encode()).hexdigest()[:16]  # 16 位口令
+raw   = base64.b64decode(encrypted)                                  # 以 b"Salted__" 开头
+salt  = raw[8:16]
+d, prev = b"", b""
+while len(d) < 48:
+    prev = hashlib.md5(prev + key16.encode() + salt).digest()
+    d += prev
+cipher = AES.new(d[:32], AES.MODE_CBC, d[32:48])                     # AES-256-CBC
+plain  = cipher.decrypt(raw[16:])
+plain  = plain[:-plain[-1]]                                          # 去 PKCS7
+data   = json.loads(plain.decode())["cookie_data"]                   # 键 = 域名
+```
+
+3. **结构陷阱**：`cookie_data[域名]` 是 **cookie 对象数组**
+   `[{"name":..., "value":..., "expirationDate":...}]`，**不是** `{name: value}` 字典。
+   按 `expirationDate` 过滤过期项后，拼成 `name=value; name2=value2; …` 整串。
+4. **NexusPHP 站（乌托邦/蟹黄堡/猫站/星湾/麒麟）** 的登录态是五件套：
+   `c_secure_uid` / `c_secure_pass` / `c_secure_ssl` / `c_secure_tracker_ssl` /
+   `c_secure_login`。**乌托邦只取 `c_secure_pass=…`**，其余各站填**整串**。
+5. **更省事的读法**（实测，2026-11-12）：临时脚本直接调服务端解密接口
+   `POST http://192.168.0.7:3050/get/<用户KEY>`，body `{"password": "<端对端密码>"}`，
+   响应 JSON 的 `cookie_data` 就是明文 —— 服务端已用上面算法解好，不用本地再实现 AES。
+   跑完立刻删脚本，**cookie 只在内存里过一手，别落文件**。
+
 ### Phase 0 — 空跑一轮，绝不改站点
 
 ```bash
