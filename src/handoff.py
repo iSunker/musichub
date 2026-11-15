@@ -796,16 +796,26 @@ def handoff_to_3020(qb_src, qb_dst, info_hash, target_save_path, dry_run=True,
                 rel = os.path.relpath(real_src_path, "/downloads")
                 real_src_path = os.path.join(music3_root, rel) if rel != "." else music3_root
 
-            if real_src_path and os.path.exists(real_src_path):
-                hl_ok, hl_msg = ensure_hardlinks(real_src_path, dest_album_dir, dry_run=dry_run)
-                if not hl_ok:
-                    return False, f"交棒前硬链接失败: {hl_msg}"
-                if dry_run:
-                    print(f"🅿️  [handoff][dry-run] 硬链接: {hl_msg}")
+            # 若目标做种目录尚未存在或为空，则必须从皇后源执行硬链接预热
+            need_link = True
+            if os.path.isdir(dest_album_dir):
+                try:
+                    if os.listdir(dest_album_dir):
+                        need_link = False
+                except OSError:
+                    pass
+
+            if need_link:
+                if real_src_path and os.path.exists(real_src_path):
+                    hl_ok, hl_msg = ensure_hardlinks(real_src_path, dest_album_dir, dry_run=dry_run)
+                    if not hl_ok:
+                        return False, f"交棒前硬链接失败: {hl_msg}"
+                    if dry_run:
+                        print(f"🅿️  [handoff][dry-run] 硬链接: {hl_msg}")
+                    else:
+                        print(f"🔗 [handoff] 跨库硬链接建立成功: {dest_album_dir}")
                 else:
-                    print(f"🔗 [handoff] 跨库硬链接建立成功: {dest_album_dir}")
-            else:
-                print(f"⚠️  [handoff] 未找到源音乐目录，跳过硬链接预热: {real_src_path}")
+                    return False, f"未找到皇后源音乐目录，拒绝空跑交棒: {real_src_path}"
 
     if dry_run:
         print(f"🅿️  [handoff][dry-run] 将交棒 {real_hash[:12]}… → 目标实例 "
@@ -818,24 +828,59 @@ def handoff_to_3020(qb_src, qb_dst, info_hash, target_save_path, dry_run=True,
         return False, f"从 3040 导出 .torrent 失败: {type(e).__name__}: {e}"
     if not content:
         return False, "从 3040 导出 .torrent 为空"
+
+    # ★★★ 严格禁止“空跑加种（Skip Checking）”安全门禁：
+    #   在向目标做种器添加任务并跳过校验前，必须确保目标物理目录下真实存在媒体文件且非空。
+    #   若目标目录不存在或为空，严禁调用 is_skip_checking=True，拒绝产生 0% missingFiles 的僵尸任务。
+    if not dry_run and dst_host:
+        target_root_dir = config.HANDOFF_DIR_MAP.get(dst_host)
+        if target_root_dir and album:
+            dest_album_dir = os.path.join(target_root_dir, album)
+            if not os.path.isdir(dest_album_dir):
+                return False, f"目标做种目录不存在，拒绝空跑加种: {dest_album_dir}"
+            try:
+                entries = os.listdir(dest_album_dir)
+                if not entries:
+                    return False, f"目标做种目录为空，拒绝空跑加种: {dest_album_dir}"
+            except OSError as e:
+                return False, f"读取目标做种目录失败，拒绝空跑加种: {e}"
+
+    # ★★★ 优雅交接停源防碰撞（Graceful Handoff）：
+    #   在向目标做种器添加任务前，先让 3010 发送 stop 暂停任务。
+    #   这会促使 qB 向站点 Tracker 汇报 &event=stopped，通知 Tracker 立即注销 3010 的 Peer 占用，
+    #   彻底杜绝 3220/3240 启动时触发站点 "same torrent more than 1 client" 冲突拒绝。
+    stopped_src = False
     try:
-        # ★ 与 readd 同款：不传 layout/is_skip_checking ⇒ 让 3020 自己校验。
+        qb_src.torrents_stop(torrent_hashes=real_hash)
+        stopped_src = True
+        time.sleep(1)  # 给 Tracker 留出处理 stopped 事件的短暂窗口
+    except Exception as e:
+        print(f"⚠️  [handoff] 暂停 3010 源任务时捕获异常（继续尝试交接）: {e}")
+
+    try:
+        # ★ 与 readd 同款：若已有完整硬链接，开启 is_skip_checking=True 避免卡死后台校验队列
         qb_dst.torrents_add(
             torrent_files=content,
             save_path=target_save_path,
             is_paused=False,
+            is_skip_checking=True,
             category=tcat,
             tags=ttags or None,
         )
-        qb_dst.torrents_recheck(torrent_hashes=real_hash)
     except Exception as e:                                        # noqa: BLE001
+        # 目标端添加失败 ⇒ 安全回滚：把 3010 重新恢复做种
+        if stopped_src:
+            try:
+                qb_src.torrents_start(torrent_hashes=real_hash)
+            except Exception:
+                pass
         name_e = type(e).__name__
         # 409 = 3020 上已有这条种（多半是别的容器辅种抢先加了）⇒ 视为"已在做种"。
         if name_e == "Conflict409Error":
             print(f"ℹ️  [handoff] 目标做种实例已有该种（409）= 视为已交棒: {real_hash[:12]}…")
             return True, "409 已存在"
         return False, f"add 目标实例失败: {name_e}: {e}"
-    print(f"✅ 已交棒到目标做种实例（待校验）: {real_hash[:12]}… "
+    print(f"✅ 已优雅交棒到目标做种实例: {real_hash[:12]}… "
           f"category={tcat or '∅'} tags={ttags or '∅'}")
     return True, "added+recheck"
 
@@ -886,7 +931,7 @@ def _source_tags(qb_src, info_hash, name=None):
 
 
 def verify_3020_seeding(qb_dst, info_hash, name=None):
-    """查 3020 上该种是否已"校验通过且在做种"。返回 `(是否就绪, 明细)`。
+    """查做种实例上该种是否已"校验通过且在做种"。返回 `(是否就绪, 明细)`。
 
     ★ 判据（与 NAS-92 §1.5 一致）：`progress >= 1.0` 且 state ∈
       {stalledUP, uploading, forcedUP, queuedUP}。★ 只在这些都成立时才允许删源。
@@ -894,29 +939,55 @@ def verify_3020_seeding(qb_dst, info_hash, name=None):
     ★★★ #45：`name` 兜底 —— 交棒到 3020 的是站点种(B)，其 hash 与 `info_hash`(A) 不同
       ⇒ 按 hash 查不到时，必须按 3020 上的 **name** 再找一次，否则会误判"3020 上还没有"
       ⇒ 永远卡在 HANDOFF_RECHECK（交棒了却永不 DONE）。
+    ★ 容错增强：若当前 qb_dst 查不到，自动轮询 HANDOFF_MUSIC_HOSTS 中其他做种实例，避免由于动态负载均衡导致找不到种。
     """
-    try:
-        info = qb_dst.torrents_info(torrent_hashes=info_hash)
-    except Exception as e:                                        # noqa: BLE001
-        return False, f"查 3020 失败: {type(e).__name__}: {e}"
-    if not info and name:
-        want = str(name).strip()
+    def _check_one(cli):
         try:
-            for t in qb_dst.torrents_info():
-                if str(_torrent_field(t, "name", "") or "").strip() == want:
-                    info = [t]
-                    break
-        except Exception:                                         # noqa: BLE001
-            pass
-    if not info:
-        return False, "3020 上还没有这条种"
-    t = info[0]
-    progress = float(_torrent_field(t, "progress", 0) or 0)
-    state = str(_torrent_field(t, "state", "") or "")
-    seeding_states = {"stalledUP", "uploading", "forcedUP", "queuedUP", "checkingUP"}
-    if progress >= 1.0 and state in seeding_states:
-        return True, f"3020 做种中（progress={progress:.2f} state={state}）"
-    return False, f"3020 未就绪（progress={progress:.2f} state={state}）"
+            info = cli.torrents_info(torrent_hashes=info_hash)
+        except Exception as e:                                    # noqa: BLE001
+            return False, f"查目标实例失败: {type(e).__name__}: {e}", None
+        if not info and name:
+            want = str(name).strip()
+            try:
+                for t in cli.torrents_info():
+                    if str(_torrent_field(t, "name", "") or "").strip() == want:
+                        info = [t]
+                        break
+            except Exception:                                     # noqa: BLE001
+                pass
+        if not info:
+            return False, "目标做种实例上还没有这条种", None
+        t = info[0]
+        progress = float(_torrent_field(t, "progress", 0) or 0)
+        state = str(_torrent_field(t, "state", "") or "")
+        seeding_states = {"stalledUP", "uploading", "forcedUP", "queuedUP", "checkingUP"}
+        if progress >= 1.0 and state in seeding_states:
+            return True, f"做种中（progress={progress:.2f} state={state}）", t
+        return False, f"未就绪（progress={progress:.2f} state={state}）", t
+
+    ready, msg, found_t = _check_one(qb_dst)
+    if ready:
+        return True, msg
+
+    # 若当前实例未找到（例如被分配到了 3220 或 3240 另一台），尝试兜底查验其他音乐实例
+    if "还没有这条种" in msg:
+        for host in getattr(config, "HANDOFF_MUSIC_HOSTS", []):
+            try:
+                import types, qb_client
+                cfg_alt = types.SimpleNamespace(
+                    QB_HOST=host,
+                    QB_USER=getattr(config, "QB_USER", "admin"),
+                    QB_PASS=config.QB_PASS,
+                    QB_API_KEY=getattr(config, "OPENCD_QB_API_KEY", ""),
+                )
+                alt_cli = qb_client.build(cfg_alt)
+                alt_ready, alt_msg, _ = _check_one(alt_cli)
+                if alt_ready:
+                    return True, f"{host} {alt_msg}"
+            except Exception:
+                continue
+
+    return ready, msg
 
 
 # ==================== 清 SSD 副本（步④，严格时序）====================
@@ -1114,8 +1185,8 @@ def process_one(qb_src, qb_dst, item, now=None, dry_run=None, dst_host=None):
                 if item.get("match_fail"):
                     update_item(info_hash, match_fail=0)     # 命中 ⇒ 清零计数
                 if not _elig:
-                    # ★ 退避机制：设置 next_check_at 为预计达标时间（至少退避 1 小时 / 3600 秒），避免霸占每轮配额
-                    delay = max(3600.0, float(_rem_sec or 3600.0))
+                    # ★ 退避机制：设置 next_check_at 为短周期（最高 1800 秒 / 30分钟），避免由于出种人数达标却被冰冻数天
+                    delay = min(1800.0, max(300.0, float(_rem_sec or 1800.0)))
                     update_item(info_hash, state="PENDING",
                                 last_error=f"等够格交棒: {_ewhy}",
                                 next_check_at=_now() + delay)

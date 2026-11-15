@@ -152,6 +152,32 @@ def build_stages():
             "interval": env_int("HDKYLIN_INTERVAL", 1800),
         })
 
+    # 不可躺（tangpt.top）：第六发布站点，全天参与发种
+    if env_bool("ENABLE_PUBLISH_TANGPT", False):
+        cmd = (["python", "publish.py", "--site", "tangpt"]
+               + apply_flag("--yes", "--auto"))
+        n = env_int("TANGPT_MAX_PER_CYCLE", 1)
+        if n:
+            cmd += ["--limit", str(n)]
+        stages.append({
+            "name": "publish_tangpt",
+            "cmd": cmd,
+            "interval": env_int("TANGPT_INTERVAL", 1800),
+        })
+
+    # 慕雪阁（muxuege.org）：第七发布站点，全天参与发种
+    if env_bool("ENABLE_PUBLISH_MUXUEGE", False):
+        cmd = (["python", "publish.py", "--site", "muxuege"]
+               + apply_flag("--yes", "--auto"))
+        n = env_int("MUXUEGE_MAX_PER_CYCLE", 1)
+        if n:
+            cmd += ["--limit", str(n)]
+        stages.append({
+            "name": "publish_muxuege",
+            "cmd": cmd,
+            "interval": env_int("MUXUEGE_INTERVAL", 1800),
+        })
+
     # 3) 回填 site_torrent_id。编辑的前置条件，频率可以很低。
     if env_bool("ENABLE_SYNC", True):
         stages.append({
@@ -161,8 +187,10 @@ def build_stages():
         })
 
     # 4) 补缺失封面。读取音乐目录并上传图床
+    #    带 --all：不只补 site_status='EXISTS' 的已发布任务，也补尚未发布的任务；
+    #    否则 publish 预检的「缺封面」会与 covers 阶段的筛选范围互锁，未发布任务永远补不上。
     if env_bool("ENABLE_COVERS", True):
-        cmd = ["python", "backfill_covers.py"] + apply_flag("--apply")
+        cmd = ["python", "backfill_covers.py", "--all"] + apply_flag("--apply")
         n = env_int("COVERS_MAX_PER_CYCLE", 20)
         if n:
             cmd += ["--limit", str(n)]
@@ -170,6 +198,51 @@ def build_stages():
             "name": "covers",
             "cmd": cmd,
             "interval": env_int("COVERS_INTERVAL", 21600),
+        })
+
+    # 4b) 把「下载未完成残影」标脏出队（status=FAILED）。
+    #     这批行 torrent_file 为空、content_path 落在 /downloads/incomplete/ 且目录已不存在，
+    #     永远发不出去；不标脏就会每轮进直发站候选池、白占发布配额并抬高失败率。
+    #     ★ 默认 14 天一轮：目标是"库存清理"，不是实时响应，没必要天天跑。
+    if env_bool("ENABLE_PRUNE", True):
+        cmd = ["python", "prune_stale.py"] + apply_flag("--apply")
+        stages.append({
+            "name": "prune",
+            "cmd": cmd,
+            "interval": env_int("PRUNE_INTERVAL", 1209600),
+        })
+
+    # 4c) 皇后原种回收（GC 阶段 1：music3 减负）。★★ 默认关闭，需 ENABLE_GC=true。
+    #     规则见 opencd_gc.py：R1 外站已承接 / R2 禁转 / R3 无 tid 死库存，
+    #     全部先过「HR 已满足 36h」保护。默认 14 天一轮（1209600s）。
+    if env_bool("ENABLE_GC", False):
+        cmd = ["python", "opencd_gc.py"] + apply_flag("--apply")
+        n = env_int("GC_MAX_PER_CYCLE", 100)
+        if n:
+            cmd += ["--limit", str(n)]
+        gb = env_int("GC_MAX_GB_PER_CYCLE", 300)
+        if gb:
+            cmd += ["--max-gb", str(gb)]
+        stages.append({
+            "name": "gc",
+            "cmd": cmd,
+            "interval": env_int("GC_INTERVAL", 1209600),
+        })
+
+    # 4d) 跨池孤儿清理（GC 阶段 2：空间彻底回收）。
+    #     当 ENABLE_GC=true（或显式 ENABLE_ORPHAN_GC=true）时自动启用。默认 14 天一轮。
+    if env_bool("ENABLE_ORPHAN_GC", False) or env_bool("ENABLE_GC", False):
+        cmd = ["python", "music_orphan_gc.py"] + apply_flag("--apply")
+        n = env_int("ORPHAN_GC_MAX_PER_CYCLE", 0)
+        if n:
+            cmd += ["--limit", str(n)]
+        gb = env_int("ORPHAN_GC_MAX_GB_PER_CYCLE", 0)
+        if gb:
+            cmd += ["--max-gb", str(gb)]
+        stages.append({
+            "name": "orphan_gc",
+            "cmd": cmd,
+            "interval": env_int("ORPHAN_GC_INTERVAL", 1209600),
         })
 
     # 5) 编辑站点页面。--stale-only 只处理本地比站点新的记录
@@ -371,6 +444,12 @@ ENV_SNAPSHOT_KEYS = (
     "ENABLE_EDIT_XINGWAN", "EDIT_XINGWAN_INTERVAL", "EDIT_XINGWAN_MAX_PER_CYCLE",
     "ENABLE_PUBLISH_HDKYLIN", "HDKYLIN_INTERVAL", "HDKYLIN_MAX_PER_CYCLE",
     "HDKYLIN_URL",
+    "ENABLE_PUBLISH_TANGPT", "TANGPT_INTERVAL", "TANGPT_MAX_PER_CYCLE",
+    "TANGPT_URL",
+    "ENABLE_PUBLISH_MUXUEGE", "MUXUEGE_INTERVAL", "MUXUEGE_MAX_PER_CYCLE",
+    "MUXUEGE_URL",
+    "ENABLE_GC", "GC_INTERVAL", "GC_MAX_PER_CYCLE", "GC_MAX_GB_PER_CYCLE",
+    "ENABLE_ORPHAN_GC", "ORPHAN_GC_INTERVAL", "ORPHAN_GC_MAX_PER_CYCLE", "ORPHAN_GC_MAX_GB_PER_CYCLE",
 )
 
 
@@ -900,6 +979,44 @@ def _handoff_build_two(target_host=None):
     return qb_src, qb_dst, chosen_host, ""
 
 
+def _handoff_build_client(host):
+    """为指定做种实例构建 qB 连接客户端。"""
+    import qb_client
+    import types
+    try:
+        cfg = types.SimpleNamespace(
+            QB_HOST=host,
+            QB_USER=getattr(config, "QB_USER", "admin"),
+            QB_PASS=config.QB_PASS,
+            QB_API_KEY=getattr(config, "OPENCD_QB_API_KEY", ""),
+        )
+        return qb_client.build(cfg)
+    except Exception as e:                                          # noqa: BLE001
+        log(f"⚠️  [handoff] 连接做种实例 {host} 失败: {e}")
+        return None
+
+
+def _handoff_pick_host_for_item(item, default_host=None):
+    """就近实例调度优化：优先检查该专辑是否已在某个 music 实例物理目录中存在。
+    若已存在于某个做种实例（例如 music2 / 3240），则优先交棒给该实例；
+    若各做种池均未就位（仅在 music3 源），则回退到 default_host（负载均衡选出的实例）。
+    """
+    album = item.get("album")
+    hosts = getattr(config, "HANDOFF_MUSIC_HOSTS", None) or []
+    if album and hosts:
+        for h in hosts:
+            dir_path = config.HANDOFF_DIR_MAP.get(h)
+            if dir_path:
+                target_album_dir = os.path.join(dir_path, album)
+                if os.path.isdir(target_album_dir):
+                    try:
+                        if os.listdir(target_album_dir):
+                            return h
+                    except OSError:
+                        pass
+    return default_host or (hosts[0] if hosts else HANDOFF_HOST_3020)
+
+
 def _handoff_due(item, now=None):
     """判断交棒条目当前轮次是否到期且尝试次数未超限。"""
     now = time.time() if now is None else now
@@ -961,10 +1078,17 @@ def _drain_handoff():
 
     due.sort(key=lambda it: (_due_priority(it), float(it.get("enqueued_at") or 0)))
 
+    client_cache = {chosen_host: qb_dst}
     done = 0
     for it in due[:HANDOFF_MAX_PER_ROUND]:
+        target_h = _handoff_pick_host_for_item(it, default_host=chosen_host)
+        if target_h not in client_cache:
+            cli_alt = _handoff_build_client(target_h)
+            if cli_alt:
+                client_cache[target_h] = cli_alt
+        target_qb = client_cache.get(target_h) or qb_dst
         before = it.get("state")
-        after = handoff.process_one(qb_src, qb_dst, it, dry_run=dry, dst_host=chosen_host)
+        after = handoff.process_one(qb_src, target_qb, it, dry_run=dry, dst_host=target_h)
         if after != before:
             # 从队列状态中读取最新错误信息
             _err_after = ""
@@ -1443,14 +1567,26 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
             _win_kw = {}
             if name == "publish_xingwan":
                 _win_kw["extra_spec"] = getattr(config, "XINGWAN_PUBLISH_WINDOW", "00:00-10:00")
+            elif name == "publish_tangpt":
+                _win_kw["extra_spec"] = getattr(config, "TANGPT_PUBLISH_WINDOW", "00:00-10:00")
+            elif name == "publish_muxuege":
+                _win_kw["extra_spec"] = getattr(config, "MUXUEGE_PUBLISH_WINDOW", "00:00-10:00")
             if name in ("publish", "publish_crabpt", "publish_pter", "publish_xingwan",
-                        "publish_hdkylin") \
+                        "publish_hdkylin", "publish_tangpt", "publish_muxuege") \
                     and not in_publish_window(now, **_win_kw):
                 st["last_skip_at"] = datetime.now().isoformat(timespec="seconds")
                 if name == "publish_xingwan":
                     st["skip_reason"] = (
                         f"窗口外：XINGWAN_PUBLISH_WINDOW="
                         f"{getattr(config, 'XINGWAN_PUBLISH_WINDOW', '00:00-10:00')}")
+                elif name == "publish_tangpt":
+                    st["skip_reason"] = (
+                        f"窗口外：TANGPT_PUBLISH_WINDOW="
+                        f"{getattr(config, 'TANGPT_PUBLISH_WINDOW', '00:00-10:00')}")
+                elif name == "publish_muxuege":
+                    st["skip_reason"] = (
+                        f"窗口外：MUXUEGE_PUBLISH_WINDOW="
+                        f"{getattr(config, 'MUXUEGE_PUBLISH_WINDOW', '00:00-10:00')}")
                 else:
                     st["skip_reason"] = f"窗口外：PUBLISH_WINDOW={os.getenv('PUBLISH_WINDOW')}"
                 skipped = True

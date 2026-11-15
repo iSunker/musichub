@@ -76,6 +76,8 @@ SITE_CRABPT = "crabpt"
 SITE_PTER = "pter"
 SITE_XINGWAN = "xingwan"
 SITE_HDKYLIN = "hdkylin"
+SITE_TANGPT = "tangpt"
+SITE_MUXUEGE = "muxuege"
 
 SITE_PUBLISH_COLUMNS = [
     ("info_hash", "TEXT NOT NULL"),
@@ -1073,7 +1075,7 @@ CRABPT_QUEUE_WHERE = (
 # 蟹黄堡直发队列条件：允许转载且排除失败状态，不依赖源站发布状态
 CRABPT_DIRECT_WHERE = (
     "transfer_rule = 'ALLOW'"
-    " AND (status IS NULL OR status != 'FAILED')"
+    " AND (status IS NULL OR status NOT IN ('FAILED', 'NEED_REVIEW'))"
 )
 
 # 猫站直发队列条件：允许转载且必须包含抓轨日志（status 必须为 SUCCESS）
@@ -1085,12 +1087,14 @@ PTER_DIRECT_WHERE = (
 # 星湾直发队列条件：允许转载且排除失败状态（与蟹黄堡同口径，不强制 log）
 XINGWAN_DIRECT_WHERE = (
     "transfer_rule = 'ALLOW'"
-    " AND (status IS NULL OR status != 'FAILED')"
+    " AND (status IS NULL OR status NOT IN ('FAILED', 'NEED_REVIEW'))"
 )
 
 # 麒麟直发队列条件：★ 与星湾**同口径**（不强制 log、不强制 status=SUCCESS），
 # 直接复用星湾那份 WHERE —— 避免两站各写一份 SQL 漂移（`ERR-META-03`）。
 HDKYLIN_DIRECT_WHERE = XINGWAN_DIRECT_WHERE
+TANGPT_DIRECT_WHERE = XINGWAN_DIRECT_WHERE
+MUXUEGE_DIRECT_WHERE = XINGWAN_DIRECT_WHERE
 
 
 def is_direct_publishable_to(info_hash, site=SITE_CRABPT):
@@ -1457,6 +1461,68 @@ def count_pending_hdkylin_direct(site=SITE_HDKYLIN):
     n = conn.execute(
         f"SELECT COUNT(*) FROM tasks "
         f" WHERE {HDKYLIN_DIRECT_WHERE} "
+        f"   AND info_hash NOT IN "
+        f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?)",
+        (str(site),),
+    ).fetchone()[0]
+    conn.close()
+    return n
+
+
+def pending_tangpt_direct(site=SITE_TANGPT):
+    """★ 不可躺直发队列：过闸门④（`ALLOW`）∧ 未被标 `FAILED` ∧ 不可躺没有。"""
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT {TASK_FIELDS} FROM tasks "
+        f" WHERE {TANGPT_DIRECT_WHERE} "
+        f"   AND info_hash NOT IN "
+        f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?) "
+        f" ORDER BY updated_at",
+        (str(site),),
+    )
+    rows = _rows_to_dicts(cur)
+    conn.close()
+    return rows
+
+
+def count_pending_tangpt_direct(site=SITE_TANGPT):
+    """★ 不可躺直发队列计数。"""
+    conn = connect()
+    n = conn.execute(
+        f"SELECT COUNT(*) FROM tasks "
+        f" WHERE {TANGPT_DIRECT_WHERE} "
+        f"   AND info_hash NOT IN "
+        f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?)",
+        (str(site),),
+    ).fetchone()[0]
+    conn.close()
+    return n
+
+
+def pending_muxuege_direct(site=SITE_MUXUEGE):
+    """★ 慕雪阁直发队列：过闸门④（`ALLOW`）∧ 未被标 `FAILED` ∧ 慕雪阁没有。"""
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT {TASK_FIELDS} FROM tasks "
+        f" WHERE {MUXUEGE_DIRECT_WHERE} "
+        f"   AND info_hash NOT IN "
+        f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?) "
+        f" ORDER BY updated_at",
+        (str(site),),
+    )
+    rows = _rows_to_dicts(cur)
+    conn.close()
+    return rows
+
+
+def count_pending_muxuege_direct(site=SITE_MUXUEGE):
+    """★ 慕雪阁直发队列计数。"""
+    conn = connect()
+    n = conn.execute(
+        f"SELECT COUNT(*) FROM tasks "
+        f" WHERE {MUXUEGE_DIRECT_WHERE} "
         f"   AND info_hash NOT IN "
         f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?)",
         (str(site),),

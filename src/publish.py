@@ -16,6 +16,8 @@ import crabpt_site
 import pter_site
 import xingwan_site
 import hdkylin_site
+import tangpt_site
+import muxuege_site
 import db
 import descr
 import readd_queue
@@ -37,9 +39,9 @@ def parse_args():
                     help="具名发布（覆盖默认匿名）")
     ap.add_argument("--auto", action="store_true",
                     help="无人值守自动发布模式，需验证 PUBLISH_I_AM_HERE 口令")
-    ap.add_argument("--site", choices=("musopia", "crabpt", "pter", "xingwan", "hdkylin"),
+    ap.add_argument("--site", choices=("musopia", "crabpt", "pter", "xingwan", "hdkylin", "tangpt", "muxuege"),
                     default="musopia",
-                    help="发布目标站点（musopia/crabpt/pter/xingwan/hdkylin，默认 musopia）")
+                    help="发布目标站点（musopia/crabpt/pter/xingwan/hdkylin/tangpt/muxuege，默认 musopia）")
     ap.add_argument("--selftest", action="store_true",
                     help="执行离线自检逻辑，不发起网络请求且不修改数据库")
     return ap.parse_args()
@@ -763,6 +765,180 @@ def readd_to_qb_pter(qb, client, info_hash, torrent_id):
         print(f"    ❌ 回加 qB 出错: {e}")
 
 
+def readd_to_qb_tangpt(qb, client, info_hash, torrent_id):
+    """把不可躺上的新种子下载回来加进 qB 做种。分类用 TANGPT_PUBLISH_CATEGORY。"""
+    if qb is None:
+        print("    ⚠️  回加跳过：本次没有可用的 qB 连接")
+        return
+    try:
+        content = client.download_torrent(torrent_id)
+        if not content:
+            print("    ❌ 从不可躺下载种子文件失败，跳过回加")
+            return
+
+        _handoff_on = str(getattr(config, "ENABLE_HANDOFF", "false")).strip().lower() in (
+            "1", "true", "yes", "y", "on")
+        _h_src = ""
+        _h_album = ""
+        if _handoff_on:
+            save_path = config.PUBLISH_SAVE_ROOT
+            try:
+                import handoff
+                src, _src_why = _resolve_opencd_content_path(info_hash, return_reason=True)
+                album = os.path.basename(str(src).rstrip("/\\")) if src else ""
+                _h_src, _h_album = src, album
+                if src and album:
+                    _ok, _why = handoff.begin_handoff_for_task(
+                        src, album, info_hash, task=None,
+                        source_category=config.TANGPT_PUBLISH_CATEGORY,
+                        target_category=config.TANGPT_PUBLISH_CATEGORY,
+                        dry_run=(config.HANDOFF_DRY_RUN == "true"))
+                    print(f"    🔀 handoff 复制: {_why}")
+                    if not _ok:
+                        print(f"    ❌ handoff 未就位 ⇒ **跳过回加 3010**（避免变成下载）：{_why}")
+                        handoff.record_missing_data(info_hash, album, "tangpt", _why)
+                        return
+                else:
+                    print("    ⚠️  handoff：拿不到 opencd 原种 content_path，跳过复制")
+                    print("    ❌ 无法定位源成品 ⇒ **跳过回加 3010**（避免变成下载）")
+                    handoff.record_missing_data(info_hash, album, "tangpt",
+                                                _src_why or "拿不到 opencd content_path")
+                    return
+            except Exception as _e:
+                print(f"    ❌ handoff 复制/核对异常 ⇒ **跳过回加 3010**（避免变成下载）: "
+                      f"{type(_e).__name__}: {_e}")
+                handoff.record_missing_data(info_hash, album, "tangpt",
+                                            f"{type(_e).__name__}: {_e}")
+                return
+        else:
+            orig = qb.torrents_info(torrent_hashes=info_hash)
+            if not orig:
+                print(f"    ⚠️  回加跳过：qB 里找不到原种 {info_hash[:12]}…（无法确定保存路径）")
+                return
+            save_path = orig[0].save_path
+
+        if config.SEED_DELAY_MIN > 0:
+            readd_queue.enqueue(
+                content, save_path, config.TANGPT_PUBLISH_CATEGORY,
+                config.SEED_DELAY_MIN, note=f"不可躺 {info_hash[:12]}…",
+                src_path=_h_src, album=_h_album,
+            )
+            return
+
+        qb.torrents_add(
+            torrent_files=content,
+            save_path=save_path,
+            is_paused=False,
+            category=config.TANGPT_PUBLISH_CATEGORY,
+        )
+        print(f"    ✅ 已提交回加至 qB（做种路径: {save_path}，分类: {config.TANGPT_PUBLISH_CATEGORY}）")
+        try:
+            new_hash = torf.Torrent.read_stream(io.BytesIO(content)).infohash
+            got = qb.torrents_info(torrent_hashes=new_hash)
+            if not got:
+                print(f"    ⚠️  回加复核：此刻 qB 里查不到 {new_hash[:12]}…（异步入库中）")
+            else:
+                t = got[0]
+                _dl_states = {"stalledDL", "downloading", "metaDL", "stoppedDL",
+                              "pausedDL", "allocating", "checkingDL", "forcedDL",
+                              "queuedDL", "missingFiles", "error", "unknown"}
+                prog = float(getattr(t, "progress", 0) or 0)
+                ok = (t.state not in _dl_states) and prog >= 1.0
+                mark = "✅" if ok else "★★"
+                print(f"    {mark} 回加复核：state={t.state} progress={prog:.3f} content_path={t.content_path!r}")
+        except Exception as e:
+            print(f"    ⚠️  回加复核失败（不影响发布本身）: {type(e).__name__}: {e}")
+    except Exception as e:
+        print(f"    ❌ 回加 qB 出错: {e}")
+
+
+def readd_to_qb_muxuege(qb, client, info_hash, torrent_id):
+    """把慕雪阁上的新种子下载回来加进 qB 做种。分类用 MUXUEGE_PUBLISH_CATEGORY。"""
+    if qb is None:
+        print("    ⚠️  回加跳过：本次没有可用的 qB 连接")
+        return
+    try:
+        content = client.download_torrent(torrent_id)
+        if not content:
+            print("    ❌ 从慕雪阁下载种子文件失败，跳过回加")
+            return
+
+        _handoff_on = str(getattr(config, "ENABLE_HANDOFF", "false")).strip().lower() in (
+            "1", "true", "yes", "y", "on")
+        _h_src = ""
+        _h_album = ""
+        if _handoff_on:
+            save_path = config.PUBLISH_SAVE_ROOT
+            try:
+                import handoff
+                src, _src_why = _resolve_opencd_content_path(info_hash, return_reason=True)
+                album = os.path.basename(str(src).rstrip("/\\")) if src else ""
+                _h_src, _h_album = src, album
+                if src and album:
+                    _ok, _why = handoff.begin_handoff_for_task(
+                        src, album, info_hash, task=None,
+                        source_category=config.MUXUEGE_PUBLISH_CATEGORY,
+                        target_category=config.MUXUEGE_PUBLISH_CATEGORY,
+                        dry_run=(config.HANDOFF_DRY_RUN == "true"))
+                    print(f"    🔀 handoff 复制: {_why}")
+                    if not _ok:
+                        print(f"    ❌ handoff 未就位 ⇒ **跳过回加 3010**（避免变成下载）：{_why}")
+                        handoff.record_missing_data(info_hash, album, "muxuege", _why)
+                        return
+                else:
+                    print("    ⚠️  handoff：拿不到 opencd 原种 content_path，跳过复制")
+                    print("    ❌ 无法定位源成品 ⇒ **跳过回加 3010**（避免变成下载）")
+                    handoff.record_missing_data(info_hash, album, "muxuege",
+                                                _src_why or "拿不到 opencd content_path")
+                    return
+            except Exception as _e:
+                print(f"    ❌ handoff 复制/核对异常 ⇒ **跳过回加 3010**（避免变成下载）: "
+                      f"{type(_e).__name__}: {_e}")
+                handoff.record_missing_data(info_hash, album, "muxuege",
+                                            f"{type(_e).__name__}: {_e}")
+                return
+        else:
+            orig = qb.torrents_info(torrent_hashes=info_hash)
+            if not orig:
+                print(f"    ⚠️  回加跳过：qB 里找不到原种 {info_hash[:12]}…（无法确定保存路径）")
+                return
+            save_path = orig[0].save_path
+
+        if config.SEED_DELAY_MIN > 0:
+            readd_queue.enqueue(
+                content, save_path, config.MUXUEGE_PUBLISH_CATEGORY,
+                config.SEED_DELAY_MIN, note=f"慕雪阁 {info_hash[:12]}…",
+                src_path=_h_src, album=_h_album,
+            )
+            return
+
+        qb.torrents_add(
+            torrent_files=content,
+            save_path=save_path,
+            is_paused=False,
+            category=config.MUXUEGE_PUBLISH_CATEGORY,
+        )
+        print(f"    ✅ 已提交回加至 qB（做种路径: {save_path}，分类: {config.MUXUEGE_PUBLISH_CATEGORY}）")
+        try:
+            new_hash = torf.Torrent.read_stream(io.BytesIO(content)).infohash
+            got = qb.torrents_info(torrent_hashes=new_hash)
+            if not got:
+                print(f"    ⚠️  回加复核：此刻 qB 里查不到 {new_hash[:12]}…（异步入库中）")
+            else:
+                t = got[0]
+                _dl_states = {"stalledDL", "downloading", "metaDL", "stoppedDL",
+                              "pausedDL", "allocating", "checkingDL", "forcedDL",
+                              "queuedDL", "missingFiles", "error", "unknown"}
+                prog = float(getattr(t, "progress", 0) or 0)
+                ok = (t.state not in _dl_states) and prog >= 1.0
+                mark = "✅" if ok else "★★"
+                print(f"    {mark} 回加复核：state={t.state} progress={prog:.3f} content_path={t.content_path!r}")
+        except Exception as e:
+            print(f"    ⚠️  回加复核失败（不影响发布本身）: {type(e).__name__}: {e}")
+    except Exception as e:
+        print(f"    ❌ 回加 qB 出错: {e}")
+
+
 def readd_to_qb_hdkylin(qb, client, info_hash, torrent_id):
     """把麒麟上的新种子下载回来加进 qB 做种。分类用 HDKYLIN_PUBLISH_CATEGORY。"""
     if qb is None:
@@ -1219,6 +1395,20 @@ def _version_consistency_gate(task):
             return False, f"种子分块与磁盘真实数据校验失败（疑似下载未完成时早产制种）: {_e_torf_v}"
         print("    ✔ 版本闸门：分块物理校验 100% 匹配")
 
+    # ②d 异常大种体积门禁（防止大型超大种阻塞自动发种流水线）
+    max_gb = getattr(config, "MAX_TORRENT_SIZE_GB", 5.0)
+    if max_gb and max_gb > 0:
+        try:
+            import torf as _torf_gate
+            _t_size = _torf_gate.Torrent.read(torrent_file)
+            total_bytes = sum(f.size for f in _t_size.files)
+            total_gb = total_bytes / (1024 ** 3)
+            if total_gb > max_gb:
+                return False, (f"种子体积 {total_gb:.2f} GB 超过上限 {max_gb:.1f} GB "
+                               f"⇒ 拦截需人工审核（NEED_REVIEW）")
+        except Exception as _e_size:
+            print(f"    ℹ️  版本闸门：计算种子体积失败（{_e_size}）⇒ 跳过体积门禁")
+
     return True, ""
 
 
@@ -1580,6 +1770,36 @@ def _hdkylin_cover(task, *, dry_run=False):
     if not (src.startswith("http://") or src.startswith("https://")):
         raise CoverItemError(f"cover_url 不是公网图片地址，麒麟无法外链：{src}")
     return src, f"复用 PicGo 公网图链（麒麟支持外链）：{src}"
+
+
+def _tangpt_cover(task, *, dry_run=False):
+    """不可躺封面：复用已落库的不可躺封面或现有 PicGo 公网图链。"""
+    h = task["info_hash"]
+    have = db.site_cover_url_of(h, db.SITE_TANGPT)
+    if have:
+        return have, f"已有不可躺专用封面（site_publish）⇒ 复用：{have}"
+
+    src = (task.get("cover_url") or "").strip()
+    if not src:
+        raise CoverItemError("库里连 cover_url 都没有 ⇒ 无源可用")
+    if not (src.startswith("http://") or src.startswith("https://")):
+        raise CoverItemError(f"cover_url 不是公网图片地址，不可躺无法外链：{src}")
+    return src, f"复用 PicGo 公网图链（不可躺支持外链）：{src}"
+
+
+def _muxuege_cover(task, *, dry_run=False):
+    """慕雪阁封面：复用已落库的慕雪阁封面或现有 PicGo 公网图链。"""
+    h = task["info_hash"]
+    have = db.site_cover_url_of(h, db.SITE_MUXUEGE)
+    if have:
+        return have, f"已有慕雪阁专用封面（site_publish）⇒ 复用：{have}"
+
+    src = (task.get("cover_url") or "").strip()
+    if not src:
+        raise CoverItemError("库里连 cover_url 都没有 ⇒ 无源可用")
+    if not (src.startswith("http://") or src.startswith("https://")):
+        raise CoverItemError(f"cover_url 不是公网图片地址，慕雪阁无法外链：{src}")
+    return src, f"复用 PicGo 公网图链（慕雪阁支持外链）：{src}"
 
 
 def _crabpt_fields(task, anonymous):
@@ -3004,6 +3224,13 @@ def run_crabpt(args):
             db.save_task(info_hash=t["info_hash"], status="FAILED",
                          reason=f"crabpt_publish_failed: {e}")
             continue
+        except requests.exceptions.RequestException as e:
+            # 捕获网络超时与连接异常（ReadTimeout/ConnectionError 等），防止单个大种超时崩溃拖垮整个 daemon
+            print(f"    ❌ 蟹黄堡网络/提交超时异常: {e} ⇒ 标 FAILED 出队避免队头死循环")
+            rejected += 1
+            db.save_task(info_hash=t["info_hash"], status="FAILED",
+                         reason=f"crabpt_publish_network_error: {e}")
+            continue
 
         if not tid:
             #  按**机器可读前缀**分流（#23）。三个前缀的处置**相反**，见
@@ -3689,6 +3916,9 @@ def run_hdkylin(args):
         elif not ((t.get("cover_url") or "").strip()
                   or db.site_cover_url_of(t.get("info_hash"), db.SITE_HDKYLIN)):
             reason = "缺少 cover_url（站内也没有历史封面）"
+        elif hdkylin_site.title_has_non_latin1(
+                descr.build_kylin_title(db.merge_mapped(dict(t)))):
+            reason = "主标题含非 Latin-1 字符（麒麟自动审核会判「主标题包含中文」不通过）"
 
         ih = (t.get("info_hash") or "")[:12]
         title = t.get("formatted_title") or t.get("torrent_name") or ""
@@ -3822,6 +4052,12 @@ def run_hdkylin(args):
             rejected += 1
             continue
 
+        if hdkylin_site.title_has_non_latin1(hk_name):
+            print(f"🛑 麒麟自动审核门禁拦截：主标题含非 Latin-1 字符: {hk_name}")
+            fail += 1
+            rejected += 1
+            continue
+
         if "转自OpenCD" not in hk_descr:
             print("🛑 麒麟正文门禁拦截：简介缺少转载来源声明")
             fail += 1
@@ -3865,6 +4101,466 @@ def run_hdkylin(args):
 
     if dup_existing:
         print(f"ℹ️  另有 {dup_existing} 条**查重命中**（麒麟已有同版本）⇒ "
+              f"已关联到已有页、未重复提交（退出码 0）。")
+    if site_down:
+        sys.exit(1)
+    if fail:
+        print(f"↩️  以非 0 退出：有 {fail} 条失败，让 daemon 的退避生效")
+        sys.exit(1)
+    if rejected and ok == 0:
+        print(f"↩️  以非 0 退出：{rejected} 条被拒、无一成功")
+        sys.exit(1)
+    return
+
+
+
+
+def run_tangpt(args):
+    """不可躺（tangpt.top）发布路径。与乌托邦、蟹黄堡、猫站、星湾、麒麟路径并列独立运行。"""
+    print("=" * 60)
+    print("🌐 站点 = 不可躺（tangpt.top）★ 独立发布路径")
+    print("=" * 60)
+
+    if args.dry_run:
+        print("\n★ 显式 dry-run：不会向站点提交任何数据。")
+    elif not args.auto:
+        print("\n★★ 真发模式（没有 --dry-run，也没声明 --auto）：")
+        print("   请确认你确实要往**不可躺**提交 —— 发布**不可逆**、无批量撤销。")
+
+    tasks = db.pending_tangpt_direct(db.SITE_TANGPT)
+    if not tasks:
+        print("💡 当前没有可发的种（过闸门④ `ALLOW` ∧ 不可躺没有 ∧ 不是 FAILED）——"
+              f"判据 = `db.TANGPT_DIRECT_WHERE` = `{db.TANGPT_DIRECT_WHERE}` ")
+        return
+
+    if args.only:
+        want = tuple(s.strip().lower() for s in args.only.split(",") if s.strip())
+        if not want:
+            sys.exit("❌ --only 给了但解析出 0 个 hash")
+        hit = [t for t in tasks if any((t.get("info_hash") or "").lower().startswith(w) for w in want)]
+        in_queue = {(t.get("info_hash") or "").lower() for t in tasks}
+        absent = [w for w in want if not any(h.startswith(w) for h in in_queue)]
+        print()
+        print("=" * 60)
+        print(f"★ --only：点名 {len(want)} 个 ⇒ 命中队列 {len(hit)} 条")
+        print("=" * 60)
+        for t in hit:
+            print(f"   ✅ {(t.get('info_hash') or '')[:12]}  {t.get('formatted_title')}")
+        for w in absent:
+            print(f"   ❌ {w} 不在不可躺待发布队列里（被闸门拦截或 hash 错误）")
+        if absent:
+            print("\n   ★ 逐条查为什么没进队列：")
+            for w in absent:
+                ok_q, why_q = db.is_direct_publishable_to(w, db.SITE_TANGPT)
+                print(f"      {w}: {'可发' if ok_q else why_q}")
+        if not hit:
+            sys.exit("❌ --only 与队列**零交集** ⇒ 拒绝执行")
+        tasks = hit
+
+    print("\n" + "=" * 60)
+    print(f"📋 发现 {len(tasks)} 条不可躺待发布任务，预检清单：")
+    print("=" * 60)
+
+    valid, blocked = [], []
+    for t in tasks:
+        reason = None
+        tfile = t.get("torrent_file")
+        if not tfile or not os.path.exists(tfile):
+            reason = f"种子文件缺失 ({tfile})"
+        elif not ((t.get("cover_url") or "").strip()
+                  or db.site_cover_url_of(t.get("info_hash"), db.SITE_TANGPT)):
+            reason = "缺少 cover_url（站内也没有历史封面）"
+
+        ih = (t.get("info_hash") or "")[:12]
+        title = t.get("formatted_title") or t.get("torrent_name") or ""
+        if reason:
+            blocked.append((t, reason))
+            print(f"   ❌ {ih}  {title} ⇒ {reason}")
+        else:
+            valid.append(t)
+            print(f"   ✅ {ih}  {title}")
+
+    if blocked:
+        print(f"\n⚠️  预检拦下 {len(blocked)} 条，有效 {len(valid)} 条")
+    if not valid:
+        print("💡 没有通过预检的任务，本次退出。")
+        return
+
+    if not args.dry_run and args.auto:
+        ok_key, why, _ = guard_auto_key()
+        if not ok_key:
+            print(f"\n🛑 发布被拒绝（第二把钥匙校验失败）：{why}")
+            sys.exit(3)
+
+    client = tangpt_site.TangptClient()
+    qb = None
+    form_info = None
+
+    if not args.dry_run:
+        ok_login, uid = client.check_login()
+        if not ok_login:
+            sys.exit(f"❌ 不可躺登录态失败: {uid}")
+        print(f"\n✅ 不可躺 Cookie 有效（uid={uid}）")
+
+        ok_form, f_msg = client.fetch_upload_form()
+        if not ok_form:
+            sys.exit(f"❌ 不可躺发布页预检失败: {f_msg}")
+        print("✅ 不可躺发布页预检成功（表单就绪）")
+
+        try:
+            import qb_client
+            qb = qb_client.build()
+            print("✅ qBittorrent 连接就绪")
+        except Exception as e:
+            print(f"⚠️  qB 连接失败（发布后无法立即回加做种，但仍可发布）: {e}")
+            qb = None
+
+    max_publish = args.limit if args.limit is not None else int(
+        getattr(config, "TANGPT_MAX_PER_CYCLE", 1) or 1)
+    if max_publish <= 0:
+        max_publish = len(valid)
+
+    print(f"\n🚀 开始处理（计划成功上限 {max_publish} 条，候选池 {len(valid)} 条）...")
+
+    ok = fail = rejected = skipped = 0
+    scanned = 0
+    dup_existing = 0
+    site_down = False
+
+    for t in valid:
+        scanned += 1
+        ih = t["info_hash"]
+        title = t.get("formatted_title") or t.get("torrent_name") or ""
+        print(f"\n[{scanned}/{len(valid)}] 处理: {ih[:12]}  {title}")
+
+        if config.VERSION_GATE_BEFORE_PUBLISH:
+            vg_ok, vg_reason = _version_consistency_gate(t)
+            if not vg_ok:
+                print(f"🛑 版本闸门拦截: {vg_reason}")
+                fail += 1
+                rejected += 1
+                if not args.dry_run:
+                    db.save_task(info_hash=ih, status="FAILED", reason=f"version_gate:{vg_reason}")
+                continue
+
+        try:
+            cover, cover_why = _tangpt_cover(t, dry_run=args.dry_run)
+            print(f"   · 封面 ← {cover_why}")
+        except CoverItemError as ce:
+            print(f"   · 封面不可用（跳过本条）: {ce}")
+            skipped += 1
+            continue
+
+        if not cover:
+            print("🛑 不可躺封面准备失败 ⇒ 停止本轮")
+            site_down = True
+            break
+
+        if config.DEDUP_BEFORE_PUBLISH:
+            local_nm = _local_info_name(t)
+            try:
+                hit_tid = _dedup_lookup(client, search_name=t.get("formatted_title"),
+                                        local_name=local_nm, site_label="不可躺")
+                if hit_tid:
+                    print(f"   ℹ️  不可躺已存在同版本 (id={hit_tid}) ⇒ 关联并跳过发布")
+                    dup_existing += 1
+                    if not args.dry_run:
+                        db.site_publish_set(ih, db.SITE_TANGPT, hit_tid,
+                                            status="EXISTS", cover_url=cover, synced=True)
+                    continue
+            except SiteError as se:
+                print(f"   ❌ 不可躺查重请求异常: {se}")
+                site_down = True
+                break
+
+            _sn = _same_name_precheck(client, search_name=t.get("formatted_title"),
+                                      local_name=local_nm, site_label="不可躺")
+            if _sn:
+                _why = (f"同名冲突：不可躺上已有 info.name 逐字相同的条目 "
+                        f"{'、'.join(tid for tid, _ in _sn[:3])} ⇒ 提交会被静默吞掉。")
+                print(f"    🛑 同名闸门拦截（{_why}）⇒ 拒绝提交，不可躺侧标 FAILED 出队")
+                db.site_publish_set(ih, db.SITE_TANGPT, status="FAILED")
+                fail += 1
+                rejected += 1
+                continue
+
+        t_copy = dict(t)
+        t_copy["cover_url"] = cover
+        fields, audit = tangpt_site.build_fields(t_copy, anonymous=args.anonymous)
+        for line in audit:
+            print(f"      · {line}")
+
+        if args.dry_run:
+            print("   ℹ️  dry-run 模式：跳过实际提交")
+            ok += 1
+            if ok >= max_publish:
+                break
+            continue
+
+        tfile = t.get("torrent_file")
+        try:
+            tid, msg = client.upload_torrent(tfile, fields, form_info=form_info)
+            if tid:
+                print(f"   🎉 发布成功！不可躺 id={tid}")
+                ok += 1
+                db.site_publish_set(ih, db.SITE_TANGPT, tid, status="EXISTS",
+                                    cover_url=cover, synced=True)
+                if not args.no_readd:
+                    readd_to_qb_tangpt(qb, client, ih, tid)
+            elif "REJECT" in msg:
+                print(f"   ❌ 站点拒绝: {msg}")
+                fail += 1
+                rejected += 1
+                db.site_publish_set(ih, db.SITE_TANGPT, status="FAILED")
+            else:
+                print(f"   ⚠️  未知返回状态: {msg}")
+                site_down = True
+                break
+        except SiteError as se:
+            print(f"   ❌ 提交异常: {se}")
+            site_down = True
+            break
+        except requests.exceptions.RequestException as re_err:
+            print(f"   ❌ 网络请求异常: {type(re_err).__name__}: {re_err}")
+            fail += 1
+            rejected += 1
+            db.site_publish_set(ih, db.SITE_TANGPT, status="FAILED")
+
+        if ok >= max_publish:
+            print(f"\n★ 本轮已达发种上限 {ok} 条 ⇒ 结束本轮")
+            break
+
+    if dup_existing:
+        print(f"ℹ️  另有 {dup_existing} 条**查重命中**（不可躺已有同版本）⇒ "
+              f"已关联到已有页、未重复提交（退出码 0）。")
+    if site_down:
+        sys.exit(1)
+    if fail:
+        print(f"↩️  以非 0 退出：有 {fail} 条失败，让 daemon 的退避生效")
+        sys.exit(1)
+    if rejected and ok == 0:
+        print(f"↩️  以非 0 退出：{rejected} 条被拒、无一成功")
+        sys.exit(1)
+    return
+
+
+def run_muxuege(args):
+    """慕雪阁（muxuege.org）发布路径。与乌托邦、蟹黄堡、猫站、星湾、麒麟路径并列独立运行。"""
+    print("=" * 60)
+    print("🌐 站点 = 慕雪阁（muxuege.org）★ 独立发布路径")
+    print("=" * 60)
+
+    if args.dry_run:
+        print("\n★ 显式 dry-run：不会向站点提交任何数据。")
+    elif not args.auto:
+        print("\n★★ 真发模式（没有 --dry-run，也没声明 --auto）：")
+        print("   请确认你确实要往**慕雪阁**提交 —— 发布**不可逆**、无批量撤销。")
+
+    tasks = db.pending_muxuege_direct(db.SITE_MUXUEGE)
+    if not tasks:
+        print("💡 当前没有可发的种（过闸门④ `ALLOW` ∧ 慕雪阁没有 ∧ 不是 FAILED）——"
+              f"判据 = `db.MUXUEGE_DIRECT_WHERE` = `{db.MUXUEGE_DIRECT_WHERE}` ")
+        return
+
+    if args.only:
+        want = tuple(s.strip().lower() for s in args.only.split(",") if s.strip())
+        if not want:
+            sys.exit("❌ --only 给了但解析出 0 个 hash")
+        hit = [t for t in tasks if any((t.get("info_hash") or "").lower().startswith(w) for w in want)]
+        in_queue = {(t.get("info_hash") or "").lower() for t in tasks}
+        absent = [w for w in want if not any(h.startswith(w) for h in in_queue)]
+        print()
+        print("=" * 60)
+        print(f"★ --only：点名 {len(want)} 个 ⇒ 命中队列 {len(hit)} 条")
+        print("=" * 60)
+        for t in hit:
+            print(f"   ✅ {(t.get('info_hash') or '')[:12]}  {t.get('formatted_title')}")
+        for w in absent:
+            print(f"   ❌ {w} 不在慕雪阁待发布队列里（被闸门拦截或 hash 错误）")
+        if absent:
+            print("\n   ★ 逐条查为什么没进队列：")
+            for w in absent:
+                ok_q, why_q = db.is_direct_publishable_to(w, db.SITE_MUXUEGE)
+                print(f"      {w}: {'可发' if ok_q else why_q}")
+        if not hit:
+            sys.exit("❌ --only 与队列**零交集** ⇒ 拒绝执行")
+        tasks = hit
+
+    print("\n" + "=" * 60)
+    print(f"📋 发现 {len(tasks)} 条慕雪阁待发布任务，预检清单：")
+    print("=" * 60)
+
+    valid, blocked = [], []
+    for t in tasks:
+        reason = None
+        tfile = t.get("torrent_file")
+        if not tfile or not os.path.exists(tfile):
+            reason = f"种子文件缺失 ({tfile})"
+        elif not ((t.get("cover_url") or "").strip()
+                  or db.site_cover_url_of(t.get("info_hash"), db.SITE_MUXUEGE)):
+            reason = "缺少 cover_url（站内也没有历史封面）"
+
+        ih = (t.get("info_hash") or "")[:12]
+        title = t.get("formatted_title") or t.get("torrent_name") or ""
+        if reason:
+            blocked.append((t, reason))
+            print(f"   ❌ {ih}  {title} ⇒ {reason}")
+        else:
+            valid.append(t)
+            print(f"   ✅ {ih}  {title}")
+
+    if blocked:
+        print(f"\n⚠️  预检拦下 {len(blocked)} 条，有效 {len(valid)} 条")
+    if not valid:
+        print("💡 没有通过预检的任务，本次退出。")
+        return
+
+    if not args.dry_run and args.auto:
+        ok_key, why, _ = guard_auto_key()
+        if not ok_key:
+            print(f"\n🛑 发布被拒绝（第二把钥匙校验失败）：{why}")
+            sys.exit(3)
+
+    client = muxuege_site.MuxuegeClient()
+    qb = None
+    form_info = None
+
+    if not args.dry_run:
+        ok_login, uid = client.check_login()
+        if not ok_login:
+            sys.exit(f"❌ 慕雪阁登录态失败: {uid}")
+        print(f"\n✅ 慕雪阁 Cookie 有效（uid={uid}）")
+
+        ok_form, f_msg = client.fetch_upload_form()
+        if not ok_form:
+            sys.exit(f"❌ 慕雪阁发布页预检失败: {f_msg}")
+        print("✅ 慕雪阁发布页预检成功（表单就绪）")
+
+        try:
+            import qb_client
+            qb = qb_client.build()
+            print("✅ qBittorrent 连接就绪")
+        except Exception as e:
+            print(f"⚠️  qB 连接失败（发布后无法立即回加做种，但仍可发布）: {e}")
+            qb = None
+
+    max_publish = args.limit if args.limit is not None else int(
+        getattr(config, "MUXUEGE_MAX_PER_CYCLE", 1) or 1)
+    if max_publish <= 0:
+        max_publish = len(valid)
+
+    print(f"\n🚀 开始处理（计划成功上限 {max_publish} 条，候选池 {len(valid)} 条）...")
+
+    ok = fail = rejected = skipped = 0
+    scanned = 0
+    dup_existing = 0
+    site_down = False
+
+    for t in valid:
+        scanned += 1
+        ih = t["info_hash"]
+        title = t.get("formatted_title") or t.get("torrent_name") or ""
+        print(f"\n[{scanned}/{len(valid)}] 处理: {ih[:12]}  {title}")
+
+        if config.VERSION_GATE_BEFORE_PUBLISH:
+            vg_ok, vg_reason = _version_consistency_gate(t)
+            if not vg_ok:
+                print(f"🛑 版本闸门拦截: {vg_reason}")
+                fail += 1
+                rejected += 1
+                if not args.dry_run:
+                    db.save_task(info_hash=ih, status="FAILED", reason=f"version_gate:{vg_reason}")
+                continue
+
+        try:
+            cover, cover_why = _muxuege_cover(t, dry_run=args.dry_run)
+            print(f"   · 封面 ← {cover_why}")
+        except CoverItemError as ce:
+            print(f"   · 封面不可用（跳过本条）: {ce}")
+            skipped += 1
+            continue
+
+        if not cover:
+            print("🛑 慕雪阁封面准备失败 ⇒ 停止本轮")
+            site_down = True
+            break
+
+        if config.DEDUP_BEFORE_PUBLISH:
+            local_nm = _local_info_name(t)
+            try:
+                hit_tid = _dedup_lookup(client, search_name=t.get("formatted_title"),
+                                        local_name=local_nm, site_label="慕雪阁")
+                if hit_tid:
+                    print(f"   ℹ️  慕雪阁已存在同版本 (id={hit_tid}) ⇒ 关联并跳过发布")
+                    dup_existing += 1
+                    if not args.dry_run:
+                        db.site_publish_set(ih, db.SITE_MUXUEGE, hit_tid,
+                                            status="EXISTS", cover_url=cover, synced=True)
+                    continue
+            except SiteError as se:
+                print(f"   ❌ 慕雪阁查重请求异常: {se}")
+                site_down = True
+                break
+
+            _sn = _same_name_precheck(client, search_name=t.get("formatted_title"),
+                                      local_name=local_nm, site_label="慕雪阁")
+            if _sn:
+                _why = (f"同名冲突：慕雪阁上已有 info.name 逐字相同的条目 "
+                        f"{'、'.join(tid for tid, _ in _sn[:3])} ⇒ 提交会被静默吞掉。")
+                print(f"    🛑 同名闸门拦截（{_why}）⇒ 拒绝提交，慕雪阁侧标 FAILED 出队")
+                db.site_publish_set(ih, db.SITE_MUXUEGE, status="FAILED")
+                fail += 1
+                rejected += 1
+                continue
+
+        t_copy = dict(t)
+        t_copy["cover_url"] = cover
+        fields, audit = muxuege_site.build_fields(t_copy, anonymous=args.anonymous)
+        for line in audit:
+            print(f"      · {line}")
+
+        if args.dry_run:
+            print("   ℹ️  dry-run 模式：跳过实际提交")
+            ok += 1
+            if ok >= max_publish:
+                break
+            continue
+
+        tfile = t.get("torrent_file")
+        try:
+            tid, msg = client.upload_torrent(tfile, fields, form_info=form_info)
+            if tid:
+                print(f"   🎉 发布成功！慕雪阁 id={tid}")
+                ok += 1
+                db.site_publish_set(ih, db.SITE_MUXUEGE, tid, status="EXISTS",
+                                    cover_url=cover, synced=True)
+                if not args.no_readd:
+                    readd_to_qb_muxuege(qb, client, ih, tid)
+            elif "REJECT" in msg:
+                print(f"   ❌ 站点拒绝: {msg}")
+                fail += 1
+                rejected += 1
+                db.site_publish_set(ih, db.SITE_MUXUEGE, status="FAILED")
+            else:
+                print(f"   ⚠️  未知返回状态: {msg}")
+                site_down = True
+                break
+        except SiteError as se:
+            print(f"   ❌ 提交异常: {se}")
+            site_down = True
+            break
+        except requests.exceptions.RequestException as re_err:
+            print(f"   ❌ 网络请求异常: {type(re_err).__name__}: {re_err}")
+            fail += 1
+            rejected += 1
+            db.site_publish_set(ih, db.SITE_MUXUEGE, status="FAILED")
+
+        if ok >= max_publish:
+            print(f"\n★ 本轮已达发种上限 {ok} 条 ⇒ 结束本轮")
+            break
+
+    if dup_existing:
+        print(f"ℹ️  另有 {dup_existing} 条**查重命中**（慕雪阁已有同版本）⇒ "
               f"已关联到已有页、未重复提交（退出码 0）。")
     if site_down:
         sys.exit(1)
@@ -4715,6 +5411,10 @@ def main():
         return run_xingwan(args)
     if args.site == "hdkylin":
         return run_hdkylin(args)
+    if args.site == "tangpt":
+        return run_tangpt(args)
+    if args.site == "muxuege":
+        return run_muxuege(args)
 
     config.print_runtime_info()
     db.init_db()
@@ -5034,6 +5734,14 @@ def main():
             rejected += 1
             db.save_task(info_hash=task["info_hash"], status="FAILED",
                          reason=f"publish_failed: {e}")
+            continue
+        except requests.exceptions.RequestException as e:
+            # 捕获网络超时与连接异常，防止单种超时崩溃拖死流水线
+            print(f"    ❌ 乌托邦网络/提交超时异常: {e} ⇒ 标 FAILED 出队")
+            fail += 1
+            rejected += 1
+            db.save_task(info_hash=task["info_hash"], status="FAILED",
+                         reason=f"publish_network_error: {e}")
             continue
 
         if not torrent_id:
