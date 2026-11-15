@@ -43,6 +43,13 @@ DEDUP_BEFORE_PUBLISH = (os.getenv("DEDUP_BEFORE_PUBLISH", "true").strip().lower(
 
 # ---- 发种前版本一致性检查 ----
 # 校验数据库与本地磁盘分轨/整轨状态及文件清单一致性
+# ---- 音乐种子体积门禁配置 ----
+# 超过此大小（GB）的音乐种子视为异常大种，触发拦截保护（0 表示不限制）
+try:
+    MAX_TORRENT_SIZE_GB = float(os.getenv("MAX_TORRENT_SIZE_GB", "5.0"))
+except ValueError:
+    MAX_TORRENT_SIZE_GB = 5.0
+
 VERSION_GATE_BEFORE_PUBLISH = (
     os.getenv("VERSION_GATE_BEFORE_PUBLISH", "true").strip().lower()
     not in ("0", "false", "no", "off"))
@@ -97,7 +104,21 @@ HDKYLIN_MUSIC_CATEGORY = os.getenv("HDKYLIN_MUSIC_CATEGORY", "408")
 HDKYLIN_PUBLISH_CATEGORY = os.getenv("HDKYLIN_PUBLISH_CATEGORY", "HDKylin")
 # 每轮最多成功发布几条
 HDKYLIN_MAX_PER_CYCLE = int(os.getenv("HDKYLIN_MAX_PER_CYCLE", "1") or "1")
-# ★ 封面走公共图床 PicGo（复用 PICGO_API_KEY / PICGO_UPLOAD_URL），不新增图床依赖。
+# ★ 封面走公共图床 PicGo（复用 PICGO_API_KEY / PICGO_UPLOAD_URL），不新增图床依赖
+
+# ==================== 不可躺（TangPT）====================
+TANGPT_URL = os.getenv("TANGPT_URL", "https://www.tangpt.top")
+TANGPT_COOKIE = os.getenv("TANGPT_COOKIE", "")
+TANGPT_MUSIC_CATEGORY = os.getenv("TANGPT_MUSIC_CATEGORY", "409")
+TANGPT_PUBLISH_CATEGORY = os.getenv("TANGPT_PUBLISH_CATEGORY", "TangPT")
+TANGPT_MAX_PER_CYCLE = int(os.getenv("TANGPT_MAX_PER_CYCLE", "1") or "1")
+
+# ==================== 慕雪阁（MuXueGe）====================
+MUXUEGE_URL = os.getenv("MUXUEGE_URL", "https://pt.muxuege.org")
+MUXUEGE_COOKIE = os.getenv("MUXUEGE_COOKIE", "")
+MUXUEGE_MUSIC_CATEGORY = os.getenv("MUXUEGE_MUSIC_CATEGORY", "408")
+MUXUEGE_PUBLISH_CATEGORY = os.getenv("MUXUEGE_PUBLISH_CATEGORY", "MuXueGe")
+MUXUEGE_MAX_PER_CYCLE = int(os.getenv("MUXUEGE_MAX_PER_CYCLE", "1") or "1")
 
 # 延迟回加 qB 设定（分钟，0 表示发布后立即回加）
 SEED_DELAY_MIN = int(os.getenv("SEED_DELAY_MIN", "0") or "0")
@@ -146,7 +167,9 @@ HANDOFF_OWN_CATEGORIES = [
         "HANDOFF_OWN_CATEGORIES",
         f"{os.getenv('PUBLISH_CATEGORY', 'Musopia')},"
         f"{os.getenv('CRABPT_PUBLISH_CATEGORY', 'CrabPT')},"
-        f"{os.getenv('PTER_PUBLISH_CATEGORY', 'PTer')}",
+        f"{os.getenv('PTER_PUBLISH_CATEGORY', 'PTer')},"
+        f"{os.getenv('TANGPT_PUBLISH_CATEGORY', 'TangPT')},"
+        f"{os.getenv('MUXUEGE_PUBLISH_CATEGORY', 'MuXueGe')}",
     ).split(",") if c.strip()
 ]
 
