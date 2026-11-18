@@ -1137,7 +1137,7 @@ def _seed_patrol_dry_run():
 
 
 def _seed_patrol_build_clients():
-    """build `(qb_3020, qb_3040, sites, cats)`。任一失败 ⇒ 抛（调用方记日志跳过本轮）。"""
+    """build `(qb_3020, qb_3040, sites, cats, tags)`。任一失败 ⇒ 抛（调用方记日志跳过本轮）。"""
     import types
     import db
     import qb_client
@@ -1145,6 +1145,9 @@ def _seed_patrol_build_clients():
     from crabpt_site import CrabptClient
     from pter_site import PterClient
     from xingwan_site import XingwanClient
+    from hdkylin_site import HdkylinClient
+    from tangpt_site import TangptClient
+    from muxuege_site import MuxuegeClient
     cfg3020 = types.SimpleNamespace(
         QB_HOST=HANDOFF_HOST_3020,
         QB_USER=getattr(config, "QB_USER", "admin"),
@@ -1154,12 +1157,24 @@ def _seed_patrol_build_clients():
     )
     qb_3020 = qb_client.build(cfg3020)
     qb_3040 = qb_client.build(config)
-    sites = {db.SITE_MUSOPIA: MusopiaClient(), db.SITE_CRABPT: CrabptClient(),
-             db.SITE_PTER: PterClient(), db.SITE_XINGWAN: XingwanClient()}
-    cats = {db.SITE_MUSOPIA: getattr(config, "PUBLISH_CATEGORY", None),
-            db.SITE_CRABPT: getattr(config, "CRABPT_PUBLISH_CATEGORY", None),
-            db.SITE_PTER: getattr(config, "PTER_PUBLISH_CATEGORY", None),
-            db.SITE_XINGWAN: None}          # ★ 星湾不建分类，只打标签（见 tags）
+    sites = {
+        db.SITE_MUSOPIA: MusopiaClient(),
+        db.SITE_CRABPT: CrabptClient(),
+        db.SITE_PTER: PterClient(),
+        db.SITE_XINGWAN: XingwanClient(),
+        db.SITE_HDKYLIN: HdkylinClient(),
+        db.SITE_TANGPT: TangptClient(),
+        db.SITE_MUXUEGE: MuxuegeClient(),
+    }
+    cats = {
+        db.SITE_MUSOPIA: getattr(config, "PUBLISH_CATEGORY", None),
+        db.SITE_CRABPT: getattr(config, "CRABPT_PUBLISH_CATEGORY", None),
+        db.SITE_PTER: getattr(config, "PTER_PUBLISH_CATEGORY", None),
+        db.SITE_XINGWAN: None,          # ★ 星湾不建分类，只打标签（见 tags）
+        db.SITE_HDKYLIN: getattr(config, "HDKYLIN_PUBLISH_CATEGORY", None),
+        db.SITE_TANGPT: getattr(config, "TANGPT_PUBLISH_CATEGORY", None),
+        db.SITE_MUXUEGE: getattr(config, "MUXUEGE_PUBLISH_CATEGORY", None),
+    }
     tags = {db.SITE_XINGWAN: getattr(config, "XINGWAN_PUBLISH_TAG", None)}
     return qb_3020, qb_3040, sites, cats, tags
 
@@ -1178,10 +1193,13 @@ def _seed_patrol_retry(fn, *, tries=3, delay=2):
 
 def _seed_patrol_build_extra():
     """按环境变量 SEED_PATROL_EXTRA_INSTANCES 构建扩展只读客户端实例。
-    ★ 默认纳管常规保种库 music1:3220,music2:3240，防止已交棒保种的种子被误判为 MISSING。
+    ★ 默认纳管常规保种库 music1:3220,music2:3240,music3:3260，防止已交棒保种的种子被误判为 MISSING。
     """
-    raw = (os.getenv("SEED_PATROL_EXTRA_INSTANCES", "music1:3220,music2:3240") or "").strip()
-    if not raw:
+    raw = os.getenv("SEED_PATROL_EXTRA_INSTANCES")
+    if raw is None or not raw.strip():
+        raw = "music1:3220,music2:3240,music3:3260"
+    raw = raw.strip()
+    if raw.lower() in ("none", "off", "disable", "disabled", "false"):
         return []
     import types
     import qb_client
@@ -1562,35 +1580,23 @@ def run_main_loop(stages, state, max_backoff, tick=None, stage_timeout=None):
             last = st.get("last_run", 0) or 0
 
             # 发种时间窗口拦截：仅对发布阶段生效，窗口外不更新 last_run
-            # ★ 星湾额外叠加自己的 XINGWAN_PUBLISH_WINDOW（默认 00:00-10:00），
-            #   其它四站不受影响 —— 全局 PUBLISH_WINDOW 仍照旧叠加。
-            _win_kw = {}
-            if name == "publish_xingwan":
-                _win_kw["extra_spec"] = getattr(config, "XINGWAN_PUBLISH_WINDOW", "00:00-10:00")
-            elif name == "publish_tangpt":
-                _win_kw["extra_spec"] = getattr(config, "TANGPT_PUBLISH_WINDOW", "00:00-10:00")
-            elif name == "publish_muxuege":
-                _win_kw["extra_spec"] = getattr(config, "MUXUEGE_PUBLISH_WINDOW", "00:00-10:00")
-            if name in ("publish", "publish_crabpt", "publish_pter", "publish_xingwan",
-                        "publish_hdkylin", "publish_tangpt", "publish_muxuege") \
-                    and not in_publish_window(now, **_win_kw):
-                st["last_skip_at"] = datetime.now().isoformat(timespec="seconds")
-                if name == "publish_xingwan":
-                    st["skip_reason"] = (
-                        f"窗口外：XINGWAN_PUBLISH_WINDOW="
-                        f"{getattr(config, 'XINGWAN_PUBLISH_WINDOW', '00:00-10:00')}")
-                elif name == "publish_tangpt":
-                    st["skip_reason"] = (
-                        f"窗口外：TANGPT_PUBLISH_WINDOW="
-                        f"{getattr(config, 'TANGPT_PUBLISH_WINDOW', '00:00-10:00')}")
-                elif name == "publish_muxuege":
-                    st["skip_reason"] = (
-                        f"窗口外：MUXUEGE_PUBLISH_WINDOW="
-                        f"{getattr(config, 'MUXUEGE_PUBLISH_WINDOW', '00:00-10:00')}")
-                else:
-                    st["skip_reason"] = f"窗口外：PUBLISH_WINDOW={os.getenv('PUBLISH_WINDOW')}"
-                skipped = True
-                continue
+            # 各站点优先使用各自独立的 SITE_PUBLISH_WINDOW，未配置时回退到全局 PUBLISH_WINDOW (默认 00:00-10:00)
+            _site_windows = {
+                "publish": getattr(config, "MUSOPIA_PUBLISH_WINDOW", "00:30-09:30"),
+                "publish_crabpt": getattr(config, "CRABPT_PUBLISH_WINDOW", "00:00-10:00"),
+                "publish_pter": getattr(config, "PTER_PUBLISH_WINDOW", "00:15-09:45"),
+                "publish_xingwan": getattr(config, "XINGWAN_PUBLISH_WINDOW", "01:00-09:00"),
+                "publish_hdkylin": getattr(config, "HDKYLIN_PUBLISH_WINDOW", "00:45-10:00"),
+                "publish_tangpt": getattr(config, "TANGPT_PUBLISH_WINDOW", "01:15-09:15"),
+                "publish_muxuege": getattr(config, "MUXUEGE_PUBLISH_WINDOW", "01:30-09:30"),
+            }
+            if name in _site_windows:
+                _win_spec = _site_windows[name]
+                if not in_publish_window(now, extra_spec=_win_spec):
+                    st["last_skip_at"] = datetime.now().isoformat(timespec="seconds")
+                    st["skip_reason"] = f"窗口外：{name.upper()}_WINDOW={_win_spec}"
+                    skipped = True
+                    continue
 
             # 连续失败退避：1x, 2x, 4x... 上限 MAX_BACKOFF
             n_fail = fails.get(name, 0)

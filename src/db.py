@@ -79,6 +79,16 @@ SITE_HDKYLIN = "hdkylin"
 SITE_TANGPT = "tangpt"
 SITE_MUXUEGE = "muxuege"
 
+ALL_SITES = [
+    SITE_MUSOPIA,
+    SITE_CRABPT,
+    SITE_PTER,
+    SITE_XINGWAN,
+    SITE_HDKYLIN,
+    SITE_TANGPT,
+    SITE_MUXUEGE,
+]
+
 SITE_PUBLISH_COLUMNS = [
     ("info_hash", "TEXT NOT NULL"),
     ("site", "TEXT NOT NULL"),          # SITE_MUSOPIA / SITE_CRABPT / SITE_PTER / SITE_XINGWAN
@@ -177,13 +187,10 @@ TASK_FIELDS = (
 
 # 待发布记录查询条件：
 #   1. status 为 SUCCESS 且未在目标站发布（site_status IS NULL 或 != 'EXISTS'）；
-#   2. 发布窗口（闸门②）：记录了原始发布时间 opencd_added_at，且距今已满 7 天；
-#   3. 元数据完备（闸门③）：对于来源为皇后的记录（opencd_tid 非空），必须已抓取 mapped_json；
-#   4. 转载规则（闸门④）：transfer_rule 必须显式为 'ALLOW'。
+#   2. 元数据完备（闸门③）：对于来源为皇后的记录（opencd_tid 非空），必须已抓取 mapped_json；
+#   3. 转载规则（闸门④）：transfer_rule 必须显式为 'ALLOW'。
 PENDING_PUBLISH_WHERE = (
     "status = 'SUCCESS' AND (site_status IS NULL OR site_status != 'EXISTS') "
-    "AND (opencd_added_at IS NOT NULL AND opencd_added_at != '' "
-    "     AND opencd_added_at <= datetime('now', '-7 days'))"
     "AND (opencd_tid IS NULL OR opencd_tid = '' "
     "     OR (mapped_json IS NOT NULL AND mapped_json != ''))"
     "AND transfer_rule = 'ALLOW'"
@@ -651,23 +658,14 @@ def publish_funnel():
         ("g1_status_success",      "status = 'SUCCESS'"),
         ("g2b_site_not_exists",
          "status = 'SUCCESS' AND (site_status IS NULL OR site_status != 'EXISTS')"),
-        # 闸门②：皇子发布日期 + 7 天（★ 与 PENDING_PUBLISH_WHERE 里那句**逐字同源**）
-        ("g2_added_7d",
-         "status = 'SUCCESS' AND (site_status IS NULL OR site_status != 'EXISTS') "
-         "AND (opencd_added_at IS NOT NULL AND opencd_added_at != '' "
-         "     AND opencd_added_at <= datetime('now', '-7 days'))"),
         # 闸门③：皇后行必须抓过页面（tid 空 = 本地抓轨行，豁免）
         ("g3_mapped",
          "status = 'SUCCESS' AND (site_status IS NULL OR site_status != 'EXISTS') "
-         "AND (opencd_added_at IS NOT NULL AND opencd_added_at != '' "
-         "     AND opencd_added_at <= datetime('now', '-7 days')) "
          "AND (opencd_tid IS NULL OR opencd_tid = '' "
          "     OR (mapped_json IS NOT NULL AND mapped_json != ''))"),
         # 闸门④：transfer_rule 必须显式 ALLOW
         ("g4_allow",
          "status = 'SUCCESS' AND (site_status IS NULL OR site_status != 'EXISTS') "
-         "AND (opencd_added_at IS NOT NULL AND opencd_added_at != '' "
-         "     AND opencd_added_at <= datetime('now', '-7 days')) "
          "AND (opencd_tid IS NULL OR opencd_tid = '' "
          "     OR (mapped_json IS NOT NULL AND mapped_json != '')) "
          "AND transfer_rule = 'ALLOW'"),

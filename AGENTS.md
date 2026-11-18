@@ -64,6 +64,8 @@
    - 回滚：记下原 `image:` tag 即可，**不要在生产端留 `.bak-*` 备份**（§1 目录铁律）。
 4. **验证新镜像生效**：
    对比 `docker inspect opencd2musopia --format '{{.Image}}'` 与 Docker Hub 的 digest；并 `docker exec ... md5sum` 核对本次改动文件的 MD5 与本地一致，再跑一次对应模块自检。
+   - ★ 改 `.env` 后的 `up -d --force-recreate` **一次只跑一条**，跑完 `docker exec ... printenv <键>` 回读；失败先查 `docker ps -a` 的 `Created` 改名残留（见 `ERR-DOCKER-15`），别连发重建。
+   - ★ 新站接入的完整命令级流程见 `HOWTO-新站接入.md`（§7 是速查，该文是详细 runbook）。
 
 ---
 
@@ -132,7 +134,15 @@
     - **调度优先级分级 (Drain Priority)**：`_drain_handoff()` 调度排空时必须按分级权重排序推进：在途校验态（`HANDOFF_ADDED`/`HANDOFF_RECHECK`）> 重试态（`FAILED`）> 未受阻就绪态（`PENDING`）> 退避中的条目，杜绝未达标条目阻塞整个流水线。
     - **发种区完整性核验与同源直删**：若目标做种实例上已存在 100% 完整做种任务（如历史已辅种或此前交棒成功），直接清理 3010 上的源任务与 SSD 副本进入 `DONE`，严禁抛错中断。
     - **视界一致性铁律**：`opencd2musopia` 编排容器必须挂载 `/volume1/video`。发种区生成的软链接指向 `/volume1/video/...` 时，编排器与 `qbit-publish` 必须具备相同的目标路径可见性，严禁出现断链导致 `verify_publish_area_complete` 误判清盘失败或阻塞交棒。
-    - **发种节流与批次配置**：生产端 `.env` 中 `PUBLISH_MAX_PER_CYCLE`、`CRABPT_MAX_PER_CYCLE`、`PTER_MAX_PER_CYCLE` 统一设为 `3`，配合 `PUBLISH_INTERVAL=1800` 与 `PUBLISH_WINDOW=00:30-10:00`，兼顾发种吞吐与平稳防风暴。
+    - **发种节流与批次配置**：生产端 `.env` 中 `PUBLISH_MAX_PER_CYCLE`、`CRABPT_MAX_PER_CYCLE`、`PTER_MAX_PER_CYCLE`、`HDKYLIN_MAX_PER_CYCLE`、`XINGWAN_MAX_PER_CYCLE`、`TANGPT_MAX_PER_CYCLE`、`MUXUEGE_MAX_PER_CYCLE` 统一设为 `2`（平滑防风暴）。
+- **错峰窗口与周期**：已取消乌托邦与猫站的 7 天反悔期；延迟回加设为 `SEED_DELAY_MIN=7`（发布后 7 分钟自动回加 3010 做种）；错误退避上限 `MAX_BACKOFF=7200`（2 小时）。
+  - 蟹黄堡：`00:00 - 10:00`（周期 2400s / 40分）
+  - 猫站：`00:15 - 09:45`（周期 3600s / 60分）
+  - 乌托邦：`00:30 - 09:30`（周期 3600s / 60分）
+  - 麒麟：`00:45 - 10:00`（周期 2400s / 40分）
+  - 星湾：`01:00 - 09:00`（周期 3600s / 60分）
+  - 不可躺：`01:15 - 09:15`（周期 3600s / 60分）
+  - 牧雪阁：`01:30 - 09:30`（周期 3600s / 60分）
 
 11. **做种时长与闸门①全量对齐规范 (2026-11-09)**：
     - **做种时长真源唯一**：OpenCD 皇后抓轨原种常驻在 `3260 (music3)`。`run.py` 扫描原种库时直接读取 `torrent.seeding_time` 并以秒换算天数（`_seed_days = round(seeding_time / 86400.0, 2)`），在所有 `db.save_task` 分支全量持久化写入 `tasks.qb_seed_days` 列，绝不可恒传 `None` 导致全库做种天数失真。
@@ -169,17 +179,43 @@
     - `tools/retract_missing_pages.py`：页面确认不存在时置 `torrent_id=''` + `status='UNKNOWN'`，**不删行、不碰 `cover_url`/`synced_at`**，单事务提交并回读校验。`UNKNOWN` 表达"已知站上已无"；置 `''` 会被 `db.site_publish_get()` 当成"记录坏了"。
     - **撤回不会触发重发**：转种/直发队列是按 `site_publish` 里**有没有该站的行**去重（`NOT IN (SELECT info_hash FROM site_publish WHERE site=?)`），不是按 `status='EXISTS'`；`is_*_publishable_to` 对"有记录但 id 为空"明确返回 False；全库不存在 `DELETE FROM site_publish`。⇒ 撤回后无需改 `transfer_rule`。
     - 2026-11-11 已撤回 musopia 9 行、crabpt 5 行（`torrent_id=''` / `status='UNKNOWN'`，回读 9/9、5/5）。
+    - ★ **口径误用反例（2026-11-12 麒麟 2 行）**：用户口述「站点侧已经删种了」⇒ 曾把 `473341`/`473343` 两行撤回成 `torrent_id=''` / `UNKNOWN`；随后现场 GET `details.php` 发现两条均 HTTP 200、H1 标「禁止 · 审核不通过」、下载链接仍在 ⇒ **种子没删，只是审核不通过**，撤回前提错误，已单事务回滚 tid 与 `EXISTS`（回读 2/2）。★ 纪律：**任何口述的「删种/404/失效」都必须现场 `GET details.php` 核验后再动库**；撤回只适用于页面确实不存在。「审核不通过」要走**编辑**（或管理组复核），不能撤回。麒麟这两条随后按站点要求只改主标题为纯 Latin-1 拼写（见 `PLAN-hdkylin.md`）。
+    - ★ 工具限制：`retract_missing_pages.py --site` 的 `choices` 目前只有 `musopia|crabpt`；用于其它站前须扩展 choices（或按本条口径精确写 `UPDATE`），**不要**为两行记录重建整个镜像。
 
 19. **当前生产镜像固化状态 (2026-11-11)**：
-    - `descr.py` / `pter_site.py` / `crabpt_site.py` / `tools/reapply_site_titles.py` 已固化进 `isunker/opencd2others:43c3902-dirty`（digest `sha256:5a1ee6c1…`），容器 healthy，`descr.py --selftest` 44/44。
-    - 回滚：把 compose 的 `image:` 改回旧 tag `43c3902` 再 `--force-recreate`（该镜像仍在 NAS 本地）。容器内文件 MD5 已与本地逐一核对一致。
+   - `descr.py` / `pter_site.py` / `crabpt_site.py` / `tools/reapply_site_titles.py` 已固化进 `isunker/opencd2others:43c3902-dirty`（digest `sha256:5a1ee6c1…`），容器 healthy，`descr.py --selftest` 44/44。
+   - 回滚：把 compose 的 `image:` 改回旧 tag `43c3902` 再 `--force-recreate`（该镜像仍在 NAS 本地）。容器内文件 MD5 已与本地逐一核对一致。
+
+20. **GC 删盘机制、硬链接池真相与 `music5` 红线 (2026-11-13，详见 `docs/nas_cluster/音乐池GC清理与硬链接真相-20261113.md`)**：
+   - **`delete_files=True` 不可用**：qB 对含中文 / `&` / `{}` 的目录**静默失败**（80 条抽查：干净 44、任务已删目录全留 36，qB 不报错）。⇒ `opencd_gc.apply_one` 一律 `delete_files=False`，随后 `_host_path()` + `safe_rmtree()` **自己 `rm -rf`**；护栏 = 必须在 `GC_ROOT` 之下 + 只允许单层 + `--` + 超时。
+   - **`/volume1/video` 在编排容器内必须 `:rw`**（NAS 生产实测即 `:rw`，仓库副本曾写 `:ro` 属漂移，已改）：挂 `:ro` 时 `rm` 直接 `EROFS`，症状与"qB 静默失败"一模一样。
+   - ★★ **`music1` / `music2` / `music3` 是同一 inode 的硬链接池**（实测 `nlink=2`，如 inode `624215` 同时存在于 `music2` 与 `music3`）⇒ **删一侧只减少引用计数、不释放任何空间**；要回收必须把**所有池的同名目录一起删**。判据纪律：**"目录消失" ≠ "空间释放"**，任何删除后必须同时核 `statvfs` 可用量 + qB 任务数。实测反例：删 `music3` 前 5 大 494 GB，可用只 `+0.21 GB`。
+   - **回收口径**：目录名不在**任一**音乐池实例的 `content_path` 一级名集合里（`save_path` 实测全为 `/downloads`，无子层 ⇒ 一级名 == 任务名；`name` 与 `content_path` 两口径交叉校验 0 差异）。
+   - ★★ **`music5` 严禁任何自动清理**：用户通过其他方式在 `music5` 下载种子，**任务不在 qB** ⇒ "无任务引用"对它完全不成立。批量清理脚本必须内置 `FORBIDDEN = ("music5",)`，目标集合出现该池即 `sys.exit(2)` 中止。
+   - ★ **"无引用即可删"必须再叠系统目录黑名单**：`.`/`@` 前缀、`incomplete`、`.OrphanedData`、`.RecycleBin`、`@eaDir`、`lost+found`。2026-11-13 曾因只过滤"无任务引用"误删 `music1/music2` 的 `incomplete` 空壳、`.OrphanedData` ×3、`.RecycleBin`（0.72+0.10 GB，不可恢复）；qB 真实临时目录在 `/volume2/qb_temp/`，数据未损。
+
+21. **两阶段渐进式清种机制与两周自动调度 (2026-11-14)**：
+   - **阶段 1（`opencd_gc.py` 原种库 music3 减负）**：
+     - 前提铁律：必须先过 **HR 考核硬闸门（做种满 36h）**，未达标坚决跳过；
+     - 保护待发新种：`transfer_rule='ALLOW'` 且独占 music3 的健康新种严格保护，保留用于外站发布；
+     - R1（外站已承接）：已在 `site_publish` 发布（`EXISTS`）或外站常规库（music1/2）已有承接做种，卸载 music3 任务并删除硬链接（外站做种毫发无伤）；
+     - R2/R3（禁转/失败/死库存）：卸载任务并彻底删除独占文件，直接释放物理空间；
+     - 备份与台账：强制归档 `.torrent` 至 `/data/gc_trash/<日期>/`，记录 `gc_log.csv` 并逐条 flush。
+   - **阶段 2（`music_orphan_gc.py` 跨池孤儿清理与物理空间彻底回收）**：
+     - 动态连接 music1(3220), music2(3240), music3(3260) 三实例，任一连接失败立即中止（防假孤儿误判）；
+     - 扫描三池物理目录，凡在三端均无任何任务引用的目录判定为孤儿；
+     - 跨池同步单层安全 `rm -rf`，销毁底层 inode 的全部引用，彻底释放物理磁盘空间，记录 `orphan_gc_log.csv`。
+   - **常驻定时调度（daemon.py 两周一轮）**：
+     - `.env` 启用 `ENABLE_GC=true`，默认间隔 `GC_INTERVAL=1209600`（14天 / 两周），单轮限制 `GC_MAX_PER_CYCLE=100` / `GC_MAX_GB_PER_CYCLE=300`；
+     - `daemon.py` 按阶段串行调度：先跑 `gc` 阶段减负并卸载，紧接着跑 `orphan_gc` 阶段跨池彻底回收磁盘空间，实现全自动无人值守闭环。
+
 
 
 ---
 
 ## 6. 全局教训与排障规则库 (ERR 规则集)
 
-> 本表是本项目在开发、联调与生产运行中沉淀的 **153 条不可触碰的铁律与根因索引**。代码与脚本中的 `ERR-XX-NN` 均锚定于此。
+> 本表是本项目在开发、联调与生产运行中沉淀的 **162 条不可触碰的铁律与根因索引**。代码与脚本中的 `ERR-XX-NN` 均锚定于此。
 
 
 ### 6.1 主线与元层纪律 (META)
@@ -554,6 +590,11 @@
 
 ### 6.6 容器化与编排 (Docker / Compose) (DOCKER)
 
+### ERR-DOCKER-15 (2026-11-12 麒麟接入：`--force-recreate` 残留改名容器致生产容器一度消失)
+| 教训 | 根因 |
+|---|---|
+| **`--force-recreate` 绝不能并发/排队连发多条**：一次被中断就留下 `Created` 状态的**改名残留容器**，它会占住服务名，让之后每一次重建都撞同一个 `Conflict` 并回滚；多条重建命令互相踩时，旧容器已被移除而新容器没起来 ⇒ **生产 daemon 整段停机** | ★ 实测链条（2026-11-12，开 `ENABLE_PUBLISH_HDKYLIN=true` 时）：① 被转入后台的 `sed + up -d --force-recreate` 尚未生效，`.env` 已是 `true`、容器 `printenv` 仍是 `false`；② 前台又发一条重建，报 `Conflict. The container name "/f789ac2e926f_opencd2musopia" is already in use`；③ `docker ps -a` 抓到残留 `f789ac2e926f_opencd2musopia｜Created`（compose 重建 = **旧容器改名 → 新建同名容器** 两步，中断在改名后 ⇒ 残留从未启动、无数据，但名字被占）；④ 残留未清又连发重建，出现 `removal ... is already in progress`（后台删除任务与前台重建并发），随后 `docker ps -a` 只剩残留、`opencd2musopia` **整个不存在**。★★ 修法（按序、每条验收）：`docker ps -a --format '{{.Names}}\|{{.Status}}' \| grep musopia` 找残留 → `docker rm -f <改名残留名>` → `docker compose up -d musopia` 恢复 → `docker exec ... printenv <开关>` 回读 → `docker ps` healthy → `docker logs` 横幅确认 `publish_hdkylin` 进调度。恢复后实测容器 `Up ... (healthy)`、开关=`true`、横幅 `publish_hdkylin 每 1800s --auto --limit 3`。★★★ 判据三条：① **`.env` 里写了 true 不蕴含容器里是 true**（`ERR-DOCKER-10` 同族：`grep` 给的是「字符串出现过」，配置生效与否的权威是 `docker exec ... env`）；② 改 `.env` 必须 `--force-recreate`（§2 铁律 4），但**同一服务一次只跑一条重建命令**，跑完立刻 `printenv` 验收，验收不过先查 `docker ps -a` 的 `Created` 残留再重试；③ 「我下过这个命令」≠「它生效了」（`ERR-DOCKER-11` / `ERR-META-01` 同族）—— 跨机器动作只能回读被作用物。★ 一般化：**compose 重建不是原子操作**，它是「改名 + 新建」两步；任何中断/并发都会把中间态留在生产上，且后续失败都长得像「第一次那个冲突」，掩盖真正该做的清残留动作。★ 2026-11-12 同日又复现两次（部署 `27e1556-dirty` 与重开开关时，后台重建均卡在 `Created` 残留 >2 分钟），按同一修法 `kill <卡住的 compose pid>` → `docker rm -f <残留名>` → 单条 `compose up -d --force-recreate` 均一次恢复 ⇒ 该修法可复用；**等待期间绝不追加第二条重建命令** |
+
 ### ERR-DOCKER-01
 | 教训 | 根因 |
 |---|---|
@@ -871,6 +912,16 @@
 |---|---|
 | **dry-run 的"只读查询"不该被 dry-run 短路** —— 否则隔离闸门拿到空判据、**恒判"拒绝"**，dry-run 从"演练"退化成"永远报错"** | `handoff._source_category(qb_src, ih, dry_run=True)` 原先直接返回 `("","")`（注释说"让闸门放行"），但调用方 `is_own_project("")` 比白名单**恒为 False** ⇒ dry-run 下**每条种都在闸门被"拒交棒"**，日志像"非本项目种"，其实是 dry-run 假象；happy path 永远演练不到。★ 修法：dry-run 也做这次**只读 GET**（不改任何状态），只在**真的没有客户端**（`qb_src is None`）时才跳过。★★ 一般化：**dry-run 要跳过的只是"写动作"，不是"读判据"** —— 把读也跳过会让**依赖该读的判据**失真，"演练"反而掩盖了真实路径（`ERR-META-14` 同族：跳过不许静默，且跳过的东西要分"读/写"）。★ 判据：dry-run 必须能跑出与真跑**同一条状态迁移链**、只是停在"不落盘"。 |
 
+### ERR-QB-13 (2026-11-13 GC：`delete_files=True` 对特殊字符路径静默失败)
+| 教训 | 根因 |
+|---|---|
+| **"接口调用没抛异常" ≠ "副作用发生了"**：`torrents_delete(delete_files=True)` 对含中文 / `&` / `{}` 的目录**任务删了、文件一个没动、也不报错** | 80 条灰度抽查：任务与目录都干净 44 条，**任务已删而目录完整保留 36 条**，全部命中特殊字符目录名。★ 判据只能靠**事后 `os.path.exists(content_path)`**，qB 侧不回任何错误。★ 修法：`delete_files=False` + 自己 `rm -rf`（走宿主 rw 路径）；`rm -rf` 约 1–3 s/条，`shutil.rmtree` 约 30 s/条（NAS 大量小文件）。★★ 一般化：凡"请求方让你顺手删/顺手改"的便捷参数，**结果必须回读核验**；删类操作的回读就是"路径还在不在"，不是"接口返回码"。 |
+
+### ERR-QB-14 (2026-11-13 硬链接池：删一侧不释放空间)
+| 教训 | 根因 |
+|---|---|
+| **"目录消失了" ≠ "空间释放了"**：`music1/music2/music3` 是同一批 inode 的硬链接副本（实测 `nlink=2`），删一个链接只减引用计数 | 删除 `music3` 前 5 大共 **494.37 GB**，`statvfs` 可用仅 `315.75 → 315.96 GB`（+0.21 GB）；inode 取证 `624215` 同时存在于 `music2` 与 `music3`；抽样 400 目录 / 8057 文件**全部 `nlink=2`**。★ 回收空间的正确口径 = "**所有池都无任务引用**的同名目录一起删"；只删本池冗余仅属去重。★ 判据纪律：删除后**必须同时**核 `statvfs` 与 qB 任务数，两者一并看。★★ 附带红线：`music5` 的任务不在 qB（用户其他方式下载）⇒ 不得纳入任何"无引用即清理"判定。 |
+
 
 ### 6.11 下载器内核调优 (QBTUNE)
 
@@ -886,6 +937,11 @@
 
 
 ### 6.12 站点与 NexusPHP 协议适配 (SITE)
+
+### ERR-SITE-11 (2026-11-12 麒麟自动审核：主标题含非 Latin-1 字符判「主标题包含中文」)
+| 教训 | 根因 |
+|---|---|
+| **站规文本 ≠ 线上审核行为**：麒麟《上传规则》音轨条目明确要求「[中文艺术家名 - 中文专辑名] 艺术家名 - 专辑名…」，例句 `恩雅 - 冬季降临 Enya - And Winter Came 2008 FLAC` 带中文，音乐区线上实测 201 条标题里 88 条含中文；但**自动审核会以「主标题包含中文」拒种** ⇒ 接入新站必须拿「真实提交的种子是否被审核通过」当验收，不能只读规则页 | ★ 实测：#473341 `菅原圭 - 孔雀 2026 FLAC`、#473343 `岩崎太整, 小西遼, YUKI KANESAKA - 『攻殻機動隊…』O.S.T. 2026 FLAC` 均收到系统消息「种子审核未通过…需要修改的地方：主标题包含中文」；同期 #473337 `Shaggy - Intoxication 2007 FLAC`、#473342 `milet - Sunny 2026 FLAC` 通过。★★ 判据来源不是猜的：站内菜单链接的种审脚本 `HDKylin-Torrent-Assistant` v1.3.15 源码为 `if (/[^\x00-\xff]+/g.test(title) && …) '主标题包含中文或中文字符'; error = true;` —— **任意非 Latin-1 字符**（汉字/假名/『』全角标点）都算；该脚本对 `cat===408`（音乐）有清空错误的豁免，但线上自动审核显然没有照此豁免 ⇒ 以线上结果为准。★★★ 修法：`hdkylin_site.title_has_non_latin1()` 按同一正则判定，`publish.py::run_hdkylin` 在**预检**（不进有效队列）与**提交前**各设一道闸门，宁缺勿错；自检加阳性/阴性对照（含 `Quatuor Hermès` 的 Latin-1 边界）。实测影响面：按 `descr.build_kylin_title()` 产出的最终主标题统计，2713 条里 1165 条（42.9%）会被拦。★ 为什么不做中文→罗马字自动改写：源库没有独立原名/罗马字字段（本项目此前实测），硬造就是 `ERR-META` 一族的假数据；站规与审核互相矛盾时应**回复管理组人工复核**，不是自行删中文。★ 一般化：**「文档要求的」与「机器实际执行的」冲突时，验收判据是后者的可观察结果**；且这类冲突会在「提交成功但审核不通过」时静默发生 —— 详情页回读只能证明表单提交对了，证明不了审核通过 |
 
 ### ERR-SITE-01
 | 教训 | 根因 |
@@ -1020,12 +1076,14 @@
 > **用途**：把 OpenCD（皇后）的音频资源每日自动转载到**一个新的 NexusPHP 站**时，按本 SOP 执行。
 > **已落地样本**：Musopia 乌托邦、CrabPT 蟹黄堡、PTerClub 猫站、XingWan 星湾、HDKylin 麒麟。
 > **适用前提**：目标站是 NexusPHP（发布表单 `takeupload.php`），站点有音乐分类。
-> **一句话**：**考察站规/发布页 → 取 Cookie → 写 `xxx_site.py` → 五处接线 → 三道验证闸门 → 部署开开关**。
+> **一句话**：**考察站规/发布页 → 取 Cookie → 写 `xxx_site.py` → 六处接线 → 三道验证闸门 → 部署开开关**。
+> **完整操作手册**：`HOWTO-新站接入.md`（命令级全流程、每项验收判据、构建部署/残留容器陷阱、麒麟实战数据）。本节是速查；两边口径有出入时以该文为准并**同步修正本节**。
+> ⏸ **2026-11-12 起麒麟（HDKylin）适配暂停、发种已停**（`ENABLE_PUBLISH_HDKYLIN=false`）。站点要求、自动审核实测、名字来源调研与恢复清单集中记录于 `麒麟站点要求.md`；恢复适配前**必须**按其 §6 清单执行，不要直接开定时或继续改标题函数。
 
 ### SKILL-0 产出物与工作量
 
 - **触发**：用户说「给 X 站配每日自动转音乐种」。
-- **产出**：`src/<站>_site.py`（约 500~600 行）+ 5 个文件各改 5~20 行 + 配置 + 验证 + 部署。
+- **产出**：`src/<站>_site.py`（约 500~600 行）+ 6 个文件各改 5~20 行（含冒烟脚本开关清单）+ 配置 + 验证 + 部署。
 - **纪律**：整个接入**不改其他站的既有代码路径**，新增独立 `--site <站>` 分支与独立阶段命名。
 
 ### SKILL-1 站规与发布页考察（**一条命令自动下载 + 自动解析**）
@@ -1096,12 +1154,13 @@ def selftest(): ...            # 纯离线断言，覆盖每个映射 + 提交�
 ```
 
 **★ 复用纪律（§5-16 / §5-9）**：
-- 标题/副标题/简介**必须复用** `descr.normalize_music_title` / `descr.build_music_small_descr` / `descr.build_descr(site=...)`，**严禁**写第二份实现。
+- 副标题/简介**必须复用** `descr.build_music_small_descr` / `descr.build_descr(site=...)`，**严禁**写第二份实现；标题默认复用 `descr.normalize_music_title`。
+- ★ 站规标题形状不同时（麒麟实例）：新增 `descr.build_<站>_title()` 只改尾巴，但**清洗与解析仍复用同一份** `_split_title` / `_parse_artist_album` / 年份与编码提取 —— 禁止复制第二份解析。麒麟定案：`艺术家 - 专辑 年份 编码[-发布组][- OpenCD]`，不带位深/采样率；源数据没有的字段（如独立中文名）**不造**，宁缺勿错。
 - 匿名发布 `uplver="yes"` **强制**。
 - 固定字段（如 `team_sel[4]`=Other、视频编码=Other）要写明「为什么不冒充官方组 / 为什么留空」。
 - `audit` 逐字段写「这个值从哪来」，让人能肉眼复核。
 
-### SKILL-4 五处接线（缺一不可）
+### SKILL-4 六处接线（缺一不可）
 
 | 文件 | 改动 |
 |---|---|
@@ -1110,6 +1169,7 @@ def selftest(): ...            # 纯离线断言，覆盖每个映射 + 提交�
 | `publish.py` | `import xxx_site` + `--site` choices 加站名 + `run_xxx()`（照 `run_xingwan`）+ `_xxx_cover()` + `readd_to_qb_xxx()` |
 | `daemon.py` | `publish_xxx` 阶段（`ENABLE_PUBLISH_XXX`）+ `ENV_SNAPSHOT_KEYS` + 发种窗口名单 |
 | `.env.example` | 站点块（URL / COOKIE / 分类 / 开关 / 周期 / 间隔） |
+| **`tools/image-smoke-test.sh`** | ★ **第六处、最易漏**：`D_ENV` 补 `-e ENABLE_PUBLISH_XXX=false`。脚本 ⑤ 用 `daemon.py` 源码做真源核对开关清单，漏一个就判红并**拒绝 push**（2026-11-12 麒麟接入实测被它拦下）；补齐后 14 个开关全绿 |
 
 ### SKILL-5 验证闸门（每步可独立验收，前 3 步零风险）
 
@@ -1138,6 +1198,7 @@ python src/publish.py --site <站> --only <hash> --auto
 8. ★ **标题保留来源后缀**：转载规则禁止删原站后缀 / 改文件名 / 改文件夹结构 ⇒ 保留 `- OpenCD`。
 9. ★ **编辑阶段默认不做**：站规「不得改变管理员修改」时，`build_edit_fields` 仅预留、不启用。
 10. ★ **发布不可逆**：`--dry-run` → 单条试发 → 详情页回读，三步缺一不可。
+11. ★ **站规 ≠ 自动审核**（`ERR-SITE-11`）：麒麟站规要求中文名前缀，线上自动审核却按 `/[^\x00-\xff]/` 判「主标题包含中文」拒种 ⇒ 提交前加主标题闸门（预检 + 兜底两道），并按「最终产出的主标题」而非原始 `formatted_title` 统计影响面（后者含「分轨」等被剥掉的中文，会虚高到 97%）。
 
 ### SKILL-7 一页 Checklist
 
@@ -1146,10 +1207,12 @@ python src/publish.py --site <站> --only <hash> --auto
 - [ ] passkey 已由 `fetch_passkey()` 自动取得（无需手工抄）
 - [ ] Cookie 已从 CookieCloud 取得（五件套齐全）
 - [ ] `<站>_site.py` 写好，`selftest()` 全过
-- [ ] config / db / publish / daemon / .env.example 五处接线完成
-- [ ] `py_compile` 通过、`import publish` 正常
+- [ ] config / db / publish / daemon / .env.example / 冒烟脚本开关清单 六处接线完成
+- [ ] `py_compile` / `run.py --selftest` 通过、`gen_counts.py` 已重生成
+- [ ] 构建冒烟全绿且 **Hub tags API 回读**确认推送成功（别只看本地镜像）
+- [ ] NAS 点名 sha tag 重建；digest / 容器内 MD5 / `printenv` 开关 / healthy 四项验收
 - [ ] `--dry-run` 打印的表单逐字段核对无误
 - [ ] 单条试发成功 + 详情页回读字段一致
-- [ ] NAS `.env` 已填 Cookie 与开关
-- [ ] 开 `ENABLE_PUBLISH_XXX=true`，daemon 跑通一轮
+- [ ] NAS `.env` 已填 Cookie 与开关（开定时前保持 false）
+- [ ] 开 `ENABLE_PUBLISH_XXX=true`，force-recreate 一次一条，`printenv` 回读 + daemon 横幅确认阶段，观察 1~2 轮失败率
 

@@ -70,12 +70,14 @@ except ValueError:
 MUSOPIA_URL = os.getenv("MUSOPIA_URL", "https://www.musopia.vip")
 MUSOPIA_COOKIE = require_env("MUSOPIA_COOKIE")
 MUSOPIA_PASSKEY = require_env("MUSOPIA_PASSKEY")
+MUSOPIA_PUBLISH_WINDOW = os.getenv("MUSOPIA_PUBLISH_WINDOW", "00:30-09:30")
 
 # ==================== 蟹黄堡站点 ====================
 CRABPT_URL = os.getenv("CRABPT_URL", "https://crabpt.vip")
 CRABPT_COOKIE = os.getenv("CRABPT_COOKIE", "")
 CRABPT_MUSIC_CATEGORY = os.getenv("CRABPT_MUSIC_CATEGORY", "408")
 CRABPT_PUBLISH_CATEGORY = os.getenv("CRABPT_PUBLISH_CATEGORY", "CrabPT")
+CRABPT_PUBLISH_WINDOW = os.getenv("CRABPT_PUBLISH_WINDOW", "00:00-10:00")
 
 # ==================== 猫站（PTerClub）====================
 PTER_URL = os.getenv("PTER_URL", "https://pterclub.net")
@@ -84,6 +86,7 @@ PTER_MUSIC_CATEGORY = os.getenv("PTER_MUSIC_CATEGORY", "406")
 PTER_PUBLISH_CATEGORY = os.getenv("PTER_PUBLISH_CATEGORY", "PTer")
 PTER_IMG_URL = os.getenv("PTER_IMG_URL", "https://img.pterclub.net/api/1/upload")
 PTER_IMG_API_KEY = os.getenv("PTER_IMG_API_KEY", "")
+PTER_PUBLISH_WINDOW = os.getenv("PTER_PUBLISH_WINDOW", "00:15-09:45")
 
 # ==================== 星湾（xingwan.cc）====================
 XINGWAN_URL = os.getenv("XINGWAN_URL", "https://xingwan.cc")
@@ -104,6 +107,7 @@ HDKYLIN_MUSIC_CATEGORY = os.getenv("HDKYLIN_MUSIC_CATEGORY", "408")
 HDKYLIN_PUBLISH_CATEGORY = os.getenv("HDKYLIN_PUBLISH_CATEGORY", "HDKylin")
 # 每轮最多成功发布几条
 HDKYLIN_MAX_PER_CYCLE = int(os.getenv("HDKYLIN_MAX_PER_CYCLE", "1") or "1")
+HDKYLIN_PUBLISH_WINDOW = os.getenv("HDKYLIN_PUBLISH_WINDOW", "00:45-10:00")
 # ★ 封面走公共图床 PicGo（复用 PICGO_API_KEY / PICGO_UPLOAD_URL），不新增图床依赖
 
 # ==================== 不可躺（TangPT）====================
@@ -112,6 +116,7 @@ TANGPT_COOKIE = os.getenv("TANGPT_COOKIE", "")
 TANGPT_MUSIC_CATEGORY = os.getenv("TANGPT_MUSIC_CATEGORY", "409")
 TANGPT_PUBLISH_CATEGORY = os.getenv("TANGPT_PUBLISH_CATEGORY", "TangPT")
 TANGPT_MAX_PER_CYCLE = int(os.getenv("TANGPT_MAX_PER_CYCLE", "1") or "1")
+TANGPT_PUBLISH_WINDOW = os.getenv("TANGPT_PUBLISH_WINDOW", "01:15-09:15")
 
 # ==================== 慕雪阁（MuXueGe）====================
 MUXUEGE_URL = os.getenv("MUXUEGE_URL", "https://pt.muxuege.org")
@@ -119,6 +124,7 @@ MUXUEGE_COOKIE = os.getenv("MUXUEGE_COOKIE", "")
 MUXUEGE_MUSIC_CATEGORY = os.getenv("MUXUEGE_MUSIC_CATEGORY", "408")
 MUXUEGE_PUBLISH_CATEGORY = os.getenv("MUXUEGE_PUBLISH_CATEGORY", "MuXueGe")
 MUXUEGE_MAX_PER_CYCLE = int(os.getenv("MUXUEGE_MAX_PER_CYCLE", "1") or "1")
+MUXUEGE_PUBLISH_WINDOW = os.getenv("MUXUEGE_PUBLISH_WINDOW", "01:30-09:30")
 
 # 延迟回加 qB 设定（分钟，0 表示发布后立即回加）
 SEED_DELAY_MIN = int(os.getenv("SEED_DELAY_MIN", "0") or "0")
@@ -161,13 +167,14 @@ HANDOFF_DIR_MAP = {
     "http://127.0.0.1:3260": os.getenv("HANDOFF_DIR_3260", "/volume1/video/download/music/music3"),
 }
 
-# 受管分类白名单（乌托邦/蟹黄堡/猫站 —— 按分类识别）
+# 受管分类白名单（按分类识别：Musopia / CrabPT / PTer / HDKylin / TangPT / MuXueGe）
 HANDOFF_OWN_CATEGORIES = [
     c.strip() for c in os.getenv(
         "HANDOFF_OWN_CATEGORIES",
         f"{os.getenv('PUBLISH_CATEGORY', 'Musopia')},"
         f"{os.getenv('CRABPT_PUBLISH_CATEGORY', 'CrabPT')},"
         f"{os.getenv('PTER_PUBLISH_CATEGORY', 'PTer')},"
+        f"{os.getenv('HDKYLIN_PUBLISH_CATEGORY', 'HDKylin')},"
         f"{os.getenv('TANGPT_PUBLISH_CATEGORY', 'TangPT')},"
         f"{os.getenv('MUXUEGE_PUBLISH_CATEGORY', 'MuXueGe')}",
     ).split(",") if c.strip()
