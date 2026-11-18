@@ -190,7 +190,7 @@ HANDOFF_OWN_TAGS = [
 
 # 交棒触发阈值：做种人数 (除去发布者自身) 或 做种达标天数
 HANDOFF_SEEDERS_MIN = int(os.getenv("HANDOFF_SEEDERS_MIN", "3") or "3")
-HANDOFF_SEED_DAYS = float(os.getenv("HANDOFF_SEED_DAYS", "3") or "3")
+HANDOFF_SEED_DAYS = float(os.getenv("HANDOFF_SEED_DAYS", "2") or "2")
 
 # 调度线程周期与批次配额
 HANDOFF_THREAD_TICK = int(os.getenv("HANDOFF_THREAD_TICK", "300") or "300")

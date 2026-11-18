@@ -229,6 +229,15 @@ def build_stages():
             "interval": env_int("GC_INTERVAL", 1209600),
         })
 
+    # 4c-2) 全站完结种子跨端退役下架（GC 协同阶段）。当所有目标站点均 EXISTS 且满 14 天，从 music1/2/3 卸载任务。
+    if env_bool("ENABLE_GC", False) or env_bool("ENABLE_RETIRE_GC", False):
+        cmd = ["python", "music_retire_gc.py"] + apply_flag("--apply")
+        stages.append({
+            "name": "retire_gc",
+            "cmd": cmd,
+            "interval": env_int("RETIRE_GC_INTERVAL", 1209600),
+        })
+
     # 4d) 跨池孤儿清理（GC 阶段 2：空间彻底回收）。
     #     当 ENABLE_GC=true（或显式 ENABLE_ORPHAN_GC=true）时自动启用。默认 14 天一轮。
     if env_bool("ENABLE_ORPHAN_GC", False) or env_bool("ENABLE_GC", False):

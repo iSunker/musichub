@@ -406,7 +406,7 @@ def get_pending_publish():
     """待发布：本地处理成功、站点上还没有、**且过了闸门②的反悔窗口**。"""
     conn = connect()
     cur = conn.cursor()
-    cur.execute(f"SELECT {TASK_FIELDS} FROM tasks WHERE {PENDING_PUBLISH_WHERE}")
+    cur.execute(f"SELECT {TASK_FIELDS} FROM tasks WHERE {PENDING_PUBLISH_WHERE} ORDER BY {DIRECT_ORDER_BY}")
     rows = _rows_to_dicts(cur)
     conn.close()
     return rows
@@ -1094,6 +1094,16 @@ HDKYLIN_DIRECT_WHERE = XINGWAN_DIRECT_WHERE
 TANGPT_DIRECT_WHERE = XINGWAN_DIRECT_WHERE
 MUXUEGE_DIRECT_WHERE = XINGWAN_DIRECT_WHERE
 
+# 直发队列优先排序子句：
+# 优先推送「在其他站点已有发布/已存在记录（status='EXISTS'），且首发/匹配时间在 2 天内」的种子，
+# 确保同一个种子在 1~2 天内快速打通所有目标站点，缩短在发种区的滞留周期并尽快满足全站完结条件；
+# 其余未启动发布的种子按 tasks.updated_at 正常排队。
+DIRECT_ORDER_BY = (
+    "(CASE WHEN (SELECT COUNT(*) FROM site_publish sp WHERE sp.info_hash = tasks.info_hash AND sp.status = 'EXISTS') > 0 "
+    "       AND (SELECT MIN(sp2.updated_at) FROM site_publish sp2 WHERE sp2.info_hash = tasks.info_hash AND sp2.status = 'EXISTS') >= datetime('now', '-2 days') "
+    "      THEN 0 ELSE 1 END) ASC, tasks.updated_at ASC"
+)
+
 
 def is_direct_publishable_to(info_hash, site=SITE_CRABPT):
     """★ **直发判据**：这条能不能**直接**发到 `site`（不经源站）。
@@ -1338,7 +1348,7 @@ def pending_crabpt_direct(site=SITE_CRABPT):
         f" WHERE {CRABPT_DIRECT_WHERE} "
         f"   AND info_hash NOT IN "
         f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?) "
-        f" ORDER BY updated_at",
+        f" ORDER BY {DIRECT_ORDER_BY}",
         (str(site),),
     )
     rows = _rows_to_dicts(cur)
@@ -1376,7 +1386,7 @@ def pending_pter_direct(site=SITE_PTER):
         f" WHERE {PTER_DIRECT_WHERE} "
         f"   AND info_hash NOT IN "
         f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?) "
-        f" ORDER BY updated_at",
+        f" ORDER BY {DIRECT_ORDER_BY}",
         (str(site),),
     )
     rows = _rows_to_dicts(cur)
@@ -1410,7 +1420,7 @@ def pending_xingwan_direct(site=SITE_XINGWAN):
         f" WHERE {XINGWAN_DIRECT_WHERE} "
         f"   AND info_hash NOT IN "
         f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?) "
-        f" ORDER BY updated_at",
+        f" ORDER BY {DIRECT_ORDER_BY}",
         (str(site),),
     )
     rows = _rows_to_dicts(cur)
@@ -1445,7 +1455,7 @@ def pending_hdkylin_direct(site=SITE_HDKYLIN):
         f" WHERE {HDKYLIN_DIRECT_WHERE} "
         f"   AND info_hash NOT IN "
         f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?) "
-        f" ORDER BY updated_at",
+        f" ORDER BY {DIRECT_ORDER_BY}",
         (str(site),),
     )
     rows = _rows_to_dicts(cur)
@@ -1476,7 +1486,7 @@ def pending_tangpt_direct(site=SITE_TANGPT):
         f" WHERE {TANGPT_DIRECT_WHERE} "
         f"   AND info_hash NOT IN "
         f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?) "
-        f" ORDER BY updated_at",
+        f" ORDER BY {DIRECT_ORDER_BY}",
         (str(site),),
     )
     rows = _rows_to_dicts(cur)
@@ -1507,7 +1517,7 @@ def pending_muxuege_direct(site=SITE_MUXUEGE):
         f" WHERE {MUXUEGE_DIRECT_WHERE} "
         f"   AND info_hash NOT IN "
         f"       (SELECT info_hash FROM {SITE_PUBLISH_TABLE} WHERE site = ?) "
-        f" ORDER BY updated_at",
+        f" ORDER BY {DIRECT_ORDER_BY}",
         (str(site),),
     )
     rows = _rows_to_dicts(cur)

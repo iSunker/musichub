@@ -1888,10 +1888,17 @@ def _scan_main(args):
                 if known_cover:
                     print(f"   （已有封面 URL，重做时复用，不再重传图床）")
 
-            # 已知无日志且已制种的种子跳过重复处理
-            if status == "NO_LOG_FILE" and tfile and os.path.exists(tfile):
-                stats["skipped_no_log"] += 1
-                continue
+            # 已知无日志的任务：
+            # 1) 若 transfer_rule 非 ALLOW，永远无法发布，无需制种，直接短路跳过，避免重复扫盘；
+            # 2) 若 transfer_rule 为 ALLOW，且本地已制好种子文件，也无需重复制种，直接跳过。
+            if status == "NO_LOG_FILE":
+                _rule = (_known_rule.get(info_hash) or "").strip()
+                if _rule != "ALLOW":
+                    stats["skipped_no_log"] += 1
+                    continue
+                if tfile and os.path.exists(tfile):
+                    stats["skipped_no_log"] += 1
+                    continue
 
         print("-" * 60)
         print(f"扫描: {name}")
