@@ -40,15 +40,37 @@ def _retry(fn, *, tries=5, delay=3, what="op"):
 def _clients():
     import types
     import config
+    import db
     import qb_client
     from musopia import MusopiaClient
     from crabpt_site import CrabptClient
+    from pter_site import PterClient
+    from xingwan_site import XingwanClient
+    from hdkylin_site import HdkylinClient
+    from tangpt_site import TangptClient
+    from muxuege_site import MuxuegeClient
     qb3020 = qb_client.build(types.SimpleNamespace(
         QB_HOST="http://127.0.0.1:3020", QB_USER=config.QB_USER, QB_PASS=config.QB_PASS,
         QB_API_KEY=getattr(config, "OPENCD_QB_API_KEY", "")))
     qb3040 = qb_client.build(config)
-    sites = {"musopia": MusopiaClient(), "crabpt": CrabptClient()}
-    cats = {"musopia": config.PUBLISH_CATEGORY, "crabpt": config.CRABPT_PUBLISH_CATEGORY}
+    sites = {
+        db.SITE_MUSOPIA: MusopiaClient(),
+        db.SITE_CRABPT: CrabptClient(),
+        db.SITE_PTER: PterClient(),
+        db.SITE_XINGWAN: XingwanClient(),
+        db.SITE_HDKYLIN: HdkylinClient(),
+        db.SITE_TANGPT: TangptClient(),
+        db.SITE_MUXUEGE: MuxuegeClient(),
+    }
+    cats = {
+        db.SITE_MUSOPIA: getattr(config, "PUBLISH_CATEGORY", None),
+        db.SITE_CRABPT: getattr(config, "CRABPT_PUBLISH_CATEGORY", None),
+        db.SITE_PTER: getattr(config, "PTER_PUBLISH_CATEGORY", None),
+        db.SITE_XINGWAN: None,
+        db.SITE_HDKYLIN: getattr(config, "HDKYLIN_PUBLISH_CATEGORY", None),
+        db.SITE_TANGPT: getattr(config, "TANGPT_PUBLISH_CATEGORY", None),
+        db.SITE_MUXUEGE: getattr(config, "MUXUEGE_PUBLISH_CATEGORY", None),
+    }
     return qb3020, qb3040, sites, cats
 
 
@@ -56,7 +78,10 @@ def main(argv=None):
     import db
     ap = argparse.ArgumentParser(description="#49 按巡检结果把丢失的站点种(B)加回 qB")
     ap.add_argument("--apply", action="store_true", help="真写（默认 dry-run）")
-    ap.add_argument("--site", choices=[db.SITE_MUSOPIA, db.SITE_CRABPT], help="只巡一个站")
+    ap.add_argument("--site", choices=getattr(db, "ALL_SITES", [
+        db.SITE_MUSOPIA, db.SITE_CRABPT, db.SITE_PTER, db.SITE_XINGWAN,
+        db.SITE_HDKYLIN, db.SITE_TANGPT, db.SITE_MUXUEGE
+    ]), help="只巡一个站")
     ap.add_argument("--id", dest="torrent_id", help="只处理这个站点页面 id")
     ap.add_argument("--interval", type=float, default=1.5, help="站点请求间隔秒")
     args = ap.parse_args(argv)

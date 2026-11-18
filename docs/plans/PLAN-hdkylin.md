@@ -1,6 +1,7 @@
 # 方案：接入麒麟（HDKylin）—— 每日自动转音乐种
 
-> 状态：**已上线 · 试发验证通过 · 定时已开** · 2026-11-12
+> 状态：**⏸ 适配暂停 · 发种已停（`ENABLE_PUBLISH_HDKYLIN=false`）· 2 条审核未通过种子已编辑待人工复审** · 2026-11-12
+> ★ 站点要求的单一事实清单（站规 / 自动审核实测 / 名字来源 / 冲突与未决 / 恢复清单）：`麒麟站点要求.md`。本文件保留接入过程与代码决策记录。
 > 依据：`opencdhtml/HDKylin - 麒麟 __ 发布 - Powered by NexusPHP.html` + `opencdhtml/上传规则 _ HDKylin.html`（**离线 HTML，实测**，非推测）
 > 本方案所有字段名 / 取值，出处都在第 2 节，可直接复核。
 
@@ -15,6 +16,47 @@
 >   类型=HQ Audio/音乐、年代=Earlier/更早、媒介=CD、音频编码=FLAC、
 >   地区=Other/其他、视频编码/分辨率/制作组=Other×3。
 > · `ENABLE_PUBLISH_HDKYLIN` 已开（试发+回读验证通过后，按批准的验证节奏）。
+>
+> ⚠️ **自动审核反馈（同日追加，`麒麟发种失败反馈.txt`）**：
+> · #473341 `菅原圭 - 孔雀 2026 FLAC`、#473343 `岩崎太整…『攻殻機動隊…』O.S.T. 2026 FLAC`
+>   被判「种子审核未通过：主标题包含中文」；纯拉丁标题 #473337 / #473342 通过。
+> · 站内种审脚本 `HDKylin-Torrent-Assistant` v1.3.15 的真实判据是 `/[^\x00-\xff]+/`
+>   （任意非 Latin-1 字符）；站规《上传规则》却要求中文名前缀，音乐区线上 88/201
+>   标题也含中文 ⇒ **站规与线上审核冲突，以审核结果为准**，并已请管理组人工复核的方向记录。
+> · 代码优化：`hdkylin_site.title_has_non_latin1()` + `publish.py::run_hdkylin`
+>   预检/提交前两道闸门（自检 4 项阳性/阴性对照全过）；按最终主标题实测
+>   2713 条中 1165 条（42.9%）会被拦。详见 `AGENTS.md` `ERR-SITE-11`。
+> · 为防止继续产生被拒种子，`ENABLE_PUBLISH_HDKYLIN` **已临时改回 false**（容器 `printenv`
+>   回读确认）；待新镜像部署、dry-run 复验后再开。
+> · ⚠️ **纠正：两条种子并未删除，只是审核不通过**。现场 GET `details.php?id=473341/473343`
+>   均 HTTP 200、H1 标「禁止」、下载链接仍在。此前按「站点已删种」的口述把
+>   `site_publish` 两行撤回成 `torrent_id=''` / `status='UNKNOWN'` 属**前提错误**，
+>   已单事务回滚为 `473341` / `473343` + `status='EXISTS'`（回读 2/2，
+>   `cover_url` / `synced_at` 保留）。★ 教训：**口述状态必须现场 GET 详情页核验**，
+>   撤回口径只适用于页面确实不存在；「审核不通过」≠「已删种」。
+> · ✅ **按站点要求编辑两条主标题**（`takeedit.php`，`MusopiaClient` 通用 NexusPHP
+>   表单基线；每条**只覆盖 `name`** 一个字段，其余 18 个字段与副标题沿用站点现值）：
+>
+>   | tid | 原主标题 | 新主标题（纯 Latin-1） | 拉丁名来源 |
+>   | --- | --- | --- | --- |
+>   | 473341 | `菅原圭 - 孔雀 2026 FLAC` | `Kei Sugawara - Peacock 2026 FLAC` | 官网 `kei-sugawara.jp` 的 `Kei Sugawara` + 官方配信链接 slug `Peacock` |
+>   | 473343 | `岩崎太整, 小西遼, YUKI KANESAKA - 『攻殻機動隊…』O.S.T. 2026 FLAC` | `YUKI KANESAKA - THE GHOST IN THE SHELL O.S.T. 2026 FLAC` | 动画官网 OST 页的 `YUKI KANESAKA` + 官方英文名 `THE GHOST IN THE SHELL` |
+>
+>   两条均**不造数据**：所有拉丁拼写来自官方页面或源库 `opencd_descr`；中文/日文原名
+>   完整保留在副标题（审核只查主标题，已由 #473337 / #473342 通过案例验证）。
+>   提交后回读 `edit.php` 的 `name` 两条均一致、`title_has_non_latin1()` 为 False。
+> · ⏳ **待复审**：详情页 H1 已是新标题，但仍标「禁止 · 审核不通过，原因：主标题包含中文」
+>   —— 该原因字段是站点保存的审核结论，**编辑不会自动复审**，页面也没有复审入口。
+>   按系统消息提示，下一步是回复消息请管理组人工复核（写操作，未擅自执行）。
+>   现存麒麟 `EXISTS` 记录 = 4 条（#473337 / #473342 正常，#473341 / #473343 待复审）。
+> · ✅ **护栏部署完成**：镜像 `27e1556-dirty` / `kylin-cjk-gate-20261112`
+>   （digest `sha256:1d6b094f…` 两端一致，容器内 `hdkylin_site.py` / `publish.py` MD5 与本地一致）；
+>   dry-run 点名复验：`b02307301dfe`「群星 - 歌神」被预检拦下、
+>   `3f600f0eca82`「Paulie Leparik」正常走完全流程且零提交；队列 1322 条中
+>   529 条被拦 / 793 条可发。`ENABLE_PUBLISH_HDKYLIN=true` 已重开，
+>   daemon 横幅确认 `publish_hdkylin 每 1800s --auto --limit 3`。
+>   ★ 同日 `--force-recreate` 卡在 `Created` 残留两次，均按 `ERR-DOCKER-15`
+>   修法（kill 卡住的 compose → `docker rm -f` 残留 → 单条重建）恢复。
 
 ---
 

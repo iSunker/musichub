@@ -49,6 +49,22 @@ from musopia import SiteError, UA, _extract_error, _dump_takeupload
 # ==================== 分类 id ====================
 MUSIC_TYPE = str(config.HDKYLIN_MUSIC_CATEGORY)          # 408
 
+# 麒麟自动审核判据：主标题出现任意**非 Latin-1**字符即判
+# 「主标题包含中文」（2026-11-12 实测：#473341 / #473343 因此审核不通过，
+#  而纯拉丁标题 #473337 / #473342 通过）。判据来自站内"种审脚本"
+#  HDKylin-Torrent-Assistant v1.3.15：`/[^\x00-\xff]+/.test(title)`。
+# ★ 站规《上传规则》音轨条目反而要求「中文艺术家名 - 中文专辑名」前缀，
+#   音乐区线上也确有大量含中文标题（实测 201 条中 88 条）——两者冲突时以
+#   **线上自动审核的实际结果**为准，不据站规例句推断数据。
+# ★ 严格按 Latin-1 判（含日文假名、『』等全角标点一并拦），宁缺勿错：
+#   源数据没有罗马字/英文原名，无法自动改写，硬发只会持续产生被拒种子。
+_TITLE_NON_LATIN1 = re.compile(r"[^\x00-\xff]")
+
+
+def title_has_non_latin1(title):
+    """主标题是否会被麒麟自动审核判「主标题包含中文」。"""
+    return bool(_TITLE_NON_LATIN1.search(title or ""))
+
 # ==================== `processing_sel[4]`：年代（★ 非线性映射，逐项实测）====================
 _YEAR_BY_VALUE = {
     2026: "12", 2025: "11", 2024: "10",
@@ -598,6 +614,16 @@ def selftest(verbose=True):
     chk("Blu-ray 标签勾上", TAG_BLURAY in tags)
     tags2 = map_tags({"formatted_title": "Enya - And Winter Came"})
     chk("无语言/内容标签时不勾", tags2 == [])
+
+    # 主标题自动审核判据（阳性 + 阴性对照）
+    chk("主标题含 CJK 判红（实测被拒 #473341 形态）",
+        title_has_non_latin1("菅原圭 - 孔雀 2026 FLAC"))
+    chk("主标题含全角标点『』判红",
+        title_has_non_latin1("X - 『攻殻機動隊』O.S.T. 2026 FLAC"))
+    chk("阴性对照：纯 ASCII 标题判绿（实测通过 #473337 形态）",
+        not title_has_non_latin1("Shaggy - Intoxication 2007 FLAC"))
+    chk("Latin-1 边界：Quatuor Hermès 的 è 判绿（种审脚本按 0xFF 判）",
+        not title_has_non_latin1("Quatuor Hermès - Echoes of Vienna 2026 FLAC"))
 
     # build_fields 产出
     task = {

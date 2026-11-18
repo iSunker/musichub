@@ -278,10 +278,12 @@ D_ENV=(
   -e ENABLE_SCAN=false -e ENABLE_PUBLISH=false -e ENABLE_PUBLISH_CRABPT=false
   -e ENABLE_PUBLISH_PTER=false
   -e ENABLE_PUBLISH_HDKYLIN=false -e ENABLE_PUBLISH_XINGWAN=false
+  -e ENABLE_PUBLISH_TANGPT=false -e ENABLE_PUBLISH_MUXUEGE=false
   -e ENABLE_EDIT_XINGWAN=false
   -e ENABLE_SYNC=false -e ENABLE_COVERS=false -e ENABLE_EDIT=false
   -e ENABLE_VTID=false -e ENABLE_RSS_TID=false -e ENABLE_CRAWL=false
   -e ENABLE_FREE_WINDOW=false
+  -e ENABLE_PRUNE=false -e ENABLE_GC=false -e ENABLE_ORPHAN_GC=false
   # ★★ 这两个是**注释里提到过**、但 `env_bool("ENABLE_...")` 里**没有**的键
   #   ⇒ 下面的「开关清单核对」不会要求它们；留着无害，但也不必留。
   #   `ENABLE_HANDOFF` 实际是 `config.py` 里的 `HANDOFF_*` 一组，见 ⑤ 的输出。

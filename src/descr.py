@@ -515,7 +515,9 @@ def _split_title(raw_title):
         cand = m_grp.group(1)
         if cand in RECOGNIZED_GROUPS or cand.startswith("PTer"):
             group_suffix = f" - {cand}"
-        cleaned_title = raw_title[:m_grp.start()].strip()
+            # ★ 仅当结尾 token 是「识别出的发布组」时才剥离；未识别 token（如
+            #   `- Deluxe`、`- 24bit`、`- OpenCD`）保留原文，避免标题信息静默丢失。
+            cleaned_title = raw_title[:m_grp.start()].strip()
 
     cleaned_title = re.sub(
         r"[\s\-\_\(\)\[\]]*(?:分[轨軌]|整[轨軌])[\s\-\_\(\)\[\]]*",
