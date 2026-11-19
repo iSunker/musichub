@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  qbit-musicdownload:
+    image: linuxserver/qbittorrent:5.2.4
+    container_name: qbit-musicdownload
+    restart: unless-stopped
+    environment:
+      - PUID=1026
+      - PGID=100
+      - TZ=Asia/Shanghai
+      - WEBUI_PORT=3016
+      - TORRENTING_PORT=37817
+    volumes:
+      - /volume2/docker_ssd/qbit-musicdownload/config:/config
+      - /volume1/video/download/music/musicdownload:/downloads
+    ports:
+      - "3016:3016"
+      - "37817:37817"
+      - "37817:37817/udp"
