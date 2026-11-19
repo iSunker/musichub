@@ -1,0 +1,157 @@
+version: "3.8"
+
+# ==============================================================================
+# MusicHub 3.0 生命周期滚动保种池集群编排 (5 个滚动保种实例)
+#
+# 实例矩阵与端口分工：
+#   1. qbit-music-pool1: WebUI 3210, BT 37818, 数据根: /volume1/video/download/music/music_pool_1
+#   2. qbit-music-pool2: WebUI 3230, BT 37819, 数据根: /volume1/video/download/music/music_pool_2
+#   3. qbit-music-pool3: WebUI 3250, BT 37820, 数据根: /volume1/video/download/music/music_pool_3
+#   4. qbit-music-pool4: WebUI 3270, BT 37828, 数据根: /volume1/video/download/music/music_pool_4
+#   5. qbit-music-pool5: WebUI 3280, BT 37829, 数据根: /volume1/video/download/music/music_pool_5
+#
+# 存储架构：
+#   - 机械盘保种池 (/volume1/.../music_pool_X) 与 publish (3010) 同卷，天然支持秒级硬链接
+#   - 严格排除 music5 (用户专属保种区)
+#   - 内存统一设为 2G 软硬上限，防止 Synology OOM
+# ==============================================================================
+
+services:
+  qbit-music-pool1:
+    image: linuxserver/qbittorrent:5.2.4
+    container_name: qbit-music-pool1
+    restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
+    environment:
+      - PUID=1026
+      - PGID=100
+      - TZ=Asia/Shanghai
+      - WEBUI_PORT=3210
+    ports:
+      - "3210:3210"
+      - "37818:37818"
+      - "37818:37818/udp"
+    volumes:
+      - /volume2/docker_ssd/qbit-all/data/music_pools/config_pool1:/config
+      - /volume1/video/download/music/music_pool_1:/downloads
+      - /volume2/qb_temp/temp_music_pool1:/downloads/incomplete
+    networks:
+      - qbnet
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  qbit-music-pool2:
+    image: linuxserver/qbittorrent:5.2.4
+    container_name: qbit-music-pool2
+    restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
+    environment:
+      - PUID=1026
+      - PGID=100
+      - TZ=Asia/Shanghai
+      - WEBUI_PORT=3230
+    ports:
+      - "3230:3230"
+      - "37819:37819"
+      - "37819:37819/udp"
+    volumes:
+      - /volume2/docker_ssd/qbit-all/data/music_pools/config_pool2:/config
+      - /volume1/video/download/music/music_pool_2:/downloads
+      - /volume2/qb_temp/temp_music_pool2:/downloads/incomplete
+    networks:
+      - qbnet
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  qbit-music-pool3:
+    image: linuxserver/qbittorrent:5.2.4
+    container_name: qbit-music-pool3
+    restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
+    environment:
+      - PUID=1026
+      - PGID=100
+      - TZ=Asia/Shanghai
+      - WEBUI_PORT=3250
+    ports:
+      - "3250:3250"
+      - "37820:37820"
+      - "37820:37820/udp"
+    volumes:
+      - /volume2/docker_ssd/qbit-all/data/music_pools/config_pool3:/config
+      - /volume1/video/download/music/music_pool_3:/downloads
+      - /volume2/qb_temp/temp_music_pool3:/downloads/incomplete
+    networks:
+      - qbnet
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  qbit-music-pool4:
+    image: linuxserver/qbittorrent:5.2.4
+    container_name: qbit-music-pool4
+    restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
+    environment:
+      - PUID=1026
+      - PGID=100
+      - TZ=Asia/Shanghai
+      - WEBUI_PORT=3270
+    ports:
+      - "3270:3270"
+      - "37828:37828"
+      - "37828:37828/udp"
+    volumes:
+      - /volume2/docker_ssd/qbit-all/data/music_pools/config_pool4:/config
+      - /volume1/video/download/music/music_pool_4:/downloads
+      - /volume2/qb_temp/temp_music_pool4:/downloads/incomplete
+    networks:
+      - qbnet
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  qbit-music-pool5:
+    image: linuxserver/qbittorrent:5.2.4
+    container_name: qbit-music-pool5
+    restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
+    environment:
+      - PUID=1026
+      - PGID=100
+      - TZ=Asia/Shanghai
+      - WEBUI_PORT=3280
+    ports:
+      - "3280:3280"
+      - "37829:37829"
+      - "37829:37829/udp"
+    volumes:
+      - /volume2/docker_ssd/qbit-all/data/music_pools/config_pool5:/config
+      - /volume1/video/download/music/music_pool_5:/downloads
+      - /volume2/qb_temp/temp_music_pool5:/downloads/incomplete
+    networks:
+      - qbnet
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  qbnet:
+    external: true

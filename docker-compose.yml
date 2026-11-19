@@ -1,0 +1,43 @@
+name: musichub
+
+services:
+  musichub:
+    image: isunker/musichub:latest
+    container_name: musichub
+    restart: unless-stopped
+    # 铁律：PT 直连与群晖 host 模式 (或与 qb 同 host 端口直接互通)
+    network_mode: host
+    environment:
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+      - QB_PUBLISH_HOST=192.168.0.7
+      - QB_PUBLISH_PORT=3010
+      - QB_MUSICDOWNLOAD_HOST=192.168.0.7
+      - QB_MUSICDOWNLOAD_PORT=3016
+      - STORAGE_DOWNLOAD_DIR=/volume2/qb_temp/completed_musicdownload
+      - STORAGE_PUBLISH_DIR=/volume2/docker_ssd/qbit-all/data/publish/Download
+    volumes:
+      # 代码动态热挂载 (热加载最新逻辑)
+      - /volume2/docker_ssd/musichub/src/musichub:/app/musichub
+      # 持久化数据库与配置
+      - /volume2/docker_ssd/musichub/data:/app/musichub/data
+      # 机械盘保种数据池 (同卷挂载以支持硬链接判定与 GC 校验)
+      - /volume1/video:/volume1/video
+      # SSD 缓冲与发种区
+      - /volume2/qb_temp/completed_musicdownload:/volume2/qb_temp/completed_musicdownload
+      - /volume2/docker_ssd/qbit-all/data/publish/Download:/volume2/docker_ssd/qbit-all/data/publish/Download
+      # 只读挂载 Vertex 数据库以支持 TID 反查
+      - /volume2/docker_ssd/vertex2/data/vertex/db/sql.db:/app/vertex/sql.db:ro
+      # 凭据映射 (遵守 AGENTS.md 凭据不入库铁律，只读接入 CookieCloud 解密载荷)
+      - /volume2/docker_ssd/cookiecloud/data:/data/cookiecloud:ro
+    healthcheck:
+      test: ["CMD", "/app/healthcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"

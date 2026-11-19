@@ -1,0 +1,6 @@
+# MusicHub 3.0 Core Dependencies
+mutagen>=1.47.0
+pycryptodome>=3.20.0
+requests>=2.31.0
+torf>=4.2.5
+urllib3>=2.0.0
