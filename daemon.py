@@ -38,6 +38,8 @@ from musichub.adapters.sites import (
 )
 from musichub.publisher.gateway import DeduplicationGateway
 from musichub.publisher.engine import PublisherEngine
+from musichub.publisher.delayed_queue import DelayedReaddQueue
+from musichub.publisher.stock_pump import StockMatrixPump
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("MusicHubDaemon")
@@ -131,6 +133,17 @@ class MusicHubDaemon:
             publish_qb_client=self.qb_publish,
             site_adapters=self.adapters_map,
         )
+
+        # 6. 存量矩阵补种调度器 (StockMatrixPump)
+        self.delayed_queue = DelayedReaddQueue(db_path=config.db_path, engine=self.publisher_engine)
+        self.stock_pump = StockMatrixPump(
+            db_path=config.db_path,
+            pools=self.config.storage.library_pools,
+            publish_qb=self.qb_publish,
+            engine=self.publisher_engine,
+            delayed_queue=self.delayed_queue,
+        )
+        self._last_stock_pump_time = 0.0
 
         self._running = False
         self._last_patrol_time = 0.0
@@ -249,10 +262,11 @@ class MusicHubDaemon:
             # 5. 执行安全打种并发布
             logger.info(f"Publishing {album_name} to {site}...")
             # 严格受控打种与校验
+            tracker_url = getattr(adapter, "tracker_url", "")
             created, c_msg, t_path = self.publisher_engine.create_torrent_safe(
                 item=item,
                 target_site=site,
-                tracker_url=adapter.tracker_url,
+                tracker_url=tracker_url,
             )
             if not created or not t_path:
                 logger.error(f"Failed to create torrent for {site}: {c_msg}")
@@ -276,7 +290,7 @@ class MusicHubDaemon:
                     )
                     logger.info(f"Keepalive probe for {site}: {r_msg}")
                 else:
-                    logger.warning(f"Publish to {site} failed: {pub_msg}")
+                    logger.warning(f"Publish to {site} failed: {tid}")
             finally:
                 if t_path and os.path.exists(t_path):
                     try:
@@ -349,6 +363,15 @@ class MusicHubDaemon:
 
         # 2. 检查 3016 缓冲完成并流式移交
         pending_handled = self.check_download_buffer_readiness(dry_run=dry_run)
+
+        # 2b. 黄金发种期存量补种泵：00:00 - 10:00 期间，每 30 分钟 (1800s) 启动一轮，每轮补发最多 3 个
+        now_ts = time.time()
+        if self.is_golden_publish_window():
+            if now_ts - self._last_stock_pump_time >= 1800.0:
+                logger.info("[StockMatrixPump] 处于黄金发种窗口期 (00:00 - 10:00)，启动半小时存量补种轮询...")
+                pumped = self.stock_pump.run_stock_round(max_per_round=3, dry_run=dry_run)
+                self._last_stock_pump_time = now_ts
+                pending_handled += pumped
 
         # 3. 运行日常安全退役考核（默认干跑模式防误删）
         self.run_lifecycle_gc_check(dry_run=True)
