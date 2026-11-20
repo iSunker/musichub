@@ -28,6 +28,8 @@ from musichub.core.qb_client import QBClient
 from musichub.storage.backpressure import StorageBackpressure
 from musichub.storage.safe_gc import SafeGarbageCollector
 from musichub.storage.handoff import ReadyHandoffManager, RollingPoolManager, PoolConfig
+from musichub.storage.speed_governor import SpeedGovernor
+from musichub.storage.handoff_governor import HandoffGovernor
 from musichub.routing.graph import RoutingGraphManager
 from musichub.metadata.audio_inspector import AudioInspector
 from musichub.patrol.seed_patrol import SeedPatrolManager
@@ -144,6 +146,25 @@ class MusicHubDaemon:
             delayed_queue=self.delayed_queue,
         )
         self._last_stock_pump_time = 0.0
+
+        # 7. qb3010 阶梯调速器与常驻交棒调度器
+        self.speed_governor = SpeedGovernor(
+            qb_host=config.publish_qb.host,
+            qb_port=config.publish_qb.port,
+            total_bandwidth_bps=5120000,
+            check_interval=7.0,
+        )
+        self.handoff_governor = HandoffGovernor(
+            qb_publish_host=config.publish_qb.host,
+            qb_publish_port=config.publish_qb.port,
+            min_ratio=1.05,
+            min_seed_hours=2.0,
+            min_seeders=3,
+            max_seed_hours_fallback=6.0,
+            ssd_publish_dir=config.storage.publish_dir,
+        )
+        self._last_handoff_check_time = 0.0
+        self._speed_governor_thread = None
 
         self._running = False
         self._last_patrol_time = 0.0
@@ -379,6 +400,17 @@ class MusicHubDaemon:
         # 4. 常态化断种只读巡检
         self.run_seed_patrol_check(limit=50)
 
+        # 5. 3010 达标交棒定时巡检 (每 15 分钟触发一次检测)
+        if now_ts - self._last_handoff_check_time >= 900.0:
+            logger.info("[HandoffGovernor] 触发 15 分钟达标交棒定时巡检...")
+            try:
+                handoff_res = self.handoff_governor.run_handoff_round(dry_run=False, max_batch=10)
+                logger.info(f"[HandoffGovernor] 巡检结果: 3010任务数={handoff_res['total_3010']}, 够格={handoff_res['eligible_count']}, 成功交棒={handoff_res['handed_off_count']}")
+                self._last_handoff_check_time = now_ts
+                pending_handled += handoff_res['handed_off_count']
+            except Exception as e:
+                logger.error(f"[HandoffGovernor] 定时交棒巡检异常: {e}")
+
         return pending_handled
 
     def start(self, default_interval: int = 300, cooldown_interval: int = 30):
@@ -386,7 +418,23 @@ class MusicHubDaemon:
         有活时（pending_handled > 0）以 cooldown_interval(30s) 快速连跑；
         清零后自动切回 default_interval(300s) 休眠。
         """
+        import threading
         self._running = True
+
+        # 启动常驻高频阶梯调速器独立守护线程 (7秒/次)
+        def _speed_loop():
+            logger.info("[SpeedGovernor] 独立调速守护线程已启动 (周期 7s，红线 5MB/s)...")
+            while self._running:
+                try:
+                    self.speed_governor.apply_step(dry_run=False)
+                except Exception as ex:
+                    logger.error(f"[SpeedGovernor] 调速异常: {ex}")
+                time.sleep(self.speed_governor.check_interval)
+            logger.info("[SpeedGovernor] 独立调速守护线程已停止。")
+
+        self._speed_governor_thread = threading.Thread(target=_speed_loop, daemon=True, name="SpeedGovernorThread")
+        self._speed_governor_thread.start()
+
         logger.info(f"MusicHub 3.0 Daemon started with adaptive cooldown ({cooldown_interval}s active / {default_interval}s idle).")
         while self._running:
             try:
