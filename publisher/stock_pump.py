@@ -26,25 +26,33 @@ import sys
 import time
 import logging
 import sqlite3
+import re
 from typing import List, Dict, Tuple, Optional, Any
 
 from musichub.core.models import CanonicalMusicItem
 from musichub.metadata.audio_inspector import AudioInspector
-from musichub.routing.graph import RoutingGraphManager
+from musichub.routing.graph import RoutingGraphManager, torrent_infohash
 from musichub.publisher.gateway import DeduplicationGateway
 from musichub.publisher.engine import PublisherEngine
 from musichub.publisher.delayed_queue import DelayedReaddQueue
 from musichub.core.qb_client import QBClient
 from musichub.adapters.sites import (
     MusopiaAdapter, CrabPTAdapter, PTerClubAdapter,
-    XingwanAdapter, HDKylinAdapter, TangPTAdapter, MuXueGeAdapter
+    XingwanAdapter, HDKylinAdapter, TangPTAdapter, MuXueGeAdapter,
+    LemonHDAdapter, UHDDolbyAdapter, HDTimeAdapter, UBitsAdapter,
+    SoulVoiceAdapter
 )
+from musichub.adapters.nexusphp_base import is_duplicate_name_result
 
 logger = logging.getLogger("StockMatrixPump")
 
 
 class StockMatrixPump:
     TARGET_SITES_PRIORITY = [
+        "soulvoice",
+        "ubits",
+        "lemonhd",
+        "hdtime",
         "muxuege",
         "tangpt",
         "pterclub",
@@ -64,10 +72,11 @@ class StockMatrixPump:
     ):
         self.db_path = db_path
         self.pools = pools or [
-            "/volume1/video/download/music/music3",
+            f"/volume1/video/download/music/music_pool_{i}" for i in range(1, 9)
+        ] + [
             "/volume1/video/download/music/music1",
             "/volume1/video/download/music/music2",
-            "/volume1/video/download/music/music_pool_1",
+            "/volume1/video/download/music/music3",
         ]
         self.graph_mgr = RoutingGraphManager(db_path=self.db_path)
         self.publish_qb = publish_qb or QBClient("192.168.0.7", 3010)
@@ -75,6 +84,11 @@ class StockMatrixPump:
         self.delayed_queue = delayed_queue or DelayedReaddQueue(self.db_path, self.engine)
 
         self.adapters_map = {
+            "soulvoice": SoulVoiceAdapter(),
+            "ubits": UBitsAdapter(),
+            "lemonhd": LemonHDAdapter(),
+            "uhddolby": UHDDolbyAdapter(),
+            "hdtime": HDTimeAdapter(),
             "musopia": MusopiaAdapter(),
             "crabpt": CrabPTAdapter(),
             "pterclub": PTerClubAdapter(),
@@ -85,6 +99,18 @@ class StockMatrixPump:
         }
         self.gateway = DeduplicationGateway(adapters=list(self.adapters_map.values()), graph_mgr=self.graph_mgr)
         self.inspector = AudioInspector()
+
+    def _resolve_stock_origin(self, folder_name: str, album: str, artist: str, full_path: str) -> Tuple[str, str, str, str, str, str]:
+        """为音乐池本地目录反查真实源站、源 TID、源 Hash 与元数据，避免硬编码 local 丢失来源声明。"""
+        from musichub.publisher.origin_resolver import resolve_stock_origin
+        return resolve_stock_origin(
+            folder_name=folder_name,
+            album=album,
+            artist=artist,
+            full_path=full_path,
+            conn=getattr(self.graph_mgr, "_conn", None),
+            db_path=self.db_path,
+        )
 
     def find_stock_candidates_for_site(self, target_site: str, limit: int = 3) -> List[Dict[str, Any]]:
         """为特定目标站寻找最适合补齐的本地存量专辑"""
@@ -106,7 +132,7 @@ class StockMatrixPump:
             for e in entries:
                 if len(candidates) >= limit:
                     break
-                if e.startswith(".") or e.startswith("@") or "incomplete" in e or "music5" in e:
+                if e.startswith(".") or e.startswith("@") or "incomplete" in e or "music5" in e or "18禁" in e:
                     continue
                 full_p = os.path.join(pool, e)
                 if not os.path.isdir(full_p):
@@ -125,19 +151,31 @@ class StockMatrixPump:
                 medium = meta.get("medium") or "CD"
                 standard = meta.get("standard") or "Lossless"
 
+                o_site, o_tid, o_hash, o_cover, o_descr, o_name = self._resolve_stock_origin(e, album, artist, full_p)
+
                 item = CanonicalMusicItem(
                     title=e,
+                    origin_title=o_name,
                     album=album,
                     artist=artist,
                     year=year,
                     format=fmt,
                     medium=medium,
                     standard=standard,
-                    origin_site="opencd",
-                    origin_torrent_id=e,
+                    origin_site=o_site,
+                    origin_torrent_id=o_tid,
+                    origin_info_hash=o_hash,
+                    cover_url=o_cover,
+                    description=o_descr,
                     local_path=full_p,
                     tracks=tracks,
                 )
+
+                # 0. 源种准入（本地存量按 local 源放行，但受站点矩阵约束）
+                from musichub.publisher.gateway import evaluate_source_policy
+                policy_ok, policy_reason = evaluate_source_policy(self.graph_mgr, item, target_site, adapter)
+                if not policy_ok:
+                    continue
 
                 # 1. 第一层：防环与 site_publish_graph 查重
                 if self.graph_mgr.is_loop_or_already_published(item, target_site):
@@ -157,6 +195,14 @@ class StockMatrixPump:
                 exists, exists_why = adapter.check_exists(item)
                 if exists:
                     self.graph_mgr.record_publish(item, target_site, target_torrent_id="EXISTING")
+                    self.graph_mgr.record_publish_attempt(
+                        album_name=album,
+                        target_site=target_site,
+                        result="SKIPPED_EXISTING",
+                        reason=exists_why,
+                        target_torrent_id="EXISTING",
+                        origin_path=full_p,
+                    )
                     continue
 
                 candidates.append({
@@ -172,19 +218,20 @@ class StockMatrixPump:
 
         return candidates
 
-    def run_stock_round(self, max_per_round: int = 3, dry_run: bool = False) -> int:
-        """执行单轮补种（每轮最多 3 个）：采用矩阵轮转插队机制 (Round-Robin Matrix Interleaving)
+    def run_stock_round(self, max_per_round: Optional[int] = None, dry_run: bool = False) -> int:
+        """执行单轮补种：采用矩阵轮转平铺机制 (Round-Robin Matrix Interleaving)
         
-        ★ 核心护栏：
-        单轮内强制多站交织，每个站点单轮最多只占 1 个配额，
-        彻底杜绝首选站点（如慕雪阁）因缺额巨大而长期霸屏导致后续站点饿死！
+        ★ 核心调度：
+        每轮依次轮询 11 个目标站点，每个站点单轮最多发布 1 个（每轮 11 站各发 1 个），
+        确保各站点交替平铺、雨露均沾。
         """
         published_count = 0
-        logger.info(f"=== Starting Stock Matrix Pump Round (Max: {max_per_round}, Dry-Run: {dry_run}, Policy: Matrix Interleaving) ===")
+        limit_total = max_per_round if max_per_round is not None else len(self.TARGET_SITES_PRIORITY)
+        logger.info(f"=== Starting Stock Matrix Pump Round (Target Sites: {len(self.TARGET_SITES_PRIORITY)}, Max Total: {limit_total}, Dry-Run: {dry_run}, Policy: Matrix Interleaving) ===")
 
         # 单轮内每个站点至多发布 1 个，循环轮转
         for site in self.TARGET_SITES_PRIORITY:
-            if published_count >= max_per_round:
+            if published_count >= limit_total:
                 break
 
             # 每个站点只挑 1 个最佳候选，确保各站点交替雨露均沾
@@ -207,18 +254,44 @@ class StockMatrixPump:
             ok, msg, t_path = self.engine.create_torrent_safe(item, site, getattr(adapter, "tracker_url", ""))
             if not ok or not t_path:
                 logger.error(f"Failed to create torrent for {site}: {msg}")
+                self.graph_mgr.record_publish_attempt(
+                    album_name=album_name,
+                    target_site=site,
+                    result="FAILED",
+                    reason=f"制种失败: {msg}",
+                    origin_path=cand["local_path"],
+                )
                 continue
 
             try:
                 pub_ok, tid, pub_torrent_bytes = adapter.publish(item, t_path)
                 if pub_ok and tid:
                     logger.info(f"Published '{album_name}' to {site} successfully! tid={tid}")
-                    self.graph_mgr.record_publish(item, site, target_torrent_id=tid)
-
                     # 读取种子字节，进入延迟回加队列（450s 保护，防偷跑）
                     with open(t_path, "rb") as tf:
                         local_bytes = tf.read()
                     readd_bytes = pub_torrent_bytes if pub_torrent_bytes else local_bytes
+                    # 来龙去脉台账：源种 → 目标站 tid → B 种 hash → 交棒实例
+                    self.graph_mgr.record_publish(
+                        item,
+                        site,
+                        target_torrent_id=tid,
+                        b_hash=torrent_infohash(readd_bytes),
+                        target_url=f"{getattr(adapter, 'base_url', '')}/details.php?id={tid}",
+                        qb_instance="publish",
+                        qb_port=3010,
+                        save_path="/downloads",
+                        status="PUBLISHED",
+                        note=album_name,
+                    )
+                    self.graph_mgr.record_publish_attempt(
+                        album_name=album_name,
+                        target_site=site,
+                        result="PUBLISHED",
+                        target_torrent_id=str(tid),
+                        origin_path=cand["local_path"],
+                    )
+
                     self.delayed_queue.add_task(
                         site_name=site,
                         torrent_id=str(tid),
@@ -229,7 +302,38 @@ class StockMatrixPump:
                     published_count += 1
                     time.sleep(15)  # 站点间隔避峰
                 else:
-                    logger.warning(f"Publish '{album_name}' to {site} failed: {tid}")
+                    if is_duplicate_name_result(tid):
+                        # 站点已有同 infohash / 同 info.name 条目：按「已在站」登记，避免每轮重复投喂
+                        logger.info(f"'{album_name}' 在 {site} 已有同种/同名条目，登记为 EXISTING 并跳过")
+                        self.graph_mgr.record_publish(
+                            item, site, target_torrent_id="EXISTING", status="EXISTING", note=str(tid)
+                        )
+                        self.graph_mgr.record_publish_attempt(
+                            album_name=album_name,
+                            target_site=site,
+                            result="SKIPPED_EXISTING",
+                            reason=str(tid),
+                            target_torrent_id="EXISTING",
+                            origin_path=cand["local_path"],
+                        )
+                    else:
+                        logger.warning(f"Publish '{album_name}' to {site} failed: {tid}")
+                        self.graph_mgr.record_publish_attempt(
+                            album_name=album_name,
+                            target_site=site,
+                            result="REJECTED",
+                            reason=str(tid),
+                            origin_path=cand["local_path"],
+                        )
+            except Exception as ex:
+                logger.exception(f"Unexpected error publishing '{album_name}' to {site}: {ex}")
+                self.graph_mgr.record_publish_attempt(
+                    album_name=album_name,
+                    target_site=site,
+                    result="FAILED",
+                    reason=f"异常: {ex}",
+                    origin_path=cand["local_path"],
+                )
             finally:
                 if t_path and os.path.exists(t_path):
                     try:
