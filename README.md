@@ -13,19 +13,19 @@ MusicHub 围绕音乐 PT 站的矩阵分发与生命周期治理构建，打通�
 ```mermaid
 flowchart TD
     subgraph S1["1. 多源摄取与准入"]
-        A1["3016 (qbit-musicdownload)<br/>RSS 汇聚 8 站源种"] --> A2["collector/source_detail.py<br/>NexusPHP 详情页解析与抓取"]
+        A1["3016 (qbit-musicdownload)<br/>RSS 汇聚 13 站点多源摄取"] --> A2["collector/source_detail.py<br/>NexusPHP 详情页解析与抓取"]
         A2 --> A3["source_tasks 任务表<br/>转载规则: ALLOW/DENY/NEED_CONFIRM"]
-        A3 --> A4["gateway.py 网关双闸校验<br/>转载规则 + 8×8 publish_matrix"]
+        A3 --> A4["gateway.py 网关双闸校验<br/>转载规则 + 13×13 publish_matrix"]
     end
 
     subgraph S2["2. 源种(A种)摄取与真做种"]
         A4 -->|准入放行| B1["storage/handoff.py<br/>handoff_task() 搬移源种数据"]
         B1 --> B2["mv 到机械盘媒体池<br/>/volume1/video/download/music"]
-        B2 --> B3["注入目标物理池真做种<br/>OpenCD 恒落 music3 (3260)<br/>写 ingest_log 台账"]
+        B2 --> B3["注入 8 大平权物理池真做种<br/>动态最空均衡 / OpenCD 平铺入池<br/>写 ingest_log 台账"]
     end
 
     subgraph S3["3. 多站矩阵发布与防环"]
-        B3 --> C1["publisher/engine.py<br/>7 大外站适配器打包发种"]
+        B3 --> C1["publisher/engine.py<br/>13 大外站适配器打包发种"]
         C1 --> C2["routing/graph.py<br/>导出已发纯数字 TID 账本<br/>/vertex/data/published_music_ids.json"]
         C2 --> C3["Vertex 3016 规则实时拦截<br/>阻断匿名自家种子回环抓取"]
     end
@@ -53,22 +53,22 @@ flowchart TD
 
 ### 1. 端口与 qB 实例分工
 
-集群采用职责分离架构，发种端、下载缓冲端与物理音乐保种池物理隔离：
+集群采用职责分离架构，发种端、下载缓冲端与 8 大平权物理音乐保种池物理隔离：
 
 | 实例名称 | 端口 | 容器名称 | 物理承载/职责 | 纳管策略 |
 | --- | --- | --- | --- | --- |
 | `qbit-publish` | **3010** | `qbit-publish` | 目标站 B 种初始做种与分发回加（host 网络） | 业务自管（不纳入 iyuu/QUI） |
-| `qbit-musicdownload` | **3016** | `qbit-musicdownload` | 多站 RSS 源种摄取与下载缓冲池 | 业务自管（内置 QueueJanitor 清淤） |
-| `music_pool_1` | **3210** | `qbit-music-1` | 机械盘音乐保种物理池 1（承接新 B 种负载） | 统一纳管（QUI / iyuu 纳管） |
-| `music1` | **3220** | `qbit-music-2` | 机械盘音乐保种物理池 2（承接新 B 种负载） | 统一纳管（QUI / iyuu 纳管） |
-| `music_pool_2` | **3230** | `qbit-music-3` | 机械盘音乐保种物理池 3（承接新 B 种负载） | 统一纳管（QUI / iyuu 纳管） |
-| `music2` | **3240** | `qbit-music-4` | 机械盘音乐保种物理池 4（承接新 B 种负载） | 统一纳管（QUI / iyuu 纳管） |
-| `music_pool_3` | **3250** | `qbit-music-5` | 机械盘音乐保种物理池 5（承接新 B 种负载） | 统一纳管（QUI / iyuu 纳管） |
-| `music3` | **3260** | `qbit-music-6` | ★ **OpenCD 主库专属保种池，绝对不承接新 B 种负载** | 统一纳管（QUI / iyuu 纳管） |
-| `music_pool_4` | **3270** | `qbit-music-7` | 机械盘音乐保种物理池 7（承接新 B 种负载） | 统一纳管（QUI / iyuu 纳管） |
-| `music_pool_5` | **3280** | `qbit-music-8` | 机械盘音乐保种物理池 8（承接新 B 种负载） | 统一纳管（QUI / iyuu 纳管） |
+| `qbit-musicdownload` | **3016** | `qbit-musicdownload` | 多站 RSS 源种摄取与下载缓冲池 | 业务自管（阶梯控速与 Vertex 48h 闭环） |
+| `music_pool_1` | **3210** | `qbit-music-1` | 机械盘音乐保种物理池 1（完全平权，承接新源种与 B 种负载） | 统一纳管（QUI / iyuu 纳管） |
+| `music_pool_2` | **3220** | `qbit-music-2` | 机械盘音乐保种物理池 2（完全平权，承接新源种与 B 种负载） | 统一纳管（QUI / iyuu 纳管） |
+| `music_pool_3` | **3230** | `qbit-music-3` | 机械盘音乐保种物理池 3（完全平权，承接新源种与 B 种负载） | 统一纳管（QUI / iyuu 纳管） |
+| `music_pool_4` | **3240** | `qbit-music-4` | 机械盘音乐保种物理池 4（完全平权，承接新源种与 B 种负载） | 统一纳管（QUI / iyuu 纳管） |
+| `music_pool_5` | **3250** | `qbit-music-5` | 机械盘音乐保种物理池 5（完全平权，承接新源种与 B 种负载） | 统一纳管（QUI / iyuu 纳管） |
+| `music_pool_6` | **3260** | `qbit-music-6` | 机械盘音乐保种物理池 6（★ **完全平权，OpenCD 平铺入池，解除专属硬锁**） | 统一纳管（QUI / iyuu 纳管） |
+| `music_pool_7` | **3270** | `qbit-music-7` | 机械盘音乐保种物理池 7（完全平权，承接新源种与 B 种负载） | 统一纳管（QUI / iyuu 纳管） |
+| `music_pool_8` | **3280** | `qbit-music-8` | 机械盘音乐保种物理池 8（完全平权，承接新源种与 B 种负载） | 统一纳管（QUI / iyuu 纳管） |
 
-> **物理池选池策略**：除 `music3`(3260) 锁死为 OpenCD 专用并排除外，其余 7 个物理池在注入配对时按实时任务数动态轮转（选择最空闲池 `EXCLUDED_LOAD_POOLS={"music3"}`）。
+> **物理池选池策略（8 池完全平权）**：2026-11-23 架构重构后，彻底解除了历史 3260 皇后专属硬锁（`EXCLUDED_LOAD_POOLS=frozenset()`）。OpenCD 源种与外站源种平权平铺，配对注入时按各池实时任务数动态轮转选择最空闲池，且同专辑的所有外站发种配对均收拢归集至同一物理池，实现零跨卷、零跨池硬链接。
 
 ### 2. 存储与分卷规约
 
@@ -76,9 +76,9 @@ flowchart TD
 - **SSD 下载与发种缓冲**：
   - 3016 完成目录：`/volume2/qb_temp/completed_musicdownload`
   - 3010 发种目录：`/volume2/docker_ssd/qbit-all/data/publish/Download`
-- **红线目录**：
-  - `/volume1/video/download/music/music5`：用户独立下载目录，无 qB 任务引用，**硬拦截禁删**。
-  - 系统目录黑名单：`incomplete`、`@eaDir`、`.RecycleBin`、`.OrphanedData`、`lost+found` 严禁误判为孤儿删除。
+- **红线目录与底层真相**：
+  - `/volume1/video/download/music/music5`：**用户手动下载与文件扫描入库独立落脚目录**。用户在该目录手动下载种子，并在下载完成后主动扫描文件本身、解析音频元数据与详情页入库并分流。因为在下载与入库流转期间，该目录下的文件**并不在任何 qB 纳管实例的任务列表中**（「qB 无任务引用」对它完全不适用），任何仅凭 qB 任务做孤儿扫描的工具都会误判误删。因此系统制定了最高优先级物理红线：所有扫描、清理、去重、退役 GC 工具必须硬编码排除 `music5`（内置 `FORBIDDEN = ("music5",)` 并在探测到该路径时立即熔断退出）。
+  - **系统目录黑名单**：`incomplete`、`@eaDir`、`.RecycleBin`、`.OrphanedData`、`lost+found` 严禁误判为孤儿删除。
 
 ---
 
@@ -111,15 +111,16 @@ flowchart TD
   3. 矩阵校验：`publish_matrix(source_site, target_site).allow == 0` 立即拦截。
   4. 元数据完整性分级：`meta_status == 'NEED_META'` 时，严格站（如 OpenCD 目标站 `metadata_strict=True`）暂缓发种，宽松站允许降级发种。
 
-### 2. 源种（A 种）搬移真做种
+### 2. 源种（A 种）搬移真做种与 8 池平权平铺
 - 3016 任务完成后的搬移是 **mv 而非 copy**，避免 SSD 空间双重占用。
 - 必须解析 `.torrent` 获取真实 info-hash，先注入物理池（`paused=False + skip_checking=True`），在 `verify_timeout`（30s）内回读确认 `progress≈1` 后，方可下架 3016 任务。
-- **OpenCD 专属铁律**：`opencd` / `open.cd` 源种恒落 `music3` (3260)，fail-closed 拦截非 3260 目标。
+- **8 池完全平权与 OpenCD 平铺**：彻底废止历史 3260 专属硬锁，OpenCD 源种与其他站点平权平铺入池，按实时负载动态注入 8 大物理池，且同专辑统一归拢至同一实例，避免跨池硬链接。
 
-### 3. 发布期物理池配对与延迟回加
+### 3. 发布期物理池配对与延迟回加（13 大目标站点矩阵）
 - B 种发布成功后，首先调用 `storage/pool_pairing.py`，将**同一份 B 种字节**注入至承载物理池，初始状态固定为 `paused=True + skip_checking=True`。
 - 配对前必须执行同卷硬链接补齐，并全集群单实例查重；落盘记账 `PAIR` 事件。
 - 3010 发种端通过两阶段延迟队列（`delayed_readd`）接管，初始提供高带宽种子爬坡。
+- 覆盖全矩阵 13 大主流站点（乌托邦 Musopia、蟹黄堡 CrabPT、猫站 PTerClub、星湾 XingWan、红豆麒麟 HDKylin、不可躺 TangPT、牧雪阁 MuXueGe、柠檬 LemonHD、杜比 UHDDolby、高清时间 HDTime、UBits、聆音Club SoulVoice、南洋PT NanyangPT）以及源站/双向适配器（OpenCD、SpringSunday）。
 
 ### 4. 3010 达标智能交棒（Handoff Governor）
 - 独立常驻线程 `HandoffGovernorThread`（120s/轮、批量流水线）。
@@ -213,10 +214,10 @@ python musichub/tools/edit_onsite.py --site tangpt --days 30 --fix-source-link -
 
 - [x] **3016 队列清淤与防环彻底解决**：清理 59 个 stalledDL 死种与 26 个自环任务；关闭 `dont_count_slow_torrents`；Vertex 侧接入防环账本拦截；常驻 `DownloadQueueJanitor` 自动巡检。
 - [x] **达标智能交棒机制根治**：废止旧 `name+size` 错误接管逻辑，重构为 `match_kind=hash`；改用真实 `seeding_time`；存量交棒前必须先物理池配对。
-- [x] **源种（A 种）真做种保障**：彻底修复旧链路搬移文件不注入做种的缺口；OpenCD 恒落 3260；存量 38 条源种已全部在册做种。
+- [x] **源种（A 种）真做种保障与 8 池平权平铺**：彻底修复旧链路搬移文件不注入做种的缺口；解除 3260 专属硬锁，OpenCD 平铺入池，同专辑零硬链接归一；存量 38 条源种已全部在册做种。
 - [x] **详情页数据库建立与统一归档**：上线 `site_detail_pages` 与 `site_detail_observations`；脱敏存储；完成 115 项去重目标的集中归档与审计。
 - [x] **38 个做种异常目标安全恢复**：36 项可行动目标已恢复或验证为唯一 active 做种（含星湾 4365 孤儿恢复、TangPT 72455/72453 原地 resume 等）。
-- [x] **多站独立 tid 分列记账**：在 `site_publish_graph` 中开辟 11 个站点的纯数字 tid 列，完成历史存量数据清洗与回填。
+- [x] **多站独立 tid 分列记账与全矩阵扩容**：在 `site_publish_graph` 中开辟各站点纯数字 tid 列，完成历史存量数据清洗与回填；适配器矩阵全面扩容至 13 大主流目标站及 15 站点统一体系。
 - [x] **严格首图字节身份与上传闸门**：封堵 PicGo duplicate 重编码漏洞，确立六环闭环身份链与预提交远端 SHA256 逐字节比对机制；20 项存量合格封面正式写入 NAS 验证 100% 通过。
 - [x] **集群多处做种告警科学分诊**：明确 `live_duplicate` 与 `stale_seat` 判定标准；制定 qB 重启纪律。
 - [x] **技能源统一合并**：将分散的技能合并为统一权威的 `skills/musichub/SKILL.md`，并在四套 Agent 环境建立 Junction 映射。

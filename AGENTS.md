@@ -43,14 +43,15 @@ MusicHub 3.0 是 PT 音乐抓轨资源的全自动分发、保种、背压调节
 3. **同 info-hash 单实例铁律**：
    - 任何跨站或辅种注入动作前必须查全局，同一 info-hash 只能存在于一个 qB 实例。
 4. **与 Vertex 3016 防环联动（方案 C 账本对齐）**：
-   - **背景**：随着发布矩阵升级为多对多，外站（7 站）既作为发种目标站，又作为 Vertex 3016 的新种输入站。为防止自家发布的匿名种子被 3016 RSS 重新下回造成闭环：
+   - **背景**：随着发布矩阵升级为多对多，外站（13 大站点矩阵）既作为发种目标站，又作为 Vertex 3016 的新种输入站。为防止自家发布的匿名种子被 3016 RSS 重新下回造成闭环：
    - **账本实时同步**：在 `musichub/routing/graph.py` 的 `record_publish` 中集成 `export_vertex_blocklist()`，每次发布成功后自动将已发 TID 账本导出至 `/vertex/data/published_music_ids.json`。
    - **Vertex 源头拦截**：Vertex 侧 `rule/rss/30160002.json` 实时比对该账本进行源头拒收（`rss/30160003.json` 通过 `acceptRules` 引用该规则）；严禁用正文共有特征（如 `转自OpenCD` 或 `- FLAC 16bit`）猜测拦截，杜绝误杀外源正常做种。
    - **启动自愈**：daemon 启动时先导出一次账本，账本文件丢失/被覆盖可立即恢复，不必等下一次发种。
    - **禁止 UNC 兜底**：`export_vertex_blocklist()` 只写容器内生产路径或显式传入目录，`:memory:` 库一律不导出。2026-11-21 曾因本机跑单测经 `\\iSunker-DS423\...` 覆盖生产账本，1834 个已发 ID 全部丢失。
    - **重启孤儿风险**：发种在途时重启容器会造成「站点已收种、本地无账本无归档」，3016 随即抓回成回环。重启尽量避开发种轮次，事后须核对站点 ID 序列缺口。
-5. **硬链接与目录保护**：
-   - 任何清理操作必须避开系统保留目录（`incomplete`, `@eaDir`, `.RecycleBin`）与未纳管池（如 `music5` 禁删红线）。
+5. **硬链接与目录保护与 `music5` 禁删红线**：
+   - 任何清理操作必须避开系统保留目录（`incomplete`, `@eaDir`, `.RecycleBin`）与未纳管目录。
+   - ★ **`music5` 禁删红线真相**：`/volume1/video/download/music/music5` 为用户手动下载种子的独立落脚目录。下载完成后，由用户主动扫描文件本身、解析音频元数据与详情页入库并分流，其任务并不在任何 qB 纳管实例的任务列表中。「无 qB 任务引用」对它完全不适用，任何自动化孤儿清理工具若触碰该目录必然误删。因此所有扫描、去重、退役 GC 工具必须硬编码 `FORBIDDEN = ("music5",)` 并在发现时立即熔断终止。
 
 6. **3010 达标交棒调度（2026-11-21 重构）**：
    - 独立线程 `HandoffGovernorThread`：120s/轮、`max_batch=60`，走批量流水线（一次停源 / 按池分组唤醒 / 一次下架），单轮通常 3~5s 收口；严禁再挂回主循环的 `900s` 门限（旧实现的队头阻塞根源）。
@@ -147,7 +148,7 @@ MusicHub 3.0 是 PT 音乐抓轨资源的全自动分发、保种、背压调节
    - **现口径**：`handoff_task()` 自己解析种子字节（入参 → 3016 `/torrents/export` → `data/torrents/*.torrent`）。归档检索必须**解析种子算 infohash 再比对**（infohash 是 info 字典 SHA1，不会以原始 20 字节出现在 .torrent 里，旧「字节包含」匹配永远命不中）；**拿不到字节直接中止，禁止先搬文件**。
    - **搬运是 mv 不是 copy**（`move_payload_to_hdd()`；`copy_stream_to_hdd()` 保留为兼容别名）：目标同名目录已存在且 size 一致视为幂等重入，size 不一致拒绝覆盖。
    - **必须真做种**：注入后目标池任务 `paused=False + skip_checking=True`，并在 `verify_timeout`（默认 30s）内回读 `progress≈1`；未达标则撤回池任务 + 文件搬回 SSD + `resume` 3016 任务，下一轮重试，绝不留在池里当幽灵。
-   - ★ **OpenCD 禁忌**：`opencd` / `open.cd` ⇒ 恒落 `music3(3260)`；除 `route_target()` 锁定外，`handoff_task()` 还有 fail-closed 护栏（目标端口 ≠ 3260 直接拒绝搬移，一个字节都不动）；`music3` 同时不承接 B 种负载。
+   - ★ **8 池完全平权与 OpenCD 平铺（2026-11-23 固化）**：解除历史 3260 (music3) 皇后专属硬锁，`DEFAULT_MUSIC_POOLS` 8 池（3210~3280）完全平权；OpenCD 源种与其他站点平权平铺，动态注入最空闲物理池，同专辑全部外站发种收拢归集至同一实例，零跨池硬链接（`EXCLUDED_LOAD_POOLS=frozenset()`）。
    - **摄取台账 `ingest_log`**（只增不改，`status` = `SEEDING` / `VERIFYING` / `FAILED` / `ROLLED_BACK`）：记 `target_instance` / `target_port` / `target_save_path` / `host_path` / `size_bytes` / `progress`。查询 `graph_mgr.get_latest_ingest(hash)` / `list_ingest_logs(status)`，**「源种在哪做种」以最新一条 `SEEDING` 为准，不再靠 ls 反查**。
    - **qB 5.x 兼容**：`/torrents/add` 的暂停参数在 5.x 改名 `stopped`，`QBClient.add_torrent()` 同时下发 `paused` 与 `stopped`，否则 5.2.4 会按全局 `AddTorrentStopped=true` 静默落成暂停。
    - **单轮节流**：`check_download_buffer_readiness(max_batch=5)`，按 `completion_on` 升序先完成先处理，避免长等待拖垮主循环。
