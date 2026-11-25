@@ -76,16 +76,19 @@ class AudioInspector:
         stripped = re.sub(r"\[.*?\]|\(.*?\)", " ", clean_text).strip()
         parts = re.split(r"\s+-\s+", stripped)
         if len(parts) >= 2:
-            result["artist"] = parts[0].strip()
+            raw_artist = parts[0].strip()
+            # 剥离 artist 开头可能携带的 4 位年份前缀（如 "2000 The Avalanches" -> "The Avalanches"）
+            cleaned_artist = re.sub(r"^\s*(?:19\d{2}|20\d{2})\s*[-_ ]*\s*", "", raw_artist).strip()
+            result["artist"] = cleaned_artist if cleaned_artist else raw_artist
             raw_album = " - ".join(parts[1:]).strip()
         elif stripped:
             raw_album = stripped
         else:
             raw_album = ""
 
-        # 清洗 raw_album 中可能残留的尾部属性与标记（如 "1998", "FLAC", "分轨", "整轨", "CD", "WEB-DL" 等）
+        # 清洗 raw_album 中可能残留的尾部属性与标记（如 "1998", "FLAC", "分轨", "整轨", "CD", "WEB-DL", "Qobuz", "Apple" 等）
         cleaned_album = re.sub(
-            r"\b(19\d{2}|20\d{2})\b|\b(FLAC|APE|WAV|DSD|MP3|CD|WEB-DL|WEB|SACD)\b|(?:分轨|整轨|分軌|整軌)",
+            r"\b(19\d{2}|20\d{2})\b|\b(FLAC|APE|WAV|DSD|MP3|CD|WEB-DL|WEB|SACD)\b|(?:分轨|整轨|分軌|整軌)|\b(Qobuz|Apple(?:\s*Music)?|Tidal|Deezer|Amazon(?:\s*Music)?|Spotify|Lossless|Hi-Res|Edition|Deluxe|Anniversary|Remaster(?:ed)?)\b|\b\d+Bit(?:-\d+(?:\.\d+)?(?:k|K)?Hz)?\b",
             "",
             raw_album,
             flags=re.IGNORECASE

@@ -18,10 +18,11 @@
 
 import time
 import os
+import json
 import sqlite3
 import logging
 from datetime import datetime, timezone
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 
 from musichub.core.config import MusicHubConfig
 from musichub.core.models import CanonicalMusicItem
@@ -44,10 +45,10 @@ from musichub.patrol.seed_patrol import SeedPatrolManager
 from musichub.adapters.sites import (
     MusopiaAdapter, CrabPTAdapter, PTerClubAdapter,
     XingwanAdapter, HDKylinAdapter, TangPTAdapter, MuXueGeAdapter,
-    OpenCDAdapter, UBitsAdapter, SoulVoiceAdapter,
-    LemonHDAdapter, HDTimeAdapter
+    OpenCDAdapter, UBitsAdapter, SoulVoiceAdapter, NanyangPTAdapter,
+    LemonHDAdapter, HDTimeAdapter, UHDDolbyAdapter
 )
-from musichub.adapters.nexusphp_base import is_duplicate_name_result
+from musichub.adapters.nexusphp_base import is_duplicate_name_result, extract_existing_tid
 from musichub.publisher.gateway import DeduplicationGateway
 from musichub.publisher.engine import PublisherEngine
 from musichub.publisher.delayed_queue import DelayedReaddQueue
@@ -56,6 +57,42 @@ from musichub.publisher.stock_pump import StockMatrixPump
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("MusicHubDaemon")
+
+
+def parse_task_tags_and_genre(task: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+    """从源种任务字典中安全反序列化 tags_json 与 genre_json 为结构化列表"""
+    raw_tags = task.get("tags_json")
+    tags: List[str] = []
+    if raw_tags:
+        try:
+            t_data = json.loads(raw_tags) if isinstance(raw_tags, str) else raw_tags
+            if isinstance(t_data, list):
+                for t in t_data:
+                    if isinstance(t, dict) and "name" in t:
+                        tags.append(t["name"])
+                    elif isinstance(t, str):
+                        tags.append(t)
+            elif isinstance(t_data, dict) and "items" in t_data:
+                for t in t_data["items"]:
+                    if isinstance(t, dict) and "name" in t:
+                        tags.append(t["name"])
+        except Exception:
+            pass
+
+    raw_genre = task.get("genre_json")
+    genre: List[str] = []
+    if raw_genre:
+        try:
+            if isinstance(raw_genre, str):
+                if raw_genre.startswith("["):
+                    genre = json.loads(raw_genre)
+                else:
+                    genre = [g.strip() for g in raw_genre.replace("/", ",").split(",") if g.strip()]
+            elif isinstance(raw_genre, list):
+                genre = raw_genre
+        except Exception:
+            pass
+    return tags, genre
 
 
 def is_in_time_window(start_hour: int, start_minute: int, end_hour: int, end_minute: int, now: Optional[datetime] = None) -> bool:
@@ -148,8 +185,10 @@ class MusicHubDaemon:
             OpenCDAdapter(),
             UBitsAdapter(),
             SoulVoiceAdapter(),
+            NanyangPTAdapter(),
             LemonHDAdapter(),
             HDTimeAdapter(),
+            UHDDolbyAdapter(),
         ]
         self.adapters_map = {a.site_name.lower(): a for a in self.adapters}
         self.gateway = DeduplicationGateway(adapters=self.adapters, graph_mgr=self.graph_mgr)
@@ -158,6 +197,12 @@ class MusicHubDaemon:
         self.source_fetcher = SourceDetailFetcher()
         self.rss_watcher = RSSWatcher(qb_download=self.qb_download)
         self._last_meta_topup_time = 0.0
+
+        # 4c. 全矩阵已发布目标站种子详情常态化抓取与标签归档器 (12目标站+源站)
+        from musichub.onsite.detail_archive import DetailArchive
+        self.detail_archive = DetailArchive(graph=self.graph_mgr, adapters=self.adapters_map, delay=2.0)
+        self._last_target_detail_topup_time = 0.0
+        self._last_hr_guard_date = ""
 
         # 5. 断种常态化巡检管理器
         self.patrol_mgr = SeedPatrolManager(
@@ -196,6 +241,11 @@ class MusicHubDaemon:
         )
         self._last_stock_pump_time = self._init_last_stock_pump_time()
 
+        # 6b. 11:00 - 18:00 历史缺口矩阵补发调度器（缺口最少优先，5 分钟/轮）
+        from musichub.tools.backfill_matrix import BackfillMatrixPump
+        self.backfill_pump = BackfillMatrixPump(db_path=config.db_path, stock_pump=self.stock_pump)
+        self._last_backfill_pump_time = 0.0
+
         # 7. qb3010 阶梯调速器与常驻交棒调度器
         self.speed_governor = SpeedGovernor(
             qb_host=config.publish_qb.host,
@@ -219,13 +269,8 @@ class MusicHubDaemon:
         self._readd_thread = None
         self._handoff_thread = None
 
-        # 8. 3016 下载队列清道夫：清理无做种者且零进度的 stalledDL，释放并发下载槽
-        self.queue_janitor = DownloadQueueJanitor(
-            qb_client=self.qb_download,
-            interval_seconds=3600,
-            min_age_hours=2.0,
-            max_delete_per_round=20,
-        )
+        # 8. [已退役] 3016 下载队列清道夫：已移交 Vertex 专属删种规则统一纳管 (48h 未成活清理)
+        self.queue_janitor = None
         self._janitor_thread = None
 
         # 9. 8 个核心音乐 QB 实例多池阶梯下载治理器 (MultiPoolDownloadGovernor)
@@ -259,6 +304,10 @@ class MusicHubDaemon:
     def is_golden_publish_window(self) -> bool:
         """东八区 00:00 - 10:00 黄金发种窗口判断"""
         return is_in_time_window(0, 0, 10, 0)
+
+    def is_backfill_publish_window(self) -> bool:
+        """东八区 11:00 - 18:00 历史缺口补发窗口判断"""
+        return is_in_time_window(11, 0, 18, 0)
 
     def check_download_buffer_readiness(self, dry_run: bool = False, max_batch: int = 5) -> int:
         """检查 3016 缓冲完成下载任务，返回成功移交的任务数量
@@ -302,10 +351,11 @@ class MusicHubDaemon:
                     logger.warning(f"Torrent '{name}' content_path does not exist on disk: {real_local_path} (raw: {content_path})")
                     continue
 
-                # 登记源种任务并补齐详情元数据（源站/ tid / 转载规则 / 简介正文）
+                # 登记源种任务并补齐详情元数据（源站/ tid / 转载规则 / 简介正文 / 标签与流派）
                 task = self._ensure_source_task(t, info_hash, name)
                 origin_site = task.get("source_site") or "unknown"
                 source_tid = str(task.get("source_tid") or "")
+                task_tags, task_genre = parse_task_tags_and_genre(task)
 
                 item_obj = CanonicalMusicItem(
                     title=task.get("source_name") or name,
@@ -318,6 +368,8 @@ class MusicHubDaemon:
                     origin_site=origin_site,
                     origin_torrent_id=source_tid,
                     origin_info_hash=info_hash,
+                    tags=task_tags,
+                    genre=task_genre,
                     local_path=real_local_path,
                 )
 
@@ -398,6 +450,7 @@ class MusicHubDaemon:
             log_text=result.get("log_text", ""),
             tracklist_json=result.get("tracklist", ""),
             genre_json=result.get("genre", ""),
+            tags_json=result.get("tags_json", ""),
             meta_status="OK",
         )
         self.graph_mgr.set_transfer_rule(info_hash, rule, note=f"source={site}#{tid}")
@@ -432,6 +485,73 @@ class MusicHubDaemon:
             logger.info(f"[SourceMeta] 本轮补抓 {done}/{len(tasks)} 条")
         return done
 
+    def topup_target_metadata(self, limit: int = 10, save_html: bool = True) -> int:
+        """全矩阵 12 站点已发布种子详情常态化抓取与标签入库。
+
+        每轮抓取 limit 条待更新或未抓取的已发布种子，解析最新做种数、下载数、完成数以及全部标签，
+        原子写入 site_detail_pages（包含 tags_json 显式字段）与 site_detail_observations。
+        若有关联的 source_tasks 且 tags_json 为空，则同步反哺补充。
+        单条请求间隔 >= 2.0s，避免并发限流。
+        """
+        done = 0
+        try:
+            targets = self.graph_mgr.list_pending_detail_targets(limit=limit)
+        except Exception as e:
+            logger.error(f"[TargetDetail] 读取待更新目标失败: {e}")
+            return 0
+
+        if not targets:
+            return 0
+
+        logger.info(f"[TargetDetail] 启动常态化详情巡检，本轮计划抓取 {len(targets)} 条目标种子...")
+        for item in targets:
+            site = item.get("site") or ""
+            tid = str(item.get("tid") or "").strip()
+            if not site or not tid:
+                continue
+            try:
+                result = self.detail_archive.archive(site, tid, apply=True, save_html=save_html)
+                page = result.get("page") or {}
+                status = page.get("fetch_status")
+                tags_count = 0
+                if page.get("tags_json"):
+                    try:
+                        tags_count = len(json.loads(page["tags_json"]))
+                    except Exception:
+                        pass
+                if status == "OK":
+                    done += 1
+                    logger.info(
+                        f"[TargetDetail] {site} tid={tid} 抓取成功（tags={tags_count}, "
+                        f"seeders={page.get('seeders')}, completed={page.get('completed')}）"
+                    )
+
+                    # 若在 source_tasks 里有对应源种任务，且源种 tags_json 为空，同步反哺源种
+                    source_hash = item.get("source_hash")
+                    if not source_hash and item.get("origin_site") and item.get("origin_tid"):
+                        try:
+                            row_st = self.graph_mgr._conn.execute(
+                                "SELECT info_hash FROM source_tasks WHERE source_site=? AND source_tid=?",
+                                (item["origin_site"], item["origin_tid"])
+                            ).fetchone()
+                            if row_st:
+                                source_hash = row_st[0]
+                        except Exception:
+                            pass
+                    if source_hash and page.get("tags_json") and page["tags_json"] != "[]":
+                        st = self.graph_mgr.get_source_task(source_hash)
+                        if st and not st.get("tags_json"):
+                            self.graph_mgr.update_source_meta(source_hash, tags_json=page["tags_json"])
+                            logger.info(f"[TargetDetail] 反哺源种 {source_hash[:8]} tags_json 成功")
+                else:
+                    logger.warning(f"[TargetDetail] {site} tid={tid} 抓取异常: status={status}, error={page.get('error')}")
+            except Exception as e:
+                logger.warning(f"[TargetDetail] 抓取失败 {site}#{tid}: {e}")
+            time.sleep(2.0)
+
+        logger.info(f"[TargetDetail] 本轮常态化详情抓取完成: 成功 {done}/{len(targets)} 条")
+        return done
+
     def _dispatch_item_pipeline(self, local_path: str, album_name: str, origin_hash: str, dry_run: bool = False):
         """流式构建规范化对象并向目标站多向分发"""
         logger.info(f"Pipeline dispatch starting for: {album_name} ({local_path})")
@@ -448,6 +568,7 @@ class MusicHubDaemon:
         artist = task.get("artist") or name_meta.get("artist") or (
             tracks[0].artist if tracks else "Various Artists"
         )
+        task_tags, task_genre = parse_task_tags_and_genre(task)
         item = CanonicalMusicItem(
             title=task.get("source_name") or album_name,
             # 专辑名以目录名解析为准（种子名校验最可靠），详情页字段作补充
@@ -464,6 +585,8 @@ class MusicHubDaemon:
             cover_url=task.get("cover_url") or "",
             log_text=task.get("log_text") or "",
             has_log=bool(task.get("log_text")),
+            tags=task_tags,
+            genre=task_genre,
             local_path=local_path,
             tracks=tracks,
         )
@@ -535,6 +658,7 @@ class MusicHubDaemon:
                         qb_port=3010,
                         save_path="/downloads",
                         status="PUBLISHED",
+                        publish_status="PUBLISHED",
                         note=album_name,
                     )
                     self.graph_mgr.record_publish_attempt(
@@ -554,16 +678,21 @@ class MusicHubDaemon:
                     logger.info(f"Keepalive probe for {site}: {r_msg}")
                 else:
                     if is_duplicate_name_result(tid):
-                        logger.info(f"'{album_name}' 在 {site} 已有同种/同名条目，登记为 EXISTING 并跳过")
+                        ex_tid = extract_existing_tid(tid)
+                        logger.info(f"'{album_name}' 在 {site} 已有同种/同名条目 (TID: {ex_tid or 'unknown'})，登记为 EXISTING 并跳过")
                         self.graph_mgr.record_publish(
-                            item, site, target_torrent_id="EXISTING", status="EXISTING", note=str(tid)
+                            item, site,
+                            target_torrent_id=ex_tid,
+                            publish_status="EXISTING",
+                            status="EXISTING",
+                            note=str(tid)
                         )
                         self.graph_mgr.record_publish_attempt(
                             album_name=album_name,
                             target_site=site,
                             result="SKIPPED_EXISTING",
                             reason=str(tid),
-                            target_torrent_id="EXISTING",
+                            target_torrent_id=ex_tid,
                             origin_path=local_path,
                         )
                     else:
@@ -706,16 +835,17 @@ class MusicHubDaemon:
 
     def run_once(self, dry_run: bool = False) -> int:
         """单次主循环，返回处理的有待办事项数"""
+        pending_handled = 0
+
         # 1. 背压门禁
         level, free_gb = self.backpressure.assess_watermark()
         logger.info(f"Storage watermark: {level} ({free_gb:.1f} GB free)")
         if level == "RED":
-            logger.warning("RED watermark triggered! Suspending new ingestion and running safe GC.")
+            logger.warning("RED watermark triggered! Suspending new ingestion (3016 handoff) and attempting safe GC; stock publish continues.")
             self.run_lifecycle_gc_check(dry_run=dry_run)
-            return 0
-
-        # 2. 检查 3016 缓冲完成并移交（单轮最多 5 条，避免长等待拖垮主循环）
-        pending_handled = self.check_download_buffer_readiness(dry_run=dry_run, max_batch=5)
+        else:
+            # 2. 检查 3016 缓冲完成并移交（单轮最多 5 条，避免长等待拖垮主循环）
+            pending_handled += self.check_download_buffer_readiness(dry_run=dry_run, max_batch=5)
 
         # 2a. 源种元数据补抓：10 分钟一轮，每轮最多 20 条（抓不到的保持 NEED_META 被严格站拦住）
         now_meta = time.time()
@@ -723,17 +853,33 @@ class MusicHubDaemon:
             self.topup_source_metadata(limit=20)
             self._last_meta_topup_time = now_meta
 
+        # 2a2. 全矩阵 12 站点已发布种子详情常态化抓取与标签入库：15 分钟 (900s) 一轮，每轮最多 10 条（平滑轮流复检，带标签落库）
+        now_target_meta = time.time()
+        if now_target_meta - self._last_target_detail_topup_time >= 900.0:
+            self.topup_target_metadata(limit=10, save_html=True)
+            self._last_target_detail_topup_time = now_target_meta
+
         # 2b. 黄金发种期存量补种泵：00:00 - 10:00 期间，每 30 分钟 (1800s) 启动一轮，每轮 11 站各发 1 个
+        #     存量补种仅利用现有池内数据做种，不新增机械盘空间占用，不受 RED 背压阻断。
         now_ts = time.time()
         if self.is_golden_publish_window():
             if now_ts - self._last_stock_pump_time >= 1800.0:
-                logger.info("[StockMatrixPump] 处于黄金发种窗口期 (00:00 - 10:00)，启动半小时存量补种轮询（11站每站各发1个）...")
+                logger.info(f"[StockMatrixPump] 处于黄金发种窗口期 (00:00 - 10:00)，启动半小时存量补种轮询（{len(self.stock_pump.TARGET_SITES_PRIORITY)}站每站各发1个）...")
                 pumped = self.stock_pump.run_stock_round(max_per_round=len(self.stock_pump.TARGET_SITES_PRIORITY), dry_run=dry_run)
                 self._last_stock_pump_time = now_ts
                 pending_handled += pumped
 
-        # 3. 运行日常安全退役考核（默认干跑模式防误删）
-        self.run_lifecycle_gc_check(dry_run=True)
+        # 2c. 11:00 - 18:00 历史缺口矩阵补发：每 5 分钟 (300s) 一轮，每站最多 1 个，缺口最少优先
+        if self.is_backfill_publish_window():
+            if now_ts - self._last_backfill_pump_time >= 300.0:
+                logger.info("[BackfillMatrix] 处于历史缺口补发窗口 (11:00 - 18:00)，启动 5 分钟轮询（缺口最少优先，12 站各 1 个）...")
+                bf_res = self.backfill_pump.run_backfill_round(max_per_round=12, dry_run=dry_run)
+                self._last_backfill_pump_time = now_ts
+                pending_handled += int(bf_res.get("published") or 0)
+
+        # 3. 运行日常安全退役考核（默认干跑模式防误删；RED 水位已在第 1 步执行过）
+        if level != "RED":
+            self.run_lifecycle_gc_check(dry_run=True)
 
         # 4. 常态化断种只读巡检
         self.run_seed_patrol_check(limit=50)
@@ -787,29 +933,8 @@ class MusicHubDaemon:
         self._readd_thread = threading.Thread(target=_readd_loop, daemon=True, name="DelayedReaddThread")
         self._readd_thread.start()
 
-        # 启动下载队列清道夫线程 (3600s/轮，每轮最多 20 条；只清「零进度 + 无做种者」的 stalledDL)
-        def _janitor_loop():
-            logger.info("[QueueJanitor] 无源停滞任务清理线程已启动 (周期 3600s，每轮最多 20 条)...")
-            while self._running:
-                try:
-                    res = self.queue_janitor.run_once()
-                    if res.get("deleted"):
-                        logger.info(
-                            "[QueueJanitor] 本轮清理 %d 个无源停滞任务，扫描 %d 命中 %d"
-                            % (res["deleted"], res["scanned"], res["matched"])
-                        )
-                        for it in res.get("items", [])[:10]:
-                            logger.info(
-                                "[QueueJanitor]   - %s %s %s (age=%.1fh)"
-                                % (it["hash"], it["site"], it["name"], it["age_hours"])
-                            )
-                except Exception as ex:
-                    logger.error(f"[QueueJanitor] 清理异常: {ex}")
-                time.sleep(self.queue_janitor.interval_seconds)
-            logger.info("[QueueJanitor] 无源停滞任务清理线程已停止。")
-
-        self._janitor_thread = threading.Thread(target=_janitor_loop, daemon=True, name="QueueJanitorThread")
-        self._janitor_thread.start()
+        # [已退役] 下载队列清道夫线程：已平滑交还 Vertex 原生删种规则统一纳管 (48h 未成活清理)
+        # 故不再启动 _janitor_thread，避免与 Vertex 产生并发删种冲突并节约轮询资源。
 
         # 启动 3010 达标交棒独立线程 (120s/轮、每轮最多 60 个；批量停源/唤醒/下架，单轮 3~5s 收口)
         def _handoff_loop():
@@ -890,6 +1015,7 @@ class MusicHubDaemon:
         while self._running:
             try:
                 handled = self.run_once()
+                self._maybe_run_daily_hr_guard()
                 if handled > 0:
                     logger.info(f"Pending tasks processed ({handled}). Entering fast cooldown ({cooldown_interval}s)...")
                     sleep_time = cooldown_interval
@@ -900,6 +1026,30 @@ class MusicHubDaemon:
                 sleep_time = default_interval
 
             time.sleep(sleep_time)
+
+    def _maybe_run_daily_hr_guard(self, now_dt=None) -> Optional[Dict[str, Any]]:
+        """每日东八区 10:10~10:59 触发一次乌托邦 & 皇后 H&R 保底巡检与补种"""
+        from datetime import datetime, timezone, timedelta
+        if now_dt is None:
+            now_dt = datetime.now(timezone(timedelta(hours=8)))
+        today_str = now_dt.strftime("%Y-%m-%d")
+        if (now_dt.hour, now_dt.minute) < (10, 10) or now_dt.hour >= 11:
+            return None
+        if getattr(self, "_last_hr_guard_date", "") == today_str:
+            return None
+        self._last_hr_guard_date = today_str
+        try:
+            from musichub.tools.hr_guard import HRGuard
+            res = HRGuard(db_path=self.config.db_path).run(apply=True)
+            logger.info(
+                "[HRGuard] 每日 10:10 保底巡检完成: total=%s healthy=%s resumed=%s repaired=%s missing_data=%s",
+                res.get("total_hr"), res.get("healthy"), res.get("resumed"),
+                res.get("repaired"), res.get("missing_data"),
+            )
+            return res
+        except Exception as e:
+            logger.error(f"[HRGuard] 每日 10:10 保底巡检异常: {e}", exc_info=True)
+            return None
 
     def stop(self):
         self._running = False

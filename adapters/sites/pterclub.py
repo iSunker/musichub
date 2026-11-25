@@ -11,6 +11,7 @@
 from typing import Dict, Any, Tuple
 from musichub.adapters.nexusphp_base import NexusPHPBaseAdapter
 from musichub.core.models import CanonicalMusicItem
+from musichub.adapters.tag_matcher import TagMatcher
 
 
 class PTerClubAdapter(NexusPHPBaseAdapter):
@@ -59,6 +60,28 @@ class PTerClubAdapter(NexusPHPBaseAdapter):
             return "6"
         return "8"
 
+    def format_title(self, item: CanonicalMusicItem) -> Tuple[str, str]:
+        """猫站 (PTerClub) 严格遵循 Wiki 上传规则：艺术家 - 专辑 发行年份 - 格式 位深 采样率 [- 制作组]"""
+        import musichub.adapters.descr_core as descr_core
+        task = {
+            "formatted_title": item.origin_title or item.title,
+            "torrent_name": item.origin_title or item.title,
+            "artist": item.artist,
+            "album": item.album,
+            "year": item.year,
+            "format": item.format,
+            "medium": item.medium,
+            "standard": item.standard,
+            "small_descr": item.edition or "",
+            "tracklist": "\n".join(f"{t.track_number:02d}. {t.title}" for t in item.tracks) if item.tracks else "",
+            "origin_site": item.origin_site or "",
+            "origin_tid": item.origin_torrent_id or "",
+            "opencd_tid": item.origin_torrent_id if item.origin_site == "opencd" else "",
+        }
+        main_title = descr_core.normalize_music_title(task)
+        small_descr = descr_core.build_music_small_descr(task)
+        return main_title, small_descr
+
     def build_form_fields(self, item: CanonicalMusicItem) -> Dict[str, Any]:
         main_title, sub_title = self.format_title(item)
 
@@ -71,4 +94,5 @@ class PTerClubAdapter(NexusPHPBaseAdapter):
             "descr": self.build_body(item),
             "uplver": "yes",                                  # 匿名发布
         }
+        TagMatcher.inject_form_tags("pterclub", item, fields)
         return fields

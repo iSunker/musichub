@@ -7,6 +7,9 @@ services:
     restart: unless-stopped
     # 铁律：PT 直连与群晖 host 模式 (或与 qb 同 host 端口直接互通)
     network_mode: host
+    # 图床凭据仅存 NAS 本地 data/image_hosts.env（权限 600，禁止入库）
+    env_file:
+      - data/image_hosts.env
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1
@@ -30,6 +33,8 @@ services:
       - /volume2/docker_ssd/vertex2/data/vertex/db/sql.db:/app/vertex/sql.db:ro
       # 凭据映射 (遵守 AGENTS.md 凭据不入库铁律，只读接入 CookieCloud 解密载荷)
       - /volume2/docker_ssd/cookiecloud/data:/data/cookiecloud:ro
+      # Vertex 共享目录：导出防环账本 published_music_ids.json 供 3016 RSS 规则读取 (2026-11-21)
+      - /volume2/docker_ssd/vertex2/data/vertex/data:/volume2/docker_ssd/vertex2/data/vertex/data
     healthcheck:
       test: ["CMD", "/app/healthcheck.sh"]
       interval: 30s

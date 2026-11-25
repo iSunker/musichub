@@ -13,7 +13,7 @@ MusicHub 3.0 是 PT 音乐抓轨资源的全自动分发、保种、背压调节
 3. **多站分发**：自研 NexusPHP 适配器矩阵，支持发布到乌托邦（Musopia）、蟹黄堡（CrabPT）、不可躺（TangPT）、星湾（XingWan）、牧雪阁（MuXueGe）、红豆麒麟（HDKylin）、PterClub 等多个站点。
 4. **两阶段防偷跑回加**：支持延迟注入队列（`delayed_queue` / `delayed_readd`），解决站点发种时自动生成的 infohash 尚未入库引发的校验失败或异哈希偷跑流量问题。
 5. **存储背压与生命周期轮转（Backpressure & Handoff）**：监控机械盘卷（`/volume1/video`）与 SSD 缓冲卷（`/volume2/qb_temp`）水位，自动执行安全 GC、多池交棒（`music-pool1~5` / `music1~3`）与断种巡检。
-6. **3016 下载队列治理（QueueJanitor）**：内置线程 `DownloadQueueJanitor`（`publisher/queue_janitor.py`，3600s/轮、单轮最多 20 个）定期清理「`stalledDL` + `progress=0` + `num_complete<=0` + 加入超过 2h」的无源任务（`deleteFiles=false`），释放 `max_active_downloads` 并发槽，避免 RSS 灌入的无源种长期锁死队列、导致有源种子（如 OpenCD）永远排队。
+6. **3016 下载调速治理与生命周期闭环（2026-11-24 架构升级）**：3016 实例已正式纳入 `MultiPoolDownloadGovernor` 五档阶梯调速器与 300s 超时轮转暂存治理；原 `DownloadQueueJanitor` 自建线程正式退役，死种最终销毁平滑交由 Vertex 原生删种引擎（`3016-未成活死种48h自动清除`，`onlyDeleteTorrent: true`）统一管理，实现「调速限速 + 5分钟让位 + 轮转再激活 + Vertex 48小时终态回收」的完整闭环。
 
 ---
 
@@ -92,10 +92,12 @@ MusicHub 3.0 是 PT 音乐抓轨资源的全自动分发、保种、背压调节
    - **机械盘无关**：`/api/v2/torrents/info` 返回内存元数据，实测 100 次全量拉取期间 qB 进程 `read_bytes` 单位时间增量低于空转（126 MB/s vs 156 MB/s），不触发磁盘寻道。真正吃机械盘的是 torf 打种、`verify_payload` 与并发上传读取。
    - **对账**：`reconcile_pool_index()` 每日随交棒线程跑一次，用实况覆盖快照并记录漂移，防止长期失真。
 
-11. **发种流水与「站点已有」判据（2026-11-21）**：
-   - `publish_attempt_log` 是只增不改的发种审计流水，`result` 取值：`PUBLISHED` / `SKIPPED_EXISTING` / `SKIPPED`（网关决策不放行）/ `REJECTED` / `FAILED`。三个发种入口（`daemon._dispatch_item_pipeline`、`StockMatrixPump`、`ExpressPump`）都必须写这条流水，失败原因一并落库，禁止只写日志。
-   - 适配器返回前缀 `DUPLICATE_NAME:` 表示**站点上已有**同 infohash（302 `existed=1`）或同 `info.name`（200「上传失败」）条目。调用方必须按「已在站」处理：`record_publish(..., "EXISTING")` + 流水 `SKIPPED_EXISTING`，**不得记 REJECTED**，否则该专辑会被每轮重复投喂、形成永久卡死（2026-11-21 uhddolby 实测）。
-   - `EXISTING` 记录不导出 Vertex 账本（`export_vertex_blocklist()` 过滤 `EXISTING` 与非数字 tid）。
+11. **发种真伪判定解耦、纯数字 TID 保护与单调递增性（2026-11-24 重构）**：
+   - `site_publish_graph` 必须区分 `publish_status`（`PUBLISHED` 本账号真发 vs `EXISTING` 站点收录/辅种）；
+   - `target_torrent_id` 仅存纯数字 TID，**严禁写入 `'EXISTING'` 等任何字符串占位符**；查重命中由适配器 `check_exists_detail()` 提取详情页数字 TID（若无提取到则置空 `''`），杜绝下游 `int(tid)` 崩溃；
+   - **单调晋升保护门禁**：`PUBLISHED > EXISTING`。已标记为 `PUBLISHED` 的记录，后续无论遇到何种查重命中均严禁降级为 `EXISTING`；
+   - **Vertex 3016 防环账本汇聚导出**：`export_vertex_blocklist()` 兼顾直接目标站 `target_torrent_id` 与跨站矩阵传播的各站点专有列 `SITE_TID_COLUMNS`，只要在目标站存在纯数字 TID（无论是 `PUBLISHED` 还是 `EXISTING`），全量导出至 `/vertex/data/published_music_ids.json`，确保 3016 下载队列 100% 免疫回环；
+   - 存量真伪对账与数据清洗统一通过 `python musichub/tools/reconcile_publish_truth.py [--apply]` 运行。详见 [专题 11：发种真伪解耦、数字TID保护与存量流转治理专题](../docs/nas_cluster/postmortems/11_发种真伪解耦_数字TID保护与存量流转治理专题.md)。
 
 12. **发种来龙去脉台账（`publish_lineage`，2026-11-21 新增）**：
    - `site_publish_graph` 只存指纹 + 站点 tid，**无法回答「某个站点 tid 本地是哪个 B 种、该去哪个池补种」**；2026-11-21 lemonhd#48704 就是这样丢失的（只有 EXISTING 记录，无 tid、无 B 种，站点在挂种而本地无任务）。
@@ -199,6 +201,11 @@ MusicHub 3.0 是 PT 音乐抓轨资源的全自动分发、保种、背压调节
     - **单轮节拍**：解除旧实现 `max_per_round=3` 的全局早退限制，调整为「每轮 11 站，各发 1 个（每半小时最多 11 个）」。单轮内遍历全部 11 个站点，每个站点各自寻找 1 个最佳候选专辑发布，站点间保持 15s 避峰平滑。
     - **启动自愈**：内置 `_init_last_stock_pump_time()`，启动时自动从 `publish_attempt_log` 流水账本恢复最近发种时间戳，防止容器重启立刻早熟连发，严格维持每 30 分钟一轮的平稳发种节拍。
 
+23. **南洋PT矩阵接入与SSD站点规则退役（2026-11-25 调整）**：
+    - **南洋PT (NanyangPT)**：`type="407"`，正式纳入发布矩阵。强依赖 `music_time/music_type/music_author/music_name/music_form/music_qual` 动态细分字段与前端 `[YYYY][类型][歌手][专辑][FLAC][无损]` 格式校验；后端老旧 `bdecode` 强校验上传种子顶层 `announce` 键，发种时由适配器向临时种子打桩注入 `announce.php`。
+    - **SSD (SpringSunday) 移除发布矩阵**：因 SSD 站点规则严格限制「非官种音乐组不允许发布音乐种子」，为杜绝发种违规与候选风控死锁，SSD 适配器仅作为历史代码留存，**已从 `StockMatrixPump`、`StockBatchRunner`、`LifecycleRetirement` 及后台发布守护进程 `MusicHubDaemon` 中彻底移除**。
+    - **单专发种与候选提交统一入口**：固化 `python musichub/tools/publish_item.py`。
+
 ---
 
 ## 3. 本地自检与验证
@@ -234,4 +241,14 @@ python musichub/tools/auto_heal_pools.py --dry-run
 - [专题 03：发布流水线、交棒器效率与延迟回加治理](../docs/nas_cluster/postmortems/03_发布流水线_交棒与延迟回加治理专题.md)：3010 发布期 450s 延迟回加机制演进与守护线程常驻化（解决 daemon 失效、静默 FAILED 复活与 SQLite WAL 并发锁冲突）、交棒器（Handoff）效率重构（batch 30、双判据防队头阻塞）。
 - [专题 04：元数据保真、母种溯源与机械盘退役治理](../docs/nas_cluster/postmortems/04_元数据保真_母种溯源与机械盘退役专题.md)：已发布详情页数据库（`published_details.db`）与 B 种断种自愈、严格 SHA256 封面身份链（防图床重编码）、真源头穿透（`resolve_stock_origin` 杜绝套娃引用）、存量单曲拒发多层护栏、机械盘 14+10 天安全退役三维五重门禁模型（`retire_matrix.py`）。
 - [专题 05：qB 集群底层运维、多处做种分诊与存储 I/O 调优](../docs/nas_cluster/postmortems/05_qB集群底层运维_多处做种分诊与存储IO调优专题.md)：幽灵做种（Ghost Seeding）机制与 save_path 层级铁律、qB 重启 peer_id 换新导致站点“多处做种”陈旧占位（`stale_seat`）分诊与四项重启纪律、硬链接 GC 清理真相与 `music5` 禁删红线、机械盘扫盘高 I/O 调优与 NAS 孤儿进程审计。
+- [专题 06：辅种进库校验防偷跑、分流即时唤醒与 reseed 常驻守护](../docs/nas_cluster/postmortems/06_辅种进库校验防偷跑_分流即时唤醒与reseed常驻守护专题.md)：保种池物理限速熔断与平滑单并发排队校验机制。
+- [专题 07：跨实例重复做种全集群治理与存储孤儿分诊清理](../docs/nas_cluster/postmortems/07_跨实例重复做种全集群治理与存储孤儿分诊清理专题.md)：全集群同 info-hash 单实例铁律与跨实例查重收敛。
+- [专题 08：全集群单种限速升档 4MB 与 qbit_manage 规则治理](../docs/nas_cluster/postmortems/08_全集群单种限速升档4MB与qbit_manage规则治理专题.md)：全集群单种上传限速统一 4MB 基线与 qbit_manage 错峰轮询。
+- [专题 09：3016限速治理、reseed7清理、影子对偷跑隔离与分流路径归位](../docs/nas_cluster/postmortems/09_3016限速治理_reseed7清理_影子对偷跑隔离与分流路径归位专题.md)：影子配对任务绝对静默待命与分流路径动态绑定。
+- [专题 10：母种穿透、来源致谢规范、种子注释注入与详情页修缮](../docs/nas_cluster/postmortems/10_母种穿透_来源致谢规范_种子注释注入与详情页修缮专题.md)：母种真实溯源穿透、外链致谢与 Bencode 详情页直链安全注入。
+- [专题 11：发种真伪解耦、数字TID保护与存量流转治理](../docs/nas_cluster/postmortems/11_发种真伪解耦_数字TID保护与存量流转治理专题.md)：发种真伪解耦、纯数字 TID 强校验与单调晋升保护。
+- [专题 12：全集群无Tracker哑种排查、时序竞争根因与批量修复](../docs/nas_cluster/postmortems/12_全集群无Tracker哑种排查_时序竞争根因与批量修复专题.md)：跨实例注入 Tracker 时序竞争根因、强制回读校验与全集群哑种审计。
+- [专题 13：全矩阵13站点标签解析、常态化抓取与数据库落盘治理](../docs/nas_cluster/postmortems/13_全矩阵13站点标签解析_常态化抓取与数据库落盘治理专题.md)：全矩阵13站点标签解析、表单智能推断、全天常态化抓取与双库标签原子持久化。
+- [专题 17：源种 TID 全量回填、做种健康核查与 CookieCloud 会话失效诊断](../docs/nas_cluster/postmortems/17_源种TID全量回填与做种健康核查专题.md)：87 行无 TID 残行成因与 85 行 hash 定论回填、`status=2 working` 判据证伪"删种"假设、CookieCloud cookie 未过期但服务端会话失效的假阴性诊断，配套 `probe_source_tasks.py` / `probe_torrent_meta.py` / `probe_site_session.py` 三个只读探针。
+- [专题 18：南洋PT与SSD接入、候选机制与动态白名单治理专题](../docs/nas_cluster/postmortems/18_南洋PT与SSD接入_候选机制与动态白名单治理专题.md)：南洋PT与SSD发种/候选流水线接入、SSD新手10候选自动探测自适应、纯英文 MediaInfo 校验、站内附件图床转存闭环与单专发种工具标准化归档。
 - [历史原始单篇复盘归档](../docs/nas_cluster/postmortems/raw_history/)：保留所有历史单篇记录供备查溯源。

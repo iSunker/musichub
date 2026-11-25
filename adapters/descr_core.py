@@ -4,7 +4,9 @@
 以及 NexusPHP 分类下拉选项（媒介、音频编码、製作組）与标签集合的格式化输出。
 """
 import json
+import os
 import re
+from typing import Tuple, Dict, Any, List, Optional
 
 # ==================== 站点字段字典（来自 edit.php 表单实测） ====================
 # select name="medium_sel[4]"
@@ -453,6 +455,90 @@ RECOGNIZED_GROUPS = {
     "CHD", "CMCT", "FRDS", "beAst", "ADE", "PTH", "RedBits",
 }
 
+SAFE_TITLE_TOKENS = {
+    "FLAC", "WAV", "APE", "DSD", "DSF", "DFF", "ALAC", "MP3", "AAC",
+    "16BIT", "24BIT", "44.1KHZ", "48KHZ", "88.2KHZ", "96KHZ", "192KHZ",
+    "LOSSLESS", "HI-RES", "DELUXE", "REMASTER", "REMASTERED", "OST",
+    "SOUNDTRACK", "EP", "SINGLE", "LIVE", "CD", "WEB", "VINYL", "SACD",
+    "BOXSET", "EDITION", "EXPANDED", "ANNIVERSARY", "BONUS", "OPENCD", "KYLIN"
+}
+
+KNOWN_RIPPERS = {
+    "yuekui", "alin13788", "smdf007", "zasdf", "zasdfgb"
+}
+
+
+def clean_origin_music_title(raw_title: str, fallback_task: Optional[dict] = None) -> str:
+    """底线合规清洗源站原始标题（回归原种命名风格）。
+
+    设计原则（PT-Project 2026-11-22 规范）：
+      1. 忠实保留源站的原生格式、版本信息与真实年份（杜绝强推猫站 16bit 44.1kHz 公式产生错判）；
+      2. 仅做底线合规过滤：严格剥离 NexusPHP 明确禁止的“分轨/整轨/分軌/整軌”；
+      3. 剥离末尾非官方私人压制者后缀（如 - Yuekui, - alin13788），但 100% 保留白名单发布组与版本标记；
+      4. 若原始标题为空或清洗后异常，回退至 normalize_music_title(fallback_task)。
+    """
+    if not raw_title or not raw_title.strip():
+        if fallback_task:
+            return normalize_music_title(fallback_task)
+        return ""
+
+    title = raw_title.strip()
+
+    # 1. 独立括号内的分轨/整轨清除，如 [分轨], (整軌), 【整轨版】
+    title = re.sub(r"[\(\[\{【（]\s*(?:分[轨軌]|整[轨軌])(?:版)?\s*[\)\]\}】）]", " ", title)
+
+    # 2. 混合在括号内的分轨/整轨清除，如 [FLAC 分轨] -> [FLAC], (FLAC/分軌) -> (FLAC)
+    def clean_bracket_inner(m):
+        open_b, content, close_b = m.group(1), m.group(2), m.group(3)
+        c = re.sub(r"[\s/,\-_]*(?:分[轨軌]|整[轨軌])(?:版)?[\s/,\-_]*", " ", content).strip()
+        if not c:
+            return " "
+        return f"{open_b}{c}{close_b}"
+
+    title = re.sub(r"([\(\[\{【（])([^\(\)\[\]\{\}【】（）]*?)([\)\]\}】）])", clean_bracket_inner, title)
+
+    # 3. 散落裸露的分轨/整轨清除，如 - FLAC 分轨 -> - FLAC, 分軌 -
+    title = re.sub(r"[\s\-_/]+(?:分[轨軌]|整[轨軌])(?:版)?(?=[\s\-_/]|$)", " ", title)
+    title = re.sub(r"(?:^|[\s\-_/])(?:分[轨軌]|整[轨軌])(?:版)?[\s\-_/]+", " ", title)
+
+    # 4. 检查并剥离末尾非白名单制作组/私人压制者后缀，如 ' - Yuekui', '@smdf007'
+    # 铁律：只有在标题中已经包含了格式（如 FLAC/WAV 等）或者属于已知压制者黑名单时，尾部的连字符后缀才允许作为压制组剥离！
+    has_format = bool(re.search(r"\b(FLAC|WAV|APE|DSD|DSF|DFF|ALAC|MP3|AAC)\b", title, re.I))
+    hyphen_count = title.count(" - ")
+
+    while True:
+        m_end = re.search(r"\s*(?:-\s*|@)([A-Za-z0-9_]+)\s*$", title)
+        if not m_end:
+            break
+        cand = m_end.group(1)
+        u_cand = cand.upper()
+        # 如果是白名单组或 PTer 前缀，保留
+        if cand in RECOGNIZED_GROUPS or cand.startswith("PTer"):
+            break
+        # 如果是安全 token（格式/位深/版本/常见词），保留
+        if u_cand in SAFE_TITLE_TOKENS:
+            break
+
+        # 判断是否可剥离
+        is_known_ripper = cand.lower() in KNOWN_RIPPERS
+        can_strip = is_known_ripper or (has_format and hyphen_count >= 2) or (hyphen_count >= 3)
+        if can_strip:
+            title = title[:m_end.start()].strip()
+            hyphen_count = title.count(" - ")
+        else:
+            break
+
+    # 5. 清理末尾多余标点与空括号
+    title = re.sub(r"[\(\[\{【（]\s*[\)\]\}】）]", " ", title)
+    title = re.sub(r"[\s\-_/]+$", "", title)
+    title = re.sub(r"^\s*[\-_/]+", "", title)
+    # 合并连续空白
+    title = re.sub(r"\s+", " ", title).strip()
+
+    if not title and fallback_task:
+        return normalize_music_title(fallback_task)
+    return title
+
 # 版本信息判据：只保留"这一版是什么"的描述（首版/德版/Deluxe…），
 # 不把格式、日志、抓轨者这些**已经在主/副标题规格段里**的脏数据再拼一遍。
 _VERSION_HINT = re.compile(
@@ -891,6 +977,133 @@ def markdown_to_bbcode(text: str) -> str:
     return s
 
 
+# 源站展示名与站点根（多源转载声明用；不引入 collector 依赖，保持本模块纯 stdlib）
+SOURCE_SITES = {
+    "opencd": ("OpenCD", "https://open.cd"),
+    "musopia": ("乌托邦", "https://www.musopia.vip"),
+    "crabpt": ("蟹黄堡", "https://crabpt.vip"),
+    "pterclub": ("猫站", "https://pterclub.net"),
+    "xingwan": ("星湾", "https://xingwan.cc"),
+    "hdkylin": ("红豆麒麟", "https://www.hdkylin.top"),
+    "tangpt": ("躺平", "https://tangpt.top"),
+    "muxuege": ("牧雪阁", "https://pt.muxuege.org"),
+    "lemonhd": ("柠檬", "https://lemonhd.net"),
+    "uhddolby": ("UHDDolby", "https://www.uhddolby.com"),
+    "ubits": ("UBits", "https://ubits.club"),
+    "soulvoice": ("聆音", "https://pt.soulvoice.club"),
+    "nanyangpt": ("南洋PT", "https://nanyangpt.com"),
+    "springsunday": ("SSD", "https://springsunday.net"),
+    "jpopsuki": ("JPopsuki", "https://jpopsuki.eu"),
+}
+
+# ★ 无封面时写进简介的显式说明（2026-11-21 用户要求）。
+#   为什么必须写出来而不是"留白"：站点规则要求音乐种带专辑封面（乌托邦 rules.php
+#   「必须包含专辑封面和曲目列表」），而封面字段留空时站点会退回"取简介第一张图"。
+#   简介里既没有图、又没有任何说明时，审核/下载者只会看到"漏了"，看不出这是
+#   "源站和本地确实都没有图"。写一行字把**已尽力但仍无图**这件事显式化。
+NO_COVER_NOTE = "封面：源站和本地均无封面"
+
+
+def _extract_clean_tid(raw_tid: str) -> str:
+    """从可能带前缀（opencd#205464）、URL（id=205464）或纯数字中提取干净数字 TID。"""
+    s = str(raw_tid or "").strip()
+    if s.isdigit():
+        return s
+    m = re.search(r"(?:details\.php\?id=|#|\b)(\d{3,8})\b", s)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def resolve_canonical_source(
+    descr: str,
+    default_site: str,
+    default_tid: str,
+    title: str = ""
+) -> Tuple[str, str, str]:
+    """从源种简介与标题中识别真实外源头声明（穿透中继站套娃，杜绝中继站层层转述）。
+
+    识别对象：JPopsuki (JPS)、Redacted (RED)、Orpheus (OPS)、OpenCD 等。
+    支持：
+    1. 提取外站原始直链（如 http://jpopsuki.eu/torrents.php?id=442682 或 redacted 链接）；
+    2. 若有直链，拼装为：转自X: {直链}，感谢原制作者发布。
+    3. 若无直链，标准化输出：转自X，感谢原制作者发布。
+    4. 兼顾乌托邦等中继站简介中的“JPopSuki 链接：”、“RED链接：”及标题后缀（- JPopsuki / - Redacted）。
+
+    返回: (canonical_site, canonical_tid, custom_source_link)
+    """
+    descr_clean = (descr or "").strip()
+    # 扫描正文前 3000 字符与标题
+    txt = descr_clean[:3000]
+    full_text = f"{title}\n{txt}"
+
+    # 1. 识别 JPopsuki (JPS)
+    m_jps_link = re.search(r"https?://(?:www\.)?jpopsuki\.(?:eu|tv)/[^\s\[\]\(\)\"\'<>]+", descr_clean, re.I)
+    has_jps_feature = bool(
+        m_jps_link or
+        re.search(r"(?:转自\s*(?:JPopsuki|JPS)|JPopSuki\s*链接|JPS\s*链接)\b", full_text, re.I) or
+        re.search(r"[-_]\s*(?:JPopsuki|JPS)\b", title, re.I)
+    )
+    if has_jps_feature:
+        tid = ""
+        if m_jps_link:
+            jps_url = m_jps_link.group(0).rstrip(".,;")
+            m_id = re.search(r"[?&]id=(\d+)", jps_url)
+            if m_id:
+                tid = m_id.group(1)
+            return "jpopsuki", tid, f"转自JPopsuki: {jps_url}，感谢原制作者发布。"
+        return "jpopsuki", "", "转自JPopsuki，感谢原制作者发布。"
+
+    # 2. 识别 Redacted (RED)
+    m_red_link = re.search(r"https?://(?:www\.)?redacted\.sh/[^\s\[\]\(\)\"\'<>]+", descr_clean, re.I)
+    has_red_feature = bool(
+        m_red_link or
+        re.search(r"(?:转自\s*(?:Redacted|RED)|RED\s*链接|Redacted\s*链接)\b", full_text, re.I) or
+        re.search(r"[-_]\s*(?:Redacted|RED)\b", title, re.I)
+    )
+    if has_red_feature:
+        tid = ""
+        if m_red_link:
+            red_url = m_red_link.group(0).rstrip(".,;")
+            m_id = re.search(r"[?&]id=(\d+)", red_url)
+            if m_id:
+                tid = m_id.group(1)
+            return "redacted", tid, f"转自Redacted: {red_url}，感谢原制作者发布。"
+        return "redacted", "", "转自Redacted，感谢原制作者发布。"
+
+    # 3. 识别 Orpheus (OPS)
+    m_ops_link = re.search(r"https?://(?:www\.)?orpheus\.network/[^\s\[\]\(\)\"\'<>]+", descr_clean, re.I)
+    has_ops_feature = bool(
+        m_ops_link or
+        re.search(r"(?:转自\s*(?:Orpheus|OPS)|OPS\s*链接|Orpheus\s*链接)\b", full_text, re.I) or
+        re.search(r"[-_]\s*(?:Orpheus|OPS)\b", title, re.I)
+    )
+    if has_ops_feature:
+        tid = ""
+        if m_ops_link:
+            ops_url = m_ops_link.group(0).rstrip(".,;")
+            m_id = re.search(r"[?&]id=(\d+)", ops_url)
+            if m_id:
+                tid = m_id.group(1)
+            return "orpheus", tid, f"转自Orpheus: {ops_url}，感谢原制作者发布。"
+        return "orpheus", "", "转自Orpheus，感谢原制作者发布。"
+
+    # 4. 识别 OpenCD
+    m_ocd_link = re.search(r"https?://(?:www\.)?open\.cd/details\.php\?id=(\d+)", descr_clean, re.I)
+    if m_ocd_link:
+        return "opencd", m_ocd_link.group(1), ""
+    m_ocd = re.search(r"转自\s*OpenCD(?:[:：\s]+(?:https?://open\.cd/details\.php\?id=)?(\d+))?", txt, re.I)
+    if m_ocd:
+        if m_ocd.group(1):
+            return "opencd", m_ocd.group(1), ""
+        if (default_site or "").strip().lower() == "opencd" and default_tid:
+            return "opencd", default_tid, ""
+        # 源站非 OpenCD 且正文未提供 OpenCD TID 时，严禁嫁接其他站的 default_tid 拼假链
+        return "opencd", "", "转自OpenCD，感谢原制作者发布。"
+
+    return default_site, default_tid, ""
+
+
 def build_source_link(task):
     """转载来源声明（**四站共用**同一份文案，作为简介第一块 `[quote]`）。
 
@@ -900,19 +1113,151 @@ def build_source_link(task):
       ⇒ 这两站页面上**没有**转载引用块，且不会报任何错。
       用户指出「需要转载引用块的呀」⇒ 补齐，并把文案收敛到一处，
       避免下次再加站点又漏一份。
-    ★ 优先带 OpenCD 种子 id（可点回原页）；没有 id 时退回种子名，
-      两者都没有也至少给出「转自OpenCD」，**绝不返回空**（空 = 又静默丢引用）。
+    ★ 优先带源站种子 id（可点回原页）；没有 id 时退回种子名，
+      两者都没有也至少给出「转自X」，**绝不返回空串式的引用**（空 = 又静默丢引用）。
+    ★ 多源（2026-11-21）：按 `origin_site` 生成对应站点文案；本地存量
+      （`local`）与源站不明（`unknown`）**不声明来源**，返回空串而不是谎称 OpenCD。
+
+    ★★ 2026-11-21 二次修正（用户指出乌托邦 28125 页面「引用块里只剩 `转自OpenCD: `」）：
+      `origin_tid` 有时是**40 位 infohash**（`item.origin_torrent_id` 直接来自源种
+      信息哈希），拼成 `details.php?id=<hash>` 是**打不开的假链接**，而更早的实现
+      在拼不出链接时会留下 `转自OpenCD: ` 这种**只有前缀、没有内容**的残句
+      （站点上就变成一个空引用框）。
+      ⇒ 现在只有 `tid` 是**纯数字**时才拼链接；否则退化为「转自X: 种子名」，
+        种子名也没有就只写「转自X」，**绝不产生 `转自X: ` 这种半截话**。
     """
-    tid = (task or {}).get("opencd_tid")
-    if tid:
-        return f"转自OpenCD: https://open.cd/details.php?id={tid}"
-    name = (task or {}).get("torrent_name") or (task or {}).get("formatted_title") or ""
-    return f"转自OpenCD: {name}" if name else "转自OpenCD"
+    task = task or {}
+    site = str(task.get("origin_site") or "opencd").strip().lower()
+    if site in ("local", "unknown", ""):
+        return ""
+    display, base = SOURCE_SITES.get(site, (site, ""))
+    raw_tid = str(task.get("origin_tid") or task.get("opencd_tid") or "").strip()
+    tid = _extract_clean_tid(raw_tid)
+    # ★ 只认纯数字 tid：infohash（40 位十六进制）不是详情页 id，拼出来是死链
+    if tid and base and tid.isdigit():
+        return f"转自{display}: {base}/details.php?id={tid}"
+    if site == "jpopsuki":
+        return f"转自{display}，感谢原制作者发布。"
+    name = str(task.get("torrent_name") or task.get("formatted_title") or "").strip()
+    return f"转自{display}: {name}" if name else f"转自{display}"
+
+
+def _read_log_file_text(path: str) -> str:
+    """容错读取本地 .log 抓轨日志文本（兼容 UTF-8 / UTF-16 / GB18030）。"""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return ""
+    if not raw:
+        return ""
+    for enc in ("utf-8-sig", "utf-16", "gb18030", "utf-8", "latin-1"):
+        try:
+            text = raw.decode(enc)
+            if text.strip():
+                return text.strip()
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return ""
+
+
+def _natural_sort_key(text: str):
+    return [int(p) if p.isdigit() else p.lower() for p in re.split(r"(\d+)", str(text or ""))]
+
+
+def _extract_disc_num(text: str) -> int:
+    m = re.search(r"(?:CD|Disc|碟)\s*0*(\d+)", str(text or ""), re.IGNORECASE)
+    return int(m.group(1)) if m else 0
+
+
+def _clean_web_log_noise(text: str) -> str:
+    """剔除从源站详情页抓取 log_text 时混入的网页 UI 行。"""
+    lines = []
+    for line in str(text or "").replace("\r\n", "\n").splitlines():
+        s = line.strip()
+        if s in ("代码", "⬇ 下载原始文件", "下载原始文件"):
+            continue
+        if re.match(r"^Log\s+CD\s+\d+$", s, re.IGNORECASE):
+            continue
+        if re.match(r"^.{1,160}\.log$", s, re.IGNORECASE):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def split_log_blocks(log_text: str = "", local_path: str = "") -> list:
+    """将多碟抓轨日志拆分为独立块列表，供 build_descr(logs=...) 渲染多个折叠代码。
+
+    优先扫描 local_path 下的真实 .log 文件（天然干净、无网页 UI 噪音）；
+    本地无 .log 时，自动按 EAC/XLD/CUERipper 等日志头将 log_text 切分为多碟。
+    """
+    # 1. 优先读取本地实体目录中的 .log 文件
+    if local_path and os.path.isdir(local_path):
+        log_files = []
+        for root, dirs, files in os.walk(local_path):
+            dirs[:] = [d for d in sorted(dirs) if not d.startswith((".", "@"))]
+            for fname in files:
+                if fname.lower().endswith(".log") and not fname.startswith("."):
+                    full = os.path.join(root, fname)
+                    rel = os.path.relpath(full, local_path)
+                    log_files.append((rel, fname, full))
+        if log_files:
+            log_files.sort(key=lambda x: (_extract_disc_num(x[0]) or 9999, _natural_sort_key(x[0])))
+            items = []
+            for idx, (rel, fname, full) in enumerate(log_files, 1):
+                content = _read_log_file_text(full)
+                if not content:
+                    continue
+                if len(log_files) == 1:
+                    label = "LOG"
+                else:
+                    dnum = _extract_disc_num(rel) or idx
+                    label = f"CD{dnum} LOG"
+                items.append({"label": label, "content": content, "filename": fname})
+            if items:
+                return items
+
+    # 2. 兜底：从源站抓取的 log_text 文本切分多碟
+    raw = str(log_text or "").strip()
+    if not raw:
+        return []
+
+    header_pat = re.compile(
+        r"(?=^(?:Exact Audio Copy V\d|EAC\s*抓取日志文件|X Lossless Decoder|CUERipper|dBpoweramp|Whipper|fre:ac))",
+        re.MULTILINE,
+    )
+    chunks = [c for c in header_pat.split(raw) if c and c.strip()]
+    cleaned_chunks = []
+    for c in chunks:
+        cleaned = _clean_web_log_noise(c)
+        if cleaned:
+            cleaned_chunks.append(cleaned)
+
+    if not cleaned_chunks:
+        cleaned = _clean_web_log_noise(raw)
+        return [{"label": "LOG", "content": cleaned}] if cleaned else []
+
+    if len(cleaned_chunks) == 1:
+        return [{"label": "LOG", "content": cleaned_chunks[0]}]
+
+    # 多碟按前 10 行中的 CD/Disc 编号排序，确保 CD1 -> CD2 -> CD3 顺序正确
+    indexed = []
+    for idx, chunk in enumerate(cleaned_chunks, 1):
+        head = "\n".join(chunk.splitlines()[:10])
+        dnum = _extract_disc_num(head)
+        indexed.append((dnum if dnum > 0 else 9999, idx, chunk))
+    indexed.sort(key=lambda x: (x[0], x[1]))
+
+    items = []
+    for seq, (dnum, _, chunk) in enumerate(indexed, 1):
+        label = f"CD{dnum if dnum < 9999 else seq} LOG"
+        items.append({"label": label, "content": chunk})
+    return items
 
 
 def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
                 logs=None, extra_note=None, opencd_descr="", site=None,
-                source_link=""):
+                source_link="", no_cover_note=NO_COVER_NOTE):
     """
     生成种子页面 BBCode 简介。
 
@@ -976,10 +1321,15 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
     整段抓轨日志撑爆。多 CD 时每碟一块：
         logs = [{"label":"CD1 LOG","content":..}, {"label":"CD2 LOG","content":..}]
     单 CD 传 log_content/log_filename 即可（内部包成一条 label="LOG"）。
+    ★ 乌托邦 2026-11 改版后不走这套：站点自行从种子里解析 .log 并在详情页
+      渲染原生「抓轨 Log（共 N 碟）」，而 [spoiler=CDn LOG][code]…[/code][/spoiler]
+      会退化成只有标题的空折叠壳（实测 51 个多碟种全部中招）。
+      ⇒ musopia 与 crabpt 一样整块 ④ 跳过，日志改由 logtexts[] 表单字段提交。
     """
     # ★ 蟹黄堡：**整块 ④ 都不要**（连 `[spoiler]` 壳带正文一起）。
     #   判据见上面 `site` 参数的 docstring（三条分别断言）。
-    _skip_logs = (site == "crabpt")
+    # ★ 乌托邦同理：改版后 [spoiler] 只剩空壳，正文要从 descr 里退出。
+    _skip_logs = site in ("crabpt", "musopia")
 
     blocks = []
 
@@ -997,6 +1347,11 @@ def build_descr(cover_url="", tracklist="", log_content="", log_filename="",
     # ① 封面图 —— **我们的**图链（皇后正文里的图已在解析层剥掉）
     if cover_url and str(cover_url).strip():
         blocks.append(f"[center][img]{cover_url.strip()}[/img][/center]")
+    elif no_cover_note and str(no_cover_note).strip():
+        # ★ 无封面也要留痕（2026-11-21 用户要求）：站点允许"封面字段留空 ⇒ 取简介首图"，
+        #   简介里一张图都没有时，用一行说明把「源站和本地都没图」讲清楚。
+        #   位置与封面块一致（转载引用之后、正文之前），不改变其余块的顺序。
+        blocks.append(str(no_cover_note).strip())
 
     # ② 皇后简介正文 —— 原文贴入（猫站经 markdown_to_bbcode 清洗保真）
     if opencd_descr and str(opencd_descr).strip():
@@ -1461,13 +1816,17 @@ def _check():
 
     _mus = build_descr(cover_url=_COVER, tracklist=_TL, log_content=_LOG,
                        site="musopia")
-    chk("⑨d 乌托邦：日志折叠块**仍在**（★ 改动没有误伤老站）",
-        "[spoiler=LOG][code]" in _mus)
+    chk("⑨d 乌托邦：日志折叠块**不存在**（改版后 spoiler 只剩空壳）",
+        "[spoiler=" not in _mus and "[code]" not in _mus,
+        f"实得 spoiler={'[spoiler=' in _mus} code={'[code]' in _mus}")
+    chk("⑨d2 乌托邦：日志**正文**也没漏进来，封面/曲目仍在",
+        "EAC log" not in _mus and f"[img]{_COVER}[/img]" in _mus
+        and "曲目列表：" in _mus)
     _none = build_descr(cover_url=_COVER, tracklist=_TL, log_content=_LOG)
-    chk("⑨e `site=None`（没声明）与 `site='musopia'` **逐字节相同**"
-        " ⇒ 默认值是中性的、老调用点行为不变",
-        _none == _mus,
-        "★ 若不同，说明默认值改变了既有行为（那会静默改掉 254 条已上站的页面）")
+    chk("⑨e `site=None`（没声明）仍保留折叠块 ⇒ 默认值是中性的、"
+        "老调用点（非乌托邦站点）行为不变",
+        "[spoiler=LOG][code]" in _none,
+        "★ 若失败，说明默认值被改成了'去日志'，会静默改掉其它站的页面")
     # ★ 阴性对照②：**未知站点名**不许被当成"蟹黄堡"
     _unk = build_descr(cover_url=_COVER, tracklist=_TL, log_content=_LOG,
                        site="musopiaa")
@@ -1480,6 +1839,12 @@ def _check():
     chk("⑨g 蟹黄堡：多碟 `logs=[...]` 那条路也关掉了",
         "[spoiler=" not in _multi and "EAC log" not in _multi,
         f"实得 {_multi!r}")
+    _multi_mus = build_descr(logs=[{"label": "CD1 LOG", "content": "EAC log\nx"},
+                                   {"label": "CD2 LOG", "content": "EAC log\ny"}],
+                             site="musopia")
+    chk("⑨g2 乌托邦：多碟 `logs=[...]` 同样不再写进 descr",
+        "[spoiler=" not in _multi_mus and "EAC log" not in _multi_mus,
+        f"实得 {_multi_mus!r}")
 
     # ══════════════════════════════════════════════════════════════════
     # ⑨h / ⑨i 猫站（PTerClub）：必须用 [hide=Log] 且支持 source_link
@@ -1544,6 +1909,43 @@ def _check():
                         site="crabpt", source_link="转自OpenCD: https://open.cd/details.php?id=12345")
     chk("⑪d 蟹黄堡：引用块置顶且不含 LOG（原有站点差异保留）",
         _crab.startswith("[quote]") and "[spoiler=LOG]" not in _crab)
+
+    # ══════════════════════════════════════════════════════════════════
+    # ⑫ 无封面说明 + 来源链接合法性（2026-11-21）
+    #   起因：乌托邦 28125 页面上「引用块里只剩 `转自OpenCD: `」，且整页无封面。
+    #   ★ 两条都要有**阴性对照**：有图时不许出现说明；数字 tid 时必须保留链接。
+    # ══════════════════════════════════════════════════════════════════
+    print("\n⑫ 无封面说明 & 来源链接合法性")
+    _nocover = build_descr(cover_url="", tracklist=_TL, site="musopia",
+                           source_link="转自OpenCD: Album")
+    chk("⑫a 无封面 ⇒ 简介里有「源站和本地均无封面」",
+        NO_COVER_NOTE in _nocover, f"实得 {_nocover[:60]!r}")
+    chk("⑫b 无封面说明排在转载引用之后、曲目前面",
+        _nocover.index("转自OpenCD") < _nocover.index(NO_COVER_NOTE)
+        < _nocover.index("曲目列表"))
+    _withcover = build_descr(cover_url=_COVER, tracklist=_TL, site="musopia")
+    chk("⑫c 阴性对照：有封面时**不许**出现无封面说明",
+        NO_COVER_NOTE not in _withcover)
+    chk("⑫d 独立封面字段的站点（opencd）不写说明",
+        NO_COVER_NOTE not in build_descr(cover_url="", tracklist=_TL,
+                                        site="opencd", no_cover_note=""))
+
+    _hash = "5d32e14e5ecfeb7740c349bec37cc8d49c2c7479"
+    _bad = build_source_link({"origin_site": "opencd", "origin_tid": _hash,
+                              "torrent_name": ""})
+    chk("⑫e infohash 当 tid ⇒ 不拼假链接", "details.php" not in _bad, f"实得 {_bad!r}")
+    chk("⑫f infohash 当 tid ⇒ 不留 `转自X: ` 半截话（结尾不是冒号空格）",
+        not _bad.rstrip().endswith(":"), f"实得 {_bad!r}")
+    _good = build_source_link({"origin_site": "opencd", "origin_tid": "88151",
+                               "torrent_name": "X"})
+    chk("⑫g 纯数字 tid ⇒ 保留可点回原页的链接",
+        _good == "转自OpenCD: https://open.cd/details.php?id=88151", f"实得 {_good!r}")
+    chk("⑫h 本地来源（local）⇒ 不声明来源", build_source_link(
+        {"origin_site": "local", "origin_tid": "88151"}) == "")
+    _named = build_source_link({"origin_site": "opencd", "origin_tid": _hash,
+                                "torrent_name": "Some Album"})
+    chk("⑫i tid 非法时退回种子名（不丢来源声明）",
+        _named == "转自OpenCD: Some Album", f"实得 {_named!r}")
 
     return ok, fails
 

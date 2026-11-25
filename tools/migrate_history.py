@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from musichub.core.models import CanonicalMusicItem
 from musichub.metadata.audio_inspector import AudioInspector
+from musichub.routing.graph import SITE_TID_COLUMNS, digit_tid
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("MigrateHistory")
@@ -65,6 +66,13 @@ def migrate_history(source_db_path: str, target_db_path: str) -> int:
     """)
     dst_conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_fingerprint ON site_publish_graph(content_fingerprint);")
     dst_conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_stream ON site_publish_graph(stream_fingerprint);")
+
+    # 每站点独立 tid 列（`origin_torrent_id` 原定义保留，不改写）
+    existing_cols = {r[1] for r in dst_conn.execute("PRAGMA table_info(site_publish_graph)")}
+    for site, col in SITE_TID_COLUMNS.items():
+        if col not in existing_cols:
+            dst_conn.execute(f"ALTER TABLE site_publish_graph ADD COLUMN {col} TEXT")
+    dst_conn.commit()
 
     # 查询所有已发布的记录
     query = """
@@ -120,18 +128,31 @@ def migrate_history(source_db_path: str, target_db_path: str) -> int:
         content_fp = item.calculate_content_fingerprint()
 
         try:
-            dst_conn.execute("""
-            INSERT OR REPLACE INTO site_publish_graph
-            (content_fingerprint, stream_fingerprint, origin_site, origin_torrent_id, target_site, target_torrent_id)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """, (
+            cols = [
+                "content_fingerprint", "stream_fingerprint", "origin_site",
+                "origin_torrent_id", "target_site", "target_torrent_id",
+            ]
+            vals = [
                 content_fp,
                 r["b_info_hash"] or "",  # 使用 b_info_hash 作为物理特征关联
                 "opencd",
                 r["opencd_tid"] or "",
                 target_site,
-                r["target_torrent_id"] or ""
-            ))
+                r["target_torrent_id"] or "",
+            ]
+            src_tid = digit_tid(r["opencd_tid"])
+            if src_tid:
+                cols.append(SITE_TID_COLUMNS["opencd"])
+                vals.append(src_tid)
+            dst_tid = digit_tid(r["target_torrent_id"])
+            if target_site in SITE_TID_COLUMNS and dst_tid:
+                cols.append(SITE_TID_COLUMNS[target_site])
+                vals.append(dst_tid)
+            dst_conn.execute(
+                f"INSERT OR REPLACE INTO site_publish_graph ({', '.join(cols)}) "
+                f"VALUES ({', '.join('?' for _ in cols)})",
+                vals,
+            )
             migrated_count += 1
         except Exception as e:
             logger.warning(f"Failed to insert record for {name_for_meta}: {str(e)}")

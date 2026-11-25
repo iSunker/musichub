@@ -16,6 +16,13 @@ class BaseSiteAdapter(ABC):
         """查重契约：在目标站点搜索，若存在同规格返回 (True, reason)"""
         pass
 
+    def check_exists_detail(self, item: CanonicalMusicItem) -> Tuple[bool, str, Optional[str]]:
+        """查重并返回详细信息契约：返回 (exists, reason, matched_tid)
+        默认回退调用 check_exists(item)，以保持向下兼容。
+        """
+        exists, why = self.check_exists(item)
+        return exists, why, None
+
     @abstractmethod
     def format_title(self, item: CanonicalMusicItem) -> Tuple[str, str]:
         """标题与副标题格式化契约：生成符合该站规范的 (main_title, sub_title)"""

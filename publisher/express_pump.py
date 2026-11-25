@@ -22,12 +22,13 @@ from typing import List, Dict, Tuple, Optional, Any
 
 from musichub.core.models import CanonicalMusicItem
 from musichub.metadata.audio_inspector import AudioInspector
-from musichub.routing.graph import RoutingGraphManager
+from musichub.routing.graph import RoutingGraphManager, torrent_infohash, digit_tid
 from musichub.publisher.gateway import DeduplicationGateway
 from musichub.publisher.engine import PublisherEngine
 from musichub.publisher.delayed_queue import DelayedReaddQueue
 from musichub.core.qb_client import QBClient
 from musichub.adapters.sites import TangPTAdapter, MuXueGeAdapter
+from musichub.adapters.nexusphp_base import is_duplicate_name_result, extract_existing_tid
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,10 +50,11 @@ class ExpressPump:
     ):
         self.db_path = db_path
         self.pools = pools or [
-            "/volume1/video/download/music/music3",
+            f"/volume1/video/download/music/music_pool_{i}" for i in range(1, 9)
+        ] + [
             "/volume1/video/download/music/music1",
             "/volume1/video/download/music/music2",
-            "/volume1/video/download/music/music_pool_1",
+            "/volume1/video/download/music/music3",
         ]
         self.graph_mgr = RoutingGraphManager(db_path=self.db_path)
         self.publish_qb = QBClient("192.168.0.7", 3010)
@@ -112,19 +114,41 @@ class ExpressPump:
                 medium = meta.get("medium") or "CD"
                 standard = meta.get("standard") or "Lossless"
 
+                from musichub.publisher.origin_resolver import resolve_stock_origin_detail
+                o_meta = resolve_stock_origin_detail(
+                    folder_name=e,
+                    album=album,
+                    artist=artist,
+                    full_path=full_p,
+                    conn=getattr(self.graph_mgr, "_conn", None),
+                    db_path=self.db_path,
+                )
+
                 item = CanonicalMusicItem(
                     title=e,
+                    origin_title=o_meta["origin_name"],
                     album=album,
                     artist=artist,
                     year=year,
                     format=fmt,
                     medium=medium,
                     standard=standard,
-                    origin_site="opencd",
-                    origin_torrent_id=e,
+                    origin_site=o_meta["origin_site"],
+                    origin_torrent_id=o_meta["origin_tid"],
+                    origin_info_hash=o_meta["origin_hash"],
+                    cover_url=o_meta["cover_url"],
+                    description=o_meta["descr"],
+                    tags=o_meta.get("tags") or [],
+                    genre=o_meta.get("genre") or [],
                     local_path=full_p,
                     tracks=tracks,
                 )
+
+                # 0. 源种准入（本地存量按 local 源放行，但受站点矩阵约束）
+                from musichub.publisher.gateway import evaluate_source_policy
+                policy_ok, policy_reason = evaluate_source_policy(self.graph_mgr, item, target_site, adapter)
+                if not policy_ok:
+                    continue
 
                 # 1. 本地图查重
                 if self.graph_mgr.is_loop_or_already_published(item, target_site):
@@ -141,9 +165,24 @@ class ExpressPump:
                     continue
 
                 # 4. 站点在线搜索查重
-                exists, exists_why = adapter.check_exists(item)
+                exists, exists_why, matched_tid = adapter.check_exists_detail(item)
                 if exists:
-                    self.graph_mgr.record_publish(item, target_site, target_torrent_id="EXISTING")
+                    clean_m_tid = digit_tid(matched_tid or "")
+                    self.graph_mgr.record_publish(
+                        item, target_site,
+                        target_torrent_id=clean_m_tid,
+                        publish_status="EXISTING",
+                        status="EXISTING",
+                        note=exists_why
+                    )
+                    self.graph_mgr.record_publish_attempt(
+                        album_name=album,
+                        target_site=target_site,
+                        result="SKIPPED_EXISTING",
+                        reason=exists_why,
+                        target_torrent_id=clean_m_tid,
+                        origin_path=full_p,
+                    )
                     continue
 
                 return {
@@ -194,18 +233,45 @@ class ExpressPump:
                 ok, msg, torrent_path = self.engine.create_torrent_safe(item, site, tracker_url=tracker_url)
                 if not ok or not torrent_path:
                     logger.error(f"Failed to create torrent for {site}: {msg}")
+                    self.graph_mgr.record_publish_attempt(
+                        album_name=album_name,
+                        target_site=site,
+                        result="FAILED",
+                        reason=f"制种失败: {msg}",
+                        origin_path=cand["local_path"],
+                    )
                     continue
 
                 pub_ok, tid, pub_torrent_bytes = adapter.publish(item, torrent_path)
                 if pub_ok and tid:
                     logger.info(f"✅ Successfully published '{album_name}' to {site}! TID: {tid}")
-                    self.graph_mgr.record_publish(item, site, target_torrent_id=str(tid))
-                    self.today_counts[site] += 1
-
                     # 读取种子字节，进入延迟回加队列（450s 保护，防偷跑）
                     with open(torrent_path, "rb") as tf:
                         local_bytes = tf.read()
                     readd_bytes = pub_torrent_bytes if pub_torrent_bytes else local_bytes
+                    # 来龙去脉台账：源种 → 目标站 tid → B 种 hash → 交棒实例
+                    self.graph_mgr.record_publish(
+                        item,
+                        site,
+                        target_torrent_id=str(tid),
+                        b_hash=torrent_infohash(readd_bytes),
+                        target_url=f"{getattr(adapter, 'base_url', '')}/details.php?id={tid}",
+                        qb_instance="publish",
+                        qb_port=3010,
+                        save_path="/downloads",
+                        status="PUBLISHED",
+                        publish_status="PUBLISHED",
+                        note=album_name,
+                    )
+                    self.graph_mgr.record_publish_attempt(
+                        album_name=album_name,
+                        target_site=site,
+                        result="PUBLISHED",
+                        target_torrent_id=str(tid),
+                        origin_path=cand["local_path"],
+                    )
+                    self.today_counts[site] += 1
+
                     self.delayed_queue.add_task(
                         site_name=site,
                         torrent_id=str(tid),
@@ -214,9 +280,42 @@ class ExpressPump:
                         delay_seconds=450
                     )
                 else:
-                    logger.error(f"Failed to publish to {site}: {tid}")
+                    if is_duplicate_name_result(tid):
+                        ex_tid = extract_existing_tid(tid)
+                        logger.info(f"'{album_name}' 在 {site} 已有同种/同名条目 (TID: {ex_tid or 'unknown'})，登记为 EXISTING 并跳过")
+                        self.graph_mgr.record_publish(
+                            item, site,
+                            target_torrent_id=ex_tid,
+                            publish_status="EXISTING",
+                            status="EXISTING",
+                            note=str(tid)
+                        )
+                        self.graph_mgr.record_publish_attempt(
+                            album_name=album_name,
+                            target_site=site,
+                            result="SKIPPED_EXISTING",
+                            reason=str(tid),
+                            target_torrent_id=ex_tid,
+                            origin_path=cand["local_path"],
+                        )
+                    else:
+                        logger.error(f"Failed to publish to {site}: {tid}")
+                        self.graph_mgr.record_publish_attempt(
+                            album_name=album_name,
+                            target_site=site,
+                            result="REJECTED",
+                            reason=str(tid),
+                            origin_path=cand["local_path"],
+                        )
             except Exception as e:
                 logger.exception(f"Unexpected error publishing {album_name} to {site}: {e}")
+                self.graph_mgr.record_publish_attempt(
+                    album_name=album_name,
+                    target_site=site,
+                    result="FAILED",
+                    reason=f"异常: {e}",
+                    origin_path=cand["local_path"],
+                )
 
             interval = self.get_sleep_interval()
             logger.info(f"Progress: MuXueGe {self.today_counts['muxuege']}/{self.TARGET_QUOTA['muxuege']}, TangPT {self.today_counts['tangpt']}/{self.TARGET_QUOTA['tangpt']}")

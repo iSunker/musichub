@@ -21,6 +21,7 @@ import re
 from typing import Dict, Any, Tuple
 from musichub.adapters.nexusphp_base import NexusPHPBaseAdapter
 from musichub.core.models import CanonicalMusicItem
+from musichub.adapters.tag_matcher import TagMatcher
 
 
 class HDKylinAdapter(NexusPHPBaseAdapter):
@@ -112,4 +113,5 @@ class HDKylinAdapter(NexusPHPBaseAdapter):
             "descr": self.build_body(item),
             "uplver": "yes",                       # 匿名发布
         }
+        TagMatcher.inject_form_tags("hdkylin", item, fields)
         return fields

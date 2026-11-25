@@ -12,6 +12,7 @@
 from typing import Dict, Any, Tuple
 from musichub.adapters.nexusphp_base import NexusPHPBaseAdapter
 from musichub.core.models import CanonicalMusicItem
+from musichub.adapters.tag_matcher import TagMatcher
 
 
 class CrabPTAdapter(NexusPHPBaseAdapter):
@@ -85,4 +86,5 @@ class CrabPTAdapter(NexusPHPBaseAdapter):
             "descr": self.build_body(item),
             "uplver": "yes",                                 # 匿名发布
         }
+        TagMatcher.inject_form_tags("crabpt", item, fields)
         return fields

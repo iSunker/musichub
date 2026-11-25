@@ -35,10 +35,11 @@ class RSSWatcher:
         """从 Vertex 数据库（只读模式）反查种子的来源信息（源站、原始链接、抓取分类）"""
         target_db = self.vertex_db_path
         if not os.path.exists(target_db):
-            # 兼容 Linux 容器内挂载点
-            linux_path = "/vertex/sql.db"
-            if os.path.exists(linux_path):
-                target_db = linux_path
+            # 兼容 Linux 容器内挂载点（compose 实际挂在 /app/vertex/sql.db）
+            for linux_path in ("/app/vertex/sql.db", "/vertex/sql.db"):
+                if os.path.exists(linux_path):
+                    target_db = linux_path
+                    break
             else:
                 return None
 
@@ -80,9 +81,11 @@ class RSSWatcher:
 
             # 仅提取 100% 完成且处于做种/暂停状态、未处理过的种子
             if progress >= 1.0 and "musichub_processed" not in tags:
-                # 反查 Vertex 元数据
+                from musichub.collector.source_detail import detect_source_site
+                # 反查 Vertex 元数据；源站按 tracker 域名识别（8 站通用，不再只认 OpenCD）
                 v_meta = self.get_vertex_origin_metadata(thash)
-                origin_site = "OpenCD" if v_meta and "open.cd" in (v_meta.get("tracker") or "") else "VertexRSS"
+                tracker_text = (v_meta or {}).get("tracker") or t.get("tracker") or ""
+                origin_site = detect_source_site(tracker_text) or "unknown"
 
                 ready_tasks.append({
                     "hash": thash,

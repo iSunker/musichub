@@ -31,7 +31,7 @@ from typing import List, Dict, Tuple, Optional, Any
 
 from musichub.core.models import CanonicalMusicItem
 from musichub.metadata.audio_inspector import AudioInspector
-from musichub.routing.graph import RoutingGraphManager, torrent_infohash
+from musichub.routing.graph import RoutingGraphManager, torrent_infohash, digit_tid
 from musichub.publisher.gateway import DeduplicationGateway
 from musichub.publisher.engine import PublisherEngine
 from musichub.publisher.delayed_queue import DelayedReaddQueue
@@ -40,19 +40,21 @@ from musichub.adapters.sites import (
     MusopiaAdapter, CrabPTAdapter, PTerClubAdapter,
     XingwanAdapter, HDKylinAdapter, TangPTAdapter, MuXueGeAdapter,
     LemonHDAdapter, UHDDolbyAdapter, HDTimeAdapter, UBitsAdapter,
-    SoulVoiceAdapter
+    SoulVoiceAdapter, NanyangPTAdapter
 )
-from musichub.adapters.nexusphp_base import is_duplicate_name_result
+from musichub.adapters.nexusphp_base import is_duplicate_name_result, extract_existing_tid
 
 logger = logging.getLogger("StockMatrixPump")
 
 
 class StockMatrixPump:
     TARGET_SITES_PRIORITY = [
+        "nanyangpt",
         "soulvoice",
         "ubits",
         "lemonhd",
         "hdtime",
+        "uhddolby",
         "muxuege",
         "tangpt",
         "pterclub",
@@ -84,6 +86,7 @@ class StockMatrixPump:
         self.delayed_queue = delayed_queue or DelayedReaddQueue(self.db_path, self.engine)
 
         self.adapters_map = {
+            "nanyangpt": NanyangPTAdapter(),
             "soulvoice": SoulVoiceAdapter(),
             "ubits": UBitsAdapter(),
             "lemonhd": LemonHDAdapter(),
@@ -100,10 +103,10 @@ class StockMatrixPump:
         self.gateway = DeduplicationGateway(adapters=list(self.adapters_map.values()), graph_mgr=self.graph_mgr)
         self.inspector = AudioInspector()
 
-    def _resolve_stock_origin(self, folder_name: str, album: str, artist: str, full_path: str) -> Tuple[str, str, str, str, str, str]:
-        """为音乐池本地目录反查真实源站、源 TID、源 Hash 与元数据，避免硬编码 local 丢失来源声明。"""
-        from musichub.publisher.origin_resolver import resolve_stock_origin
-        return resolve_stock_origin(
+    def _resolve_stock_origin(self, folder_name: str, album: str, artist: str, full_path: str) -> Dict[str, Any]:
+        """为音乐池本地目录反查真实源站、源 TID、源 Hash 与元数据（含标签与流派）。"""
+        from musichub.publisher.origin_resolver import resolve_stock_origin_detail
+        return resolve_stock_origin_detail(
             folder_name=folder_name,
             album=album,
             artist=artist,
@@ -151,22 +154,24 @@ class StockMatrixPump:
                 medium = meta.get("medium") or "CD"
                 standard = meta.get("standard") or "Lossless"
 
-                o_site, o_tid, o_hash, o_cover, o_descr, o_name = self._resolve_stock_origin(e, album, artist, full_p)
+                o_meta = self._resolve_stock_origin(e, album, artist, full_p)
 
                 item = CanonicalMusicItem(
                     title=e,
-                    origin_title=o_name,
+                    origin_title=o_meta["origin_name"],
                     album=album,
                     artist=artist,
                     year=year,
                     format=fmt,
                     medium=medium,
                     standard=standard,
-                    origin_site=o_site,
-                    origin_torrent_id=o_tid,
-                    origin_info_hash=o_hash,
-                    cover_url=o_cover,
-                    description=o_descr,
+                    origin_site=o_meta["origin_site"],
+                    origin_torrent_id=o_meta["origin_tid"],
+                    origin_info_hash=o_meta["origin_hash"],
+                    cover_url=o_meta["cover_url"],
+                    description=o_meta["descr"],
+                    tags=o_meta.get("tags") or [],
+                    genre=o_meta.get("genre") or [],
                     local_path=full_p,
                     tracks=tracks,
                 )
@@ -192,15 +197,22 @@ class StockMatrixPump:
                     continue
 
                 # 4. 第四层：站点在线搜索查重
-                exists, exists_why = adapter.check_exists(item)
+                exists, exists_why, matched_tid = adapter.check_exists_detail(item)
                 if exists:
-                    self.graph_mgr.record_publish(item, target_site, target_torrent_id="EXISTING")
+                    clean_m_tid = digit_tid(matched_tid or "")
+                    self.graph_mgr.record_publish(
+                        item, target_site,
+                        target_torrent_id=clean_m_tid,
+                        publish_status="EXISTING",
+                        status="EXISTING",
+                        note=exists_why
+                    )
                     self.graph_mgr.record_publish_attempt(
                         album_name=album,
                         target_site=target_site,
                         result="SKIPPED_EXISTING",
                         reason=exists_why,
-                        target_torrent_id="EXISTING",
+                        target_torrent_id=clean_m_tid,
                         origin_path=full_p,
                     )
                     continue
@@ -282,6 +294,7 @@ class StockMatrixPump:
                         qb_port=3010,
                         save_path="/downloads",
                         status="PUBLISHED",
+                        publish_status="PUBLISHED",
                         note=album_name,
                     )
                     self.graph_mgr.record_publish_attempt(
@@ -304,16 +317,21 @@ class StockMatrixPump:
                 else:
                     if is_duplicate_name_result(tid):
                         # 站点已有同 infohash / 同 info.name 条目：按「已在站」登记，避免每轮重复投喂
-                        logger.info(f"'{album_name}' 在 {site} 已有同种/同名条目，登记为 EXISTING 并跳过")
+                        ex_tid = extract_existing_tid(tid)
+                        logger.info(f"'{album_name}' 在 {site} 已有同种/同名条目 (TID: {ex_tid or 'unknown'})，登记为 EXISTING 并跳过")
                         self.graph_mgr.record_publish(
-                            item, site, target_torrent_id="EXISTING", status="EXISTING", note=str(tid)
+                            item, site,
+                            target_torrent_id=ex_tid,
+                            publish_status="EXISTING",
+                            status="EXISTING",
+                            note=str(tid)
                         )
                         self.graph_mgr.record_publish_attempt(
                             album_name=album_name,
                             target_site=site,
                             result="SKIPPED_EXISTING",
                             reason=str(tid),
-                            target_torrent_id="EXISTING",
+                            target_torrent_id=ex_tid,
                             origin_path=cand["local_path"],
                         )
                     else:

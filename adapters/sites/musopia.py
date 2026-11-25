@@ -9,9 +9,33 @@
 5. 标签体系 tags[4][]: 必须严格过滤转发黑名单（禁转、首发、友站标记等）
 """
 
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, List, Tuple
+import re
+
 from musichub.adapters.nexusphp_base import NexusPHPBaseAdapter
 from musichub.core.models import CanonicalMusicItem
+from musichub.adapters.tag_matcher import TagMatcher
+
+# 多碟日志每碟都以 "Exact Audio Copy ..." 开头（单碟内还会出现 "EAC 抓取日志文件"
+# 一行，所以只能用前者当切分点，否则一张 CD 会被劈成两段）
+_LOG_HEAD_RE = re.compile(r"(?m)^Exact Audio Copy")
+
+
+def split_log_texts(text: str) -> List[str]:
+    """把一段（可能含多张 CD 的）抓轨日志切成多段，供 logtexts[] 多值提交"""
+    if not text or not text.strip():
+        return []
+    t = text.strip()
+    heads = [m.start() for m in _LOG_HEAD_RE.finditer(t)]
+    if len(heads) <= 1:
+        return [t]
+    parts = []
+    for i, start in enumerate(heads):
+        end = heads[i + 1] if i + 1 < len(heads) else len(t)
+        seg = t[start:end].strip()
+        if seg:
+            parts.append(seg)
+    return parts or [t]
 
 
 class MusopiaAdapter(NexusPHPBaseAdapter):
@@ -60,6 +84,10 @@ class MusopiaAdapter(NexusPHPBaseAdapter):
             return "6"
         return "7"
 
+    def _detect_tags(self, item: CanonicalMusicItem) -> List[str]:
+        """乌托邦标签体系 (tags[4][]): 委托 TagMatcher 统一匹配与防伪过滤"""
+        return TagMatcher.match_tags_for_site("musopia", item)
+
     def build_form_fields(self, item: CanonicalMusicItem) -> Dict[str, Any]:
         main_title, sub_title = self.format_title(item)
 
@@ -75,8 +103,15 @@ class MusopiaAdapter(NexusPHPBaseAdapter):
             "uplver": "yes",                                    # 匿名发布
             "custom_fields[4][1]": (item.artist or "").strip(),
             "custom_fields[4][2]": (item.year or "").strip(),
-            "custom_fields[4][3]": "",                          # 抓轨日志
+            "custom_fields[4][3]": "",                          # 旧版日志字段（改版后由 logtexts[] 接管）
             "custom_fields[4][4]": "",                          # 唱片厂牌
             "custom_fields[4][5]": "",                          # 抓轨日志得分
         }
+        # 标签勾选体系 (tags[4][])
+        TagMatcher.inject_form_tags("musopia", item, fields)
+
+        # 改版后的专用日志框：多碟按序提交多条 logtexts[]，不再写进 descr
+        logs = split_log_texts(getattr(item, "log_text", "") or "")
+        if logs:
+            fields["logtexts[]"] = logs
         return fields

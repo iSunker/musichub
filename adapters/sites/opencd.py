@@ -23,6 +23,12 @@ logger = logging.getLogger("OpenCDAdapter")
 
 
 class OpenCDAdapter(NexusPHPBaseAdapter):
+    # 皇后要求 artist/album/4 位年份/曲目齐全 ⇒ 源种元数据未补齐时暂缓，不降级发
+    metadata_strict = True
+    # OpenCD 发布页有独立的 `cover` 字段（见 build_form_fields，不走简介 [img]），
+    # 所以简介里**不写**「无封面」说明，避免与封面字段自相矛盾。
+    has_cover_field = True
+
     def __init__(self, cookie_client=None):
         super().__init__(
             site_name="OpenCD",

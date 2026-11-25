@@ -11,6 +11,7 @@
 from typing import Dict, Any, Tuple, Optional
 from musichub.adapters.nexusphp_base import NexusPHPBaseAdapter
 from musichub.core.models import CanonicalMusicItem
+from musichub.adapters.tag_matcher import TagMatcher
 
 
 class XingwanAdapter(NexusPHPBaseAdapter):
@@ -70,16 +71,8 @@ class XingwanAdapter(NexusPHPBaseAdapter):
         return "21"
 
     def _map_tags(self, item: CanonicalMusicItem) -> list:
-        """标签映射 tags[4][]: 基础无损音乐=17"""
-        tags = ["17"]
-        combined = f"{item.artist} {' '.join(item.genre)} {item.description}".lower()
-        if any(k in combined for k in ("国语", "mandarin", "国", "大陆")):
-            tags.append("5")
-        elif any(k in combined for k in ("粤语", "cantonese", "粤", "香港")):
-            tags.append("31")
-        elif any(k in combined for k in ("英语", "english", "英文", "欧美")):
-            tags.append("35")
-        return tags
+        """标签映射 tags[4][]: 委托 TagMatcher 匹配基础无损音乐=17及语种"""
+        return TagMatcher.match_tags_for_site("xingwan", item)
 
     def build_form_fields(self, item: CanonicalMusicItem) -> Dict[str, Any]:
         main_title, sub_title = self.format_title(item)
@@ -89,8 +82,8 @@ class XingwanAdapter(NexusPHPBaseAdapter):
             "small_descr": sub_title,
             "type": "408",                                   # 408: HQ Audio
             "medium_sel[4]": self._map_medium(item.medium),
-            "tags[4][]": self._map_tags(item),
             "descr": self.build_body(item),
             "uplver": "yes",                                 # 匿名发布
         }
+        TagMatcher.inject_form_tags("xingwan", item, fields)
         return fields

@@ -33,7 +33,9 @@ class StorageConfig:
         "/volume1/video/download/music/music_pool_3",
         "/volume1/video/download/music/music_pool_4",
         "/volume1/video/download/music/music_pool_5",
-        "/volume1/video/download/music/music3",
+        "/volume1/video/download/music/music_pool_6",
+        "/volume1/video/download/music/music_pool_7",
+        "/volume1/video/download/music/music_pool_8",
     ])
     forbidden_pools: List[str] = field(default_factory=lambda: [
         "music5",  # 铁律：music5 禁删红线
@@ -41,7 +43,7 @@ class StorageConfig:
     # 动态背压水位（GB）
     watermark_green_gb: float = 500.0
     watermark_yellow_gb: float = 300.0
-    watermark_red_gb: float = 200.0
+    watermark_red_gb: float = 50.0
 
 
 @dataclass
@@ -89,6 +91,9 @@ class MusicHubConfig:
 
         cfg.storage.download_dir = os.getenv("STORAGE_DOWNLOAD_DIR", cfg.storage.download_dir)
         cfg.storage.publish_dir = os.getenv("STORAGE_PUBLISH_DIR", cfg.storage.publish_dir)
+        cfg.storage.watermark_green_gb = float(os.getenv("WATERMARK_GREEN_GB", str(cfg.storage.watermark_green_gb)))
+        cfg.storage.watermark_yellow_gb = float(os.getenv("WATERMARK_YELLOW_GB", str(cfg.storage.watermark_yellow_gb)))
+        cfg.storage.watermark_red_gb = float(os.getenv("WATERMARK_RED_GB", str(cfg.storage.watermark_red_gb)))
         
         cfg.http_proxy = os.getenv("HTTP_PROXY", os.getenv("http_proxy", cfg.http_proxy))
         return cfg

@@ -15,6 +15,7 @@
 from typing import Dict, Any, Tuple
 from musichub.adapters.nexusphp_base import NexusPHPBaseAdapter
 from musichub.core.models import CanonicalMusicItem
+from musichub.adapters.tag_matcher import TagMatcher
 
 
 class MuXueGeAdapter(NexusPHPBaseAdapter):
@@ -71,4 +72,5 @@ class MuXueGeAdapter(NexusPHPBaseAdapter):
             "descr": self.build_body(item),
             # 无 uplver 复选框
         }
+        TagMatcher.inject_form_tags("muxuege", item, fields)
         return fields

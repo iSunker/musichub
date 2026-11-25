@@ -22,6 +22,8 @@ logger = logging.getLogger("QBClient")
 
 class QBClient:
     def __init__(self, host: str = "192.168.0.7", port: int = 3016, username: str = "", password: str = ""):
+        self.host = host
+        self.port = port
         self.base_url = f"http://{host}:{port}/api/v2"
         self.username = username
         self.password = password
@@ -48,14 +50,26 @@ class QBClient:
             logger.error(f"qB login failed on {self.base_url}: {str(e)}")
             return False
 
-    def get_torrents(self, filter_status: Optional[str] = None, tag: Optional[str] = None) -> List[Dict]:
-        """获取种子列表"""
+    def get_torrents(
+        self,
+        filter_status: Optional[str] = None,
+        tag: Optional[str] = None,
+        hashes: Optional[str] = None,
+        strict: bool = False,
+    ) -> List[Dict]:
+        """获取种子列表
+
+        strict=True 时网络/解析异常直接抛出，供 GC 等「读不到就不能删」的
+        fail-closed 场景使用；默认仍保持宽松（失败返回空列表）。
+        """
         url = f"{self.base_url}/torrents/info"
         params = {}
         if filter_status:
             params["filter"] = filter_status
         if tag:
             params["tag"] = tag
+        if hashes:
+            params["hashes"] = hashes
         if params:
             url += "?" + urllib.parse.urlencode(params)
 
@@ -65,7 +79,29 @@ class QBClient:
                 return json.loads(resp.read().decode("utf-8"))
         except Exception as e:
             logger.error(f"Failed to fetch torrents from {self.base_url}: {str(e)}")
+            if strict:
+                raise
             return []
+
+    def export_torrent(self, info_hash: str) -> Optional[bytes]:
+        """从 qB 导出种子元数据（用于存量种子的池配对回填）
+
+        qB 的 `/torrents/export` 并非所有版本都提供，失败返回 None，
+        调用方应回退到本地归档 `data/torrents/*.torrent`。
+        """
+        clean = (info_hash or "").strip()
+        if not clean:
+            return None
+        url = f"{self.base_url}/torrents/export?" + urllib.parse.urlencode({"hash": clean})
+        req = urllib.request.Request(url)
+        try:
+            with self.opener.open(req, timeout=20) as resp:
+                data = resp.read()
+                if resp.getcode() == 200 and len(data) > 50 and data[:1] == b"d":
+                    return data
+        except Exception as e:
+            logger.debug(f"Export torrent {clean} from {self.base_url} failed: {e}")
+        return None
 
     def add_torrent(
         self,
@@ -84,6 +120,9 @@ class QBClient:
         # 兼容处理入参命名
         paused = kwargs.get("paused", is_paused)
         skip_checking = kwargs.get("skip_checking", is_skip_checking)
+        auto_tmm = kwargs.get("auto_tmm")
+        if auto_tmm is not None:
+            auto_tmm = str(auto_tmm).strip().lower() in ("1", "true", "yes", "on")
 
         url = f"{self.base_url}/torrents/add"
         boundary = "----WebKitFormBoundaryMusicHub7MA4YWxkTrZu0gW"
@@ -96,7 +135,14 @@ class QBClient:
 
         add_field("savepath", save_path)
         add_field("paused", "true" if paused else "false")
+        # qB 5.x 起 `/torrents/add` 的暂停参数改名为 stopped，4.x 只认 paused。
+        # 两个都发：否则 5.2.4 会忽略 paused，按全局 AddTorrentStopped=true 落成暂停，
+        # 源种搬进池后永远不跑（2026-11-21 源种不做种的隐性成因之一）。
+        add_field("stopped", "true" if paused else "false")
         add_field("skip_checking", "true" if skip_checking else "false")
+        # 显式关闭 AutoTMM 可防止类目/默认路径覆盖我们指定的 savepath（池配对必须精确落盘）
+        if auto_tmm is not None:
+            add_field("autoTMM", "true" if auto_tmm else "false")
         if tags:
             add_field("tags", tags)
 
@@ -144,15 +190,57 @@ class QBClient:
         )
 
     def resume_torrent(self, hashes: str) -> bool:
-        """唤醒做种/下载任务"""
-        url = f"{self.base_url}/torrents/resume"
+        """唤醒做种/下载任务（兼容 qB v4.x 的 resume 与 v5.x 的 start）"""
+        # qB v5.x 推荐 /torrents/start，v4.x 使用 /torrents/resume
+        for endpoint in ["start", "resume"]:
+            url = f"{self.base_url}/torrents/{endpoint}"
+            data = urllib.parse.urlencode({"hashes": hashes}).encode("utf-8")
+            req = urllib.request.Request(url, data=data)
+            try:
+                with self.opener.open(req, timeout=10) as resp:
+                    if resp.getcode() == 200:
+                        return True
+            except Exception:
+                continue
+        logger.error(f"Failed to resume/start torrent {hashes} via API")
+        return False
+
+    def stop_torrent(self, hashes: str) -> bool:
+        """停源（qB v5 用 /stop，v4 用 /pause）；停源会向 tracker 汇报 stopped"""
+        for endpoint in ["stop", "pause"]:
+            url = f"{self.base_url}/torrents/{endpoint}"
+            data = urllib.parse.urlencode({"hashes": hashes}).encode("utf-8")
+            req = urllib.request.Request(url, data=data)
+            try:
+                with self.opener.open(req, timeout=10) as resp:
+                    if resp.getcode() == 200:
+                        return True
+            except Exception:
+                continue
+        logger.error(f"Failed to stop torrent {hashes} via API")
+        return False
+
+    def get_trackers(self, info_hash: str) -> List[Dict]:
+        """查询单个任务的 tracker 明细（含 status / msg，用于站点告警分诊）"""
+        url = f"{self.base_url}/torrents/trackers?" + urllib.parse.urlencode({"hash": info_hash})
+        req = urllib.request.Request(url)
+        try:
+            with self.opener.open(req, timeout=10) as resp:
+                return json.loads(resp.read().decode("utf-8")) or []
+        except Exception as e:
+            logger.error(f"Failed to fetch trackers of {info_hash} from {self.base_url}: {e}")
+            return []
+
+    def recheck_torrent(self, hashes: str) -> bool:
+        """重新校验任务数据"""
+        url = f"{self.base_url}/torrents/recheck"
         data = urllib.parse.urlencode({"hashes": hashes}).encode("utf-8")
         req = urllib.request.Request(url, data=data)
         try:
             with self.opener.open(req, timeout=10) as resp:
                 return resp.getcode() == 200
         except Exception as e:
-            logger.error(f"Failed to resume torrent {hashes}: {str(e)}")
+            logger.error(f"Failed to recheck torrent {hashes}: {str(e)}")
             return False
 
     def delete_torrent(self, hashes: str, delete_files: bool = False) -> bool:

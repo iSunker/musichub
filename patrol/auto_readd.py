@@ -72,9 +72,14 @@ class SeedAutoReadd:
             skip_checking=True,
             paused=False,
             tags=f"musichub,readd,{target_site}",
+            auto_tmm=False,
         )
         if not ok:
             return False, f"QBClient failed to add torrent {target_site} #{tid}"
+        logger.warning(
+            "SeedAutoReadd 直连 3010 注入，绕过发布期音乐池配对；"
+            "若该种需要交棒，请改走 PublisherEngine.readd_publish_with_keepalive_probe"
+        )
 
         # 3. 自反验保活轮询
         start_t = time.time()

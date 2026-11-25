@@ -7,6 +7,9 @@ services:
     restart: unless-stopped
     # 铁律：PT 直连与群晖 host 模式 (或与 qb 同 host 端口直接互通)
     network_mode: host
+    # 图床凭据仅存 NAS 本地 data/image_hosts.env（权限 600，禁止入库）
+    env_file:
+      - data/image_hosts.env
     environment:
       - TZ=Asia/Shanghai
       - PYTHONUNBUFFERED=1

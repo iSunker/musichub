@@ -58,10 +58,15 @@ class SpeedGovernor:
     ]
 
     HANDOFF_RATIO = 1.05       # 达标分享率阈值（可交棒）
-    COMPLETED_LIMIT_BPS = 51200 # 达标后保底保种速度 50 KB/s
-    MIN_ALLOC_BPS = 102400     # 活动种子最小分配带宽 100 KB/s
-    NEWCOMER_CAP_BPS = 102400  # 新种预热防抢占上限 100 KB/s
+    COMPLETED_LIMIT_BPS = 51200 # 达标后保底保种速度 50 KB/s（等交棒，不抢带宽）
+    NEWCOMER_CAP_BPS = 262144  # 新种预热防抢占上限 256 KB/s（旧值 100KB 会让新种永远跑不动）
+    FULL_SPEED_CAP_BPS = 4194304  # 全速巡航段单种上限 4 MiB/s：单种上限给足，靠 qB 全局 5MB 兜底
+    RAMP_CAP_BPS = 2097152     # 爬坡段单种上限 2 MiB/s
+    COOLDOWN_CAP_BPS = 1048576 # 减速/收尾段单种上限 1 MiB/s
     STABLE_UPLOAD_THRESHOLD_BPS = 51200 # 判定稳定上传的速率阈值 (50 KB/s)
+    PREF_ACTIVE_UPLOADS = 200  # 3010 上传并发槽：旧值 5 会把 200+ 种子压在 queuedUP 饿死带宽
+    PREF_CONNEC_PER_TORRENT = 8
+    PREF_UPLOADS_PER_TORRENT = 8
 
     def __init__(
         self,
@@ -113,6 +118,48 @@ class SpeedGovernor:
         except Exception as e:
             logger.warning(f"Failed to add tag {tag} to {info_hash[:8]}: {e}")
 
+    def set_upload_limit_bulk(self, hashes: List[str], limit_bps: int):
+        """批量设定多个种子的同一上传限速（qB 用 `|` 分隔，一次请求）"""
+        if not hashes:
+            return
+        try:
+            self._request("/api/v2/torrents/setUploadLimit",
+                          {"hashes": "|".join(hashes), "limit": limit_bps})
+        except Exception as e:
+            logger.warning(f"Failed to bulk set upload limit ({len(hashes)} torrents): {e}")
+
+    def ensure_queue_prefs(self, dry_run: bool = False) -> Dict[str, Any]:
+        """确保 3010 的上传并发槽与连接数不成为带宽瓶颈
+
+        实测：`max_active_uploads=5` 会把 200+ 个种子压在 `queuedUP`，即使整体
+        `up_limit=5MB/s`，也只有 5 个种能同时上传，总上传长期 1.4MB/s 吃不满。
+        """
+        try:
+            prefs = self._request("/api/v2/app/preferences") or {}
+        except Exception as e:
+            logger.warning(f"读取 3010 preferences 失败: {e}")
+            return {}
+
+        changes: Dict[str, Any] = {}
+        if int(prefs.get("max_active_uploads", 0)) < self.PREF_ACTIVE_UPLOADS:
+            changes["max_active_uploads"] = self.PREF_ACTIVE_UPLOADS
+        if int(prefs.get("max_connec_per_torrent", 0)) < self.PREF_CONNEC_PER_TORRENT:
+            changes["max_connec_per_torrent"] = self.PREF_CONNEC_PER_TORRENT
+        if int(prefs.get("max_uploads_per_torrent", 0)) < self.PREF_UPLOADS_PER_TORRENT:
+            changes["max_uploads_per_torrent"] = self.PREF_UPLOADS_PER_TORRENT
+
+        if not changes:
+            return {}
+        if dry_run:
+            return changes
+        try:
+            self._request("/api/v2/app/setPreferences", {"json": json.dumps(changes)})
+            logger.info(f"3010 队列参数已调整: {changes}")
+        except Exception as e:
+            logger.error(f"下发 3010 队列参数失败: {e}")
+            return {}
+        return changes
+
     def get_tier_and_weight(self, ratio: float) -> Tuple[float, str]:
         """根据当前分享率获取分配权重与阶梯描述"""
         if ratio >= self.HANDOFF_RATIO:
@@ -123,121 +170,65 @@ class SpeedGovernor:
         return 0.20, "预热兜底"
 
     def calculate_distribution(self, torrents: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-        """核心调速算法：带「防新种挤占+出种优先保护」的动态加权分配"""
+        """核心调速算法：按阶梯给「单种上限」，再由 qB 全局 5MB 做最终切分
+
+        旧实现的根本缺陷是拿「预留额度」直接扣减总预算：
+        42 个达标种×50KB + 206 个新种×100KB = 22MB 预约 >> 5MB 预算，
+        剩余带宽被钳到最小值，真正有 peer 的种拿不到上限，总上传长期只有 1.4MB/s。
+
+        新策略（三分法，不做总预算切分）：
+        - 达标种（ratio>=1.05，等交棒）：50 KB/s 保活，绝不抢带宽；
+        - 新种（ratio<0.05）：256 KB/s 上限，防瞬间抢占但不至于跑不动；
+        - 未达标活跃种（0.05<=ratio<1.05）：按阶梯给足单种上限（全速 4MB / 爬坡 2MB / 收尾 1MB），
+          由 qB 的全局 `up_limit=5MB` 负责公平分配——单种上限给足才不会成为瓶颈。
+        """
         decisions: Dict[str, Dict[str, Any]] = {}
-        
-        # 1. 筛选处于做种或上传生命周期的种子
+
         seeding_candidates = []
         for t in torrents:
             state = t.get("state", "").lower()
-            if state in ("pausedup", "stoppedup", "error", "missingfiles"):
+            # 暂停/停止/错误/校验中不参与调速（校验中限速无意义）
+            if state in ("pausedup", "stoppedup", "error", "missingfiles",
+                         "checkingup", "checkingresumedata"):
                 continue
             seeding_candidates.append(t)
 
         if not seeding_candidates:
             return decisions
 
-        # 2. 分类：达标待交棒 / 正在出种保护中 / 常规活跃阶段
-        active_candidates = []
-        protected_active = []
-        newcomers = []
-        
-        allocated_reserved_bw = 0
-
         for t in seeding_candidates:
             h = t.get("hash")
+            if not h:
+                continue
             ratio = float(t.get("ratio", 0.0))
-            upspeed = int(t.get("upspeed", 0))
             current_limit = int(t.get("up_limit", 0))
 
             if ratio >= self.HANDOFF_RATIO:
-                # 达标种子：限制在保底 50 KB/s
-                decisions[h] = {
-                    "name": t.get("name", ""),
-                    "ratio": ratio,
-                    "target_limit": self.COMPLETED_LIMIT_BPS,
-                    "current_limit": current_limit,
-                    "tier_desc": f"达标保底 (Ratio={ratio:.2f}>={self.HANDOFF_RATIO})",
-                    "weight": 0.0,
-                    "handoff_ready": True,
-                }
-                allocated_reserved_bw += self.COMPLETED_LIMIT_BPS
+                target = self.COMPLETED_LIMIT_BPS
+                desc = f"达标保底 (Ratio={ratio:.2f}>={self.HANDOFF_RATIO})"
+                handoff_ready = True
+            elif ratio < 0.05:
+                target = self.NEWCOMER_CAP_BPS
+                desc = f"预热起步 (上限 {target//1024}KB/s)"
+                handoff_ready = False
             else:
-                weight, desc = self.get_tier_and_weight(ratio)
-                item_info = {
-                    "hash": h,
-                    "name": t.get("name", ""),
-                    "ratio": ratio,
-                    "upspeed": upspeed,
-                    "current_limit": current_limit,
-                    "weight": weight,
-                    "tier_desc": desc,
-                }
-                
-                # 判断是否为「出种保护对象」：已经爬坡或全速，且正在稳定上传 (upspeed >= 50KB/s)
-                if ratio >= 0.05 and upspeed >= self.STABLE_UPLOAD_THRESHOLD_BPS:
-                    protected_active.append(item_info)
-                elif ratio < 0.05:
-                    newcomers.append(item_info)
+                weight, tier_desc = self.get_tier_and_weight(ratio)
+                if ratio < 0.20:
+                    target = self.RAMP_CAP_BPS
+                elif ratio < 0.80:
+                    target = self.FULL_SPEED_CAP_BPS
                 else:
-                    active_candidates.append(item_info)
+                    target = self.COOLDOWN_CAP_BPS
+                desc = f"{tier_desc} (上限 {target//1024}KB/s)"
+                handoff_ready = False
 
-        # 3. 执行「防抢占保护」带宽切分：
-        #    如果有正在全力出种的任务，必须给予优先权和保护份额
-        has_active_seeding = (len(protected_active) > 0)
-        
-        # 3.1 对新种（Ratio < 0.05）：若有活跃主力正在出种，限制其抢占带宽上限
-        newcomer_target_bw = self.NEWCOMER_CAP_BPS if has_active_seeding else self.MIN_ALLOC_BPS * 2
-        for nc in newcomers:
-            h = nc["hash"]
             decisions[h] = {
-                "name": nc["name"],
-                "ratio": nc["ratio"],
-                "target_limit": newcomer_target_bw,
-                "current_limit": nc["current_limit"],
-                "tier_desc": f"预热起步 (防抢占限速 {newcomer_target_bw//1024}KB/s)",
-                "weight": nc["weight"],
-                "handoff_ready": False,
-            }
-            allocated_reserved_bw += newcomer_target_bw
-
-        # 3.2 剩余带宽全量倾斜给「正在出种保护任务」与「常规活跃任务」
-        remaining_bw = max(102400, self.total_bandwidth - allocated_reserved_bw)
-        
-        main_candidates = protected_active + active_candidates
-        total_main_weight = 0.0
-        
-        # 保护任务权重加成：赋予保护任务 2.0x 动态加成，确保不失速
-        for item in main_candidates:
-            if item in protected_active:
-                item["effective_weight"] = item["weight"] * 2.0
-                item["is_protected"] = True
-            else:
-                item["effective_weight"] = item["weight"]
-                item["is_protected"] = False
-            total_main_weight += item["effective_weight"]
-
-        for item in main_candidates:
-            h = item["hash"]
-            ew = item["effective_weight"]
-            if total_main_weight > 0:
-                raw_limit = int(remaining_bw * (ew / total_main_weight))
-            else:
-                raw_limit = int(remaining_bw / len(main_candidates))
-
-            # 保护任务确保下限不低于 250 KB/s (在总预算允许下)
-            min_floor = 256000 if item["is_protected"] else self.MIN_ALLOC_BPS
-            target_limit = max(min_floor, raw_limit)
-            
-            p_tag = "【出种保护】" if item["is_protected"] else ""
-            decisions[h] = {
-                "name": item["name"],
-                "ratio": item["ratio"],
-                "target_limit": target_limit,
-                "current_limit": item["current_limit"],
-                "tier_desc": f"{p_tag}{item['tier_desc']} (动态限速 {target_limit//1024}KB/s)",
-                "weight": ew,
-                "handoff_ready": False,
+                "name": t.get("name", ""),
+                "ratio": ratio,
+                "target_limit": target,
+                "current_limit": current_limit,
+                "tier_desc": desc,
+                "handoff_ready": handoff_ready,
             }
 
         return decisions
@@ -251,22 +242,29 @@ class SpeedGovernor:
         decisions = self.calculate_distribution(torrents)
         adjusted_count = 0
         handoff_tagged_count = 0
+        # 按 target_limit 分组批量下发，避免 300+ 个种子逐个发请求拖慢 7s 节拍
+        limit_groups: Dict[int, List[str]] = {}
+        handoff_hashes: List[str] = []
 
         for h, plan in decisions.items():
             target_limit = plan["target_limit"]
             curr_limit = plan["current_limit"]
-            handoff_ready = plan["handoff_ready"]
 
-            diff = abs(target_limit - curr_limit)
-            if curr_limit == 0 or diff >= 51200:
-                adjusted_count += 1
-                if not dry_run:
-                    self.set_torrent_upload_limit(h, target_limit)
+            # 上限变化 >= 50KB/s 才下发（避免抖动期反复写入）
+            if curr_limit == 0 or abs(target_limit - curr_limit) >= 51200:
+                limit_groups.setdefault(target_limit, []).append(h)
 
-            if handoff_ready and self.manage_handoff_tag:
-                handoff_tagged_count += 1
-                if not dry_run:
-                    self.add_torrent_tag(h, "handoff_ready")
+            if plan["handoff_ready"] and self.manage_handoff_tag:
+                handoff_hashes.append(h)
+
+        adjusted_count = sum(len(v) for v in limit_groups.values())
+        handoff_tagged_count = len(handoff_hashes)
+
+        if not dry_run:
+            for target_limit, hashes in limit_groups.items():
+                self.set_upload_limit_bulk(hashes, target_limit)
+            for h in handoff_hashes:
+                self.add_torrent_tag(h, "handoff_ready")
 
         return {
             "status": "success",

@@ -31,18 +31,21 @@ class CanonicalMusicItem:
     format: str = "FLAC"             # FLAC, APE, WAV, DSD
     medium: str = "CD"              # CD, Vinyl, WEB-DL, Blu-ray Audio
     standard: str = "Lossless"      # Lossless, Hi-Res (>=24bit or >=88.2kHz)
+    origin_title: str = ""          # 母种原始标题（未做规范化清洗的源标题，用于通用站点还原原种风格）
     
     # 扩展属性
     edition: Optional[str] = None   # First Edition, Remaster, Deluxe
     catalog_number: Optional[str] = None
     barcode: Optional[str] = None
     genre: List[str] = field(default_factory=list)
+    tags: List[str] = field(default_factory=list)
     description: str = ""
     cover_url: str = ""
     
     # 抓轨与合规信息
     has_log: bool = False
     log_score: int = 0
+    log_text: str = ""              # 抓轨日志原文（源种详情页 divnfo 提取，发种简介折叠块用）
     has_cue: bool = False
     is_split_track: bool = True     # True: 分轨, False: 整轨
     

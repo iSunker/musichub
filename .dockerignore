@@ -12,4 +12,6 @@ scratch/
 tests/
 *.log
 *.tar
+data/
+*.db
 .DS_Store

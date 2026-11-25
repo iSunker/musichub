@@ -28,6 +28,8 @@ MANIFEST
 
 # Virtual Environments
 .env
+.env.*
+!.env.example
 .venv
 env/
 venv/
@@ -45,17 +47,21 @@ venv.bak/
 Thumbs.db
 
 # Project runtime data, DBs, and scratch torrents
-data/*.db
-data/*.db-journal
-data/*.db-wal
-data/*.db-shm
+*.db
+*.db-*
+*.sqlite*
+*.torrent
+data/*
+!data/torrents/
 data/torrents/*
 !data/torrents/.gitkeep
+!data/covers/
 data/covers/*
 !data/covers/.gitkeep
+!data/raw_html/
 data/raw_html/*
 !data/raw_html/.gitkeep
-data/*.log
+*.log
 
 # Scratch scripts and temporary test downloads
 scratch/

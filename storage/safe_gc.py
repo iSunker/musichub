@@ -29,6 +29,11 @@ class SafeGarbageCollector:
             "/volume1/video/download/music/music1",
             "/volume1/video/download/music/music2",
             "/volume1/video/download/music/music3",
+            "/volume1/video/download/music/music_pool_1",
+            "/volume1/video/download/music/music_pool_2",
+            "/volume1/video/download/music/music_pool_3",
+            "/volume1/video/download/music/music_pool_4",
+            "/volume1/video/download/music/music_pool_5",
         ]
 
     def is_safe_target(self, target_path: str) -> Tuple[bool, str]:
